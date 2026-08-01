@@ -1,0 +1,87 @@
+
+# ============================================================
+# 统一路由定义 (routes)
+# ============================================================
+
+routes:
+
+  # ==========================================================
+  # Proxy 路由 — 反向代理到 fakesvc
+  # ==========================================================
+
+  # REST API — 用户 CRUD（需 JWT 认证，BFF 注入 Bearer token）
+  - path: "/api/users"
+    methods: ["GET", "POST", "PUT", "DELETE"]
+    auth_required: true
+    type: proxy
+    config:
+      upstream: "http://localhost:9091"
+
+  # REST API — 订单查询（需 JWT 认证）
+  - path: "/api/orders"
+    methods: ["GET", "POST", "DELETE"]
+    auth_required: true
+    type: proxy
+    config:
+      upstream: "http://localhost:9091"
+
+  # SSE 端点 — 流式透传
+  - path: "/sse"
+    methods: ["GET"]
+    auth_required: false
+    type: proxy
+    config:
+      upstream: "http://localhost:9091"
+      proxy_mode: sse
+
+  # WebSocket 端点 — 双向隧道
+  - path: "/ws"
+    methods: ["GET"]
+    auth_required: false
+    type: proxy
+    config:
+      upstream: "http://localhost:9091"
+      proxy_mode: websocket
+
+  # ==========================================================
+  # Pipeline 路由 — DAG 编排
+  # ==========================================================
+
+  # echo: 快速验证 pipeline 引擎是否可用
+  - path: "/api/echo"
+    methods: ["GET"]
+    auth_required: false
+    type: pipeline
+    config:
+      pipeline: echo
+
+  # dashboard: 聚合用户信息 + 订单列表
+  # userId 从 OIDC session 的 sub 字段自动注入，无需调用方传参
+  - path: "/api/dashboard"
+    methods: ["GET"]
+    auth_required: true
+    type: pipeline
+    config:
+      pipeline: dashboard
+    input_mapping:
+      from_session:
+        userId: sub
+        access_token: access_token
+    output_mapping:
+      pick: ["user", "orders", "generated_at"]
+      wrap: data
+
+  # ==========================================================
+  # Static 路由 — 固定响应
+  # ==========================================================
+
+  - path: "/api/health"
+    methods: ["GET"]
+    auth_required: false
+    type: static
+    config:
+      status: 200
+      body:
+        status: ok
+        version: "0.1.0"
+

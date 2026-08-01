@@ -1,0 +1,250 @@
+//! 反向代理：按 routes.yaml 的 path 前缀转发到 upstream，注入 Bearer 令牌，带熔断。
+//!
+//! 支持三种代理模式：
+//! - "http": 一次性请求-响应（默认，现有行为）
+//! - "sse": 流式透传 SSE（逐 chunk relay）
+//! - "websocket": 交由 business.rs 的 WS upgrade handler 处理
+//! - "auto": 根据请求头自动检测（Upgrade: websocket → WS，否则 → HTTP）
+//!
+//! 令牌刷新：上游返回 401 时自动尝试刷新 access token 并重试一次。
+
+use crate::config::RouteDef;
+use crate::oidc::handlers::{current_access_token, current_tokens, force_refresh};
+use crate::server::sse_proxy;
+use crate::state::AppState;
+use crate::utils::AppError;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::response::Response;
+use tower_sessions::Session;
+
+/// 获取 Bearer token（若路由需要认证）。
+async fn resolve_auth_token(
+    session: &Session,
+    auth_required: bool,
+) -> Result<Option<String>, AppError> {
+    if auth_required {
+        let token = current_access_token(session)
+            .await
+            .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
+        Ok(Some(token))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 使用 RouteDef 的转发（统一路由 v2）—— 按 proxy_mode 分发。
+pub async fn forward_request(
+    state: &AppState,
+    session: &Session,
+    route: &RouteDef,
+    upstream: &str,
+    req: Request<Body>,
+) -> Result<Response, AppError> {
+    let upstream = upstream.trim_end_matches('/');
+
+    // 熔断检查
+    if !state.breakers.allow(upstream).await {
+        metrics::counter!("bff_proxy_rejected_total", "upstream" => upstream.to_string())
+            .increment(1);
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("上游熔断中: {}", upstream),
+        ));
+    }
+
+    let path = req.uri().path();
+    let suffix = if route.config.strip_prefix {
+        path.strip_prefix(&route.path).unwrap_or("")
+    } else {
+        path
+    };
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
+    let url = format!("{}{}{}", upstream, suffix, query);
+
+    let method = req.method().clone();
+    // 提取请求 ID 用于传播到上游
+    let request_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
+
+    let auth_token = resolve_auth_token(session, route.auth_required).await?;
+
+    let proxy_mode = route.config.proxy_mode.as_str();
+
+    match proxy_mode {
+        "sse" => {
+            let result = sse_proxy::sse_stream(
+                &state.http,
+                &url,
+                reqwest::Method::from_bytes(method.as_str().as_bytes())
+                    .map_err(|e| AppError::bad_request(format!("非法方法: {}", e)))?,
+                body_bytes.to_vec(),
+                auth_token,
+                request_id.as_deref(),
+            )
+            .await;
+
+            match &result {
+                Ok(_) => state.breakers.record_success(upstream).await,
+                Err(_) => {
+                    state.breakers.record_failure(upstream).await;
+                    metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string())
+                        .increment(1);
+                }
+            }
+            result
+        }
+        // "http" | "auto" | "" | 其他 → 标准一次性 HTTP 代理（含 401 刷新重试）
+        _ => {
+            let method_c = method.clone();
+            let body_c = body_bytes.to_vec();
+            let auth_c = auth_token.clone();
+
+            let resp = proxy_http(
+                state,
+                upstream,
+                &url,
+                method_c,
+                body_c,
+                auth_c,
+                request_id.as_deref(),
+            )
+            .await?;
+
+            // 上游返回 401 且请求携带了 token → 尝试刷新并重试一次
+            if resp.status() == StatusCode::UNAUTHORIZED && auth_token.is_some() {
+                if let Some(tokens) = current_tokens(session).await {
+                    if force_refresh(state, session, &tokens).await.is_ok() {
+                        let new_token = current_access_token(session).await;
+                        let retry_resp = proxy_http(
+                            state,
+                            upstream,
+                            &url,
+                            method,
+                            body_bytes.to_vec(),
+                            new_token,
+                            request_id.as_deref(),
+                        )
+                        .await?;
+                        if retry_resp.status() != StatusCode::UNAUTHORIZED {
+                            return Ok(retry_resp);
+                        }
+                    }
+                }
+            }
+            Ok(resp)
+        }
+    }
+}
+
+/// 标准 HTTP 代理：一次性 reqwest 请求-响应。
+async fn proxy_http(
+    state: &AppState,
+    upstream: &str,
+    url: &str,
+    method: axum::http::Method,
+    body: Vec<u8>,
+    auth_token: Option<String>,
+    request_id: Option<&str>,
+) -> Result<Response, AppError> {
+    let cfg = state.cfg();
+    let max_retries = cfg.http_client.retry_max_attempts;
+    let backoff = cfg.http_client.retry_backoff;
+    let is_idempotent =
+        method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+
+    let mut last_err = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 && is_idempotent {
+            let delay = backoff * 2u32.pow(attempt - 1);
+            tracing::debug!(attempt, ?delay, upstream, "代理重试");
+            tokio::time::sleep(delay).await;
+        }
+
+        let mut out_req = state.http.request(
+            reqwest::Method::from_bytes(method.as_str().as_bytes())
+                .map_err(|e| AppError::bad_request(format!("非法方法: {}", e)))?,
+            url,
+        );
+
+        if let Some(token) = &auth_token {
+            out_req = out_req.bearer_auth(token.clone());
+        }
+        if let Some(rid) = request_id {
+            out_req = out_req.header("x-request-id", rid);
+        }
+        if !body.is_empty() {
+            out_req = out_req.body(body.clone());
+        }
+
+        let result = out_req.send().await;
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_server_error() {
+                    state.breakers.record_failure(upstream).await;
+                    // 仅对幂等请求在服务端错误时重试
+                    if is_idempotent && attempt < max_retries {
+                        last_err = Some(AppError::bad_gateway(format!(
+                            "上游 {} 返回 {}（将重试）",
+                            upstream,
+                            status.as_u16()
+                        )));
+                        continue;
+                    }
+                } else {
+                    state.breakers.record_success(upstream).await;
+                }
+                let mut builder = Response::builder().status(status.as_u16());
+                for (k, v) in resp.headers() {
+                    if matches!(
+                        k.as_str(),
+                        "connection" | "transfer-encoding" | "keep-alive" | "upgrade"
+                    ) {
+                        continue;
+                    }
+                    if let (Ok(name), Ok(val)) = (
+                        k.as_str().parse::<axum::http::HeaderName>(),
+                        axum::http::HeaderValue::from_bytes(v.as_bytes()),
+                    ) {
+                        builder = builder.header(name, val);
+                    }
+                }
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::bad_gateway(e.to_string()))?;
+                return builder
+                    .body(Body::from(bytes.to_vec()))
+                    .map_err(|e| AppError::internal(e.to_string()));
+            }
+            Err(e) => {
+                state.breakers.record_failure(upstream).await;
+                if is_idempotent && attempt < max_retries {
+                    last_err = Some(AppError::bad_gateway(format!(
+                        "上游调用失败: {}（将重试）",
+                        e
+                    )));
+                    continue;
+                }
+                last_err = Some(AppError::bad_gateway(format!("上游调用失败: {}", e)));
+            }
+        }
+    }
+
+    // 所有重试均已耗尽
+    metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string())
+        .increment(1);
+    Err(last_err.unwrap_or_else(|| AppError::bad_gateway("未知代理错误")))
+}

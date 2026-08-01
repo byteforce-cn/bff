@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/byteforce-cn/bff/security/policy
+    about: 请勿公开提交安全漏洞，请通过 SECURITY.md 中的渠道私下报告。

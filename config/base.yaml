@@ -1,0 +1,109 @@
+server:
+  business_port: 8080
+  admin_port: 8443
+
+# 加密密钥配置（AES-256-GCM / Argon2id）
+# ${BFF_SECRET:default} = 优先读环境变量 BFF_SECRET，未设置用 default
+bff_secret:
+  secret: ${BFF_SECRET:change-me-in-production}
+  salt: ${BFF_SECRET_SALT:default-salt-at-least-16-bytes}
+
+provider:
+  session_store: memory         # memory | redis
+  cache: memory                 # memory | redis
+  lock: memory                  # memory | redis
+  redis_url: ""
+
+session:
+  cookie_name: "BFF_SESSION"
+  secure: true                  # P1-3: 默认安全，LB 做 TLS 终止
+  http_only: true
+  same_site: "Strict"             # P1-1: CSRF 保护
+
+admin:
+  ip_whitelist:
+    - "127.0.0.1"
+    - "::1"
+    - "10.0.0.0/8"
+  auth_mode: token
+  auth_token: "changeme"
+  enable_test_endpoints: true
+  test_endpoint_rate_limit: 10
+
+spa:
+  dir: "frontend/dist"
+
+oidc:
+  providers: []
+
+# 令牌刷新中间件：跳过刷新检查的路径前缀
+token_refresh:
+  skip_prefixes:
+    - "/login"
+    - "/auth/callback"
+    - "/logout"
+    - "/live"
+    - "/ready"
+    - "/assets"
+    - "/ws"
+    - "/sse"
+
+# HTTP 客户端配置
+http_client:
+  connect_timeout: "5s"
+  timeout: null               # 全局超时，null = 不设置
+  pool_max_idle_per_host: 32
+  pool_idle_timeout: "90s"
+  retry_max_attempts: 0       # 代理重试次数（0 = 不重试，仅幂等请求）
+  retry_backoff: "100ms"      # 重试初始退避
+  # mTLS（可选）
+  # client_cert_path: "/etc/bff/certs/client.pem"
+  # client_key_path: "/etc/bff/certs/client-key.pem"
+  # ca_cert_path: "/etc/bff/certs/ca.pem"
+
+# 全局限流
+rate_limit:
+  per_second: 50
+  burst_size: 500
+
+# CORS 跨域配置
+cors:
+  permissive: false           # true = 允许所有来源（仅开发环境）
+  allowed_origins: []         # 如 ["https://app.example.com"]
+
+# 安全响应头
+security_headers:
+  content_security_policy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+  x_frame_options: "DENY"
+  x_content_type_options: "nosniff"
+  hsts_max_age: 0             # 0 = 不发送 HSTS（LB 处理 TLS）
+  referrer_policy: "strict-origin-when-cross-origin"
+
+# 请求体大小限制
+body_limit:
+  max_bytes: 10485760         # 10 MiB
+
+# 熔断器
+circuit_breaker:
+  failure_threshold: 5
+  open_duration: "30s"
+
+# 脚本引擎
+scripting:
+  max_duration: "2s"
+
+# 健康检查（就绪探针 / 存活探针）
+health:
+  # 就绪检查中需探测的上游列表（显式声明）
+  # 如果为空，则自动从 routes 中提取所有 proxy 类路由的 upstream 去重
+  upstreams:
+    - "http://localhost:9091"
+  # 每次探测的超时时间
+  probe_timeout: "2s"
+  # 允许部分上游不可达时仍返回 ready（true = degraded 模式仍 200）
+  allow_degraded: false
+  # 探测路径（默认 "/"）
+  probe_path: "/"
+
+# pipelines 从 config/pipelines/*.yaml 自动加载
+# routes 从 config/routes/routes.yaml 加载

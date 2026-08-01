@@ -1,0 +1,9 @@
+# 生产环境覆盖（BFF_ENV=prod 时加载）
+# 注意：POC 仅实现 memory provider，redis 模式为后续扩展点
+provider:
+  session_store: redis
+  cache: redis
+  lock: redis
+  redis_url: "redis://bff-redis:6379"
+session:
+  secure: true

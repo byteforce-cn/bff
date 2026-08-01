@@ -1,0 +1,49 @@
+# ============================================================
+# Pipeline 定义
+# 每个顶层 key = pipeline 名称，通过 routes_v2 中的 config.pipeline 引用
+# ============================================================
+
+# echo: 验证 pipeline 引擎 + 脚本执行能力
+echo:
+  strategy:
+    timeout: 5s
+    error_handling: fail_fast
+  steps:
+    - id: greet
+      type: script
+      config:
+        script: |
+          #{ message: "hello from pipeline echo", timestamp: now(), params: inputs }
+
+# dashboard: 聚合用户信息 + 订单列表
+# 依赖 from_session.userId → sub，由路由层自动注入
+dashboard:
+  strategy:
+    timeout: 10s
+    error_handling: fail_fast
+  steps:
+    - id: fetch_user
+      type: http_request
+      config:
+        url: "http://localhost:9091/api/users/by-name/{userId}"
+        method: GET
+        headers:
+          Authorization: "Bearer {access_token}"
+        timeout: 3s
+        cache_ttl: 60s
+    - id: fetch_orders
+      type: http_request
+      config:
+        url: "http://localhost:9091/api/orders?userId={userId}"
+        method: GET
+        headers:
+          Authorization: "Bearer {access_token}"
+        timeout: 3s
+    - id: merge
+      type: script
+      depends_on: [fetch_user, fetch_orders]
+      config:
+        script: |
+          let user = inputs["fetch_user"].body;
+          let orders = inputs["fetch_orders"].body;
+          #{ user: user, orders: orders, generated_at: now() }

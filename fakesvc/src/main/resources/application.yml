@@ -1,0 +1,23 @@
+server:
+  port: 9091
+
+spring:
+  application:
+    name: fakesvc
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # iam 的 issuer URI，fakesvc 通过它发现 JWKS 端点来验证 token
+          issuer-uri: http://localhost:9090
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.example.fakesvc: DEBUG
+    org.springframework.security: DEBUG

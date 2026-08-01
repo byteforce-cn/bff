@@ -1,0 +1,9 @@
+# OIDC 提供者定义
+oidc:
+  providers:
+    - id: iam
+      display_name: "IAM (Test OIDC Provider)"
+      issuer_url: "http://localhost:9090"
+      client_id: "bff"
+      client_secret: "bff-secret"
+      scopes: ["openid", "profile", "email"]

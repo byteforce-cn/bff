@@ -1,0 +1,33 @@
+# 统一行尾 / 文本属性
+* text=auto eol=lf
+
+# 源码
+*.rs   text eol=lf
+*.java text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.jsx  text eol=lf
+*.json text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.toml text eol=lf
+*.sh   text eol=lf
+*.rhai text eol=lf
+
+# 锁文件：提交但标记为生成，避免 GitHub 语言统计干扰
+pnpm-lock.yaml linguist-generated=true
+Cargo.lock     linguist-generated=true
+
+# 二进制文件
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.jar  binary
+*.class binary

@@ -1,0 +1,60 @@
+name: Bug 报告
+description: 报告一个可复现的缺陷
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间报告问题！请尽量提供完整信息以便复现。
+  - type: textarea
+    id: describe
+    attributes:
+      label: 问题描述
+      description: 发生了什么？预期行为是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 尽量给出最小可复现步骤（请求、配置等）。
+      placeholder: |
+        1. 启动 bff (cargo run)
+        2. 调用 /pipeline/xxx
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: 相关配置
+      description: 涉及到的 config/*.yaml 片段（请脱敏：去掉 token / secret）。
+    render: yaml
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 分支 / tag / commit，例如 main@abc1234 或 v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响模块
+      options:
+        - OIDC 登录/刷新
+        - 服务编排 (pipeline/DAG)
+        - 反向代理
+        - 管理 API / Admin UI
+        - 脚本引擎 (Rhai)
+        - 配置加载
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 相关日志片段（脱敏处理）。
+      render: shell

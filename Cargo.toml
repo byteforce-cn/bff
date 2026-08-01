@@ -1,0 +1,46 @@
+[package]
+name = "bff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip", "limit", "request-id"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+figment = { version = "0.10", features = ["yaml", "env"] }
+async-trait = "0.1"
+moka = { version = "0.12", features = ["future"] }
+tower-sessions = "0.12"
+openidconnect = { version = "3.5", default-features = false, features = ["reqwest"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
+petgraph = "0.6"
+rhai = { version = "1.20", features = ["serde"] }
+arc-swap = "1.7"
+rust-embed = "8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+aes-gcm = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tower_governor = "0.4"
+ipnet = "2"
+url = "2"
+base64 = "0.22"
+rand = "0.8"
+argon2 = "0.5"
+anyhow = "1"
+thiserror = "1"
+futures = "0.3"
+humantime-serde = "1"
+humantime = "1"
+percent-encoding = "2"
+tokio-tungstenite = { version = "0.21", features = ["connect"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+reqwest = { version = "0.11", features = ["cookies", "json"] }
