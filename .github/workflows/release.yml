@@ -23,6 +23,20 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Build admin-ui (embedded into binary)
+        working-directory: admin-ui
+        run: pnpm install --frozen-lockfile && pnpm build
+
       - name: Build release
         run: cargo build --release --locked
 
