@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>17</java.version>
-        <spring-auth-server.version>1.4.5</spring-auth-server.version>
+        <spring-auth-server.version>7.1.0</spring-auth-server.version>
     </properties>
 
     <dependencies>
