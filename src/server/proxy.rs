@@ -19,17 +19,25 @@ use axum::response::Response;
 use tower_sessions::Session;
 
 /// 获取 Bearer token（若路由需要认证）。
+///
+/// - 未配置 `token_exchange`：现状（直接注入会话 access token）；
+/// - 配置 `token_exchange`：经 RFC 8693 交换面向上游资源的 token（含缓存与失败语义）。
 async fn resolve_auth_token(
+    state: &AppState,
     session: &Session,
-    auth_required: bool,
+    route: &RouteDef,
 ) -> Result<Option<String>, AppError> {
-    if auth_required {
+    if !route.auth_required {
+        return Ok(None);
+    }
+    if let Some(te) = &route.config.token_exchange {
+        let result = crate::server::token_exchange::resolve(state, session, te).await?;
+        Ok(Some(result.access_token))
+    } else {
         let token = current_access_token(session)
             .await
             .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
         Ok(Some(token))
-    } else {
-        Ok(None)
     }
 }
 
@@ -77,7 +85,7 @@ pub async fn forward_request(
         .await
         .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
 
-    let auth_token = resolve_auth_token(session, route.auth_required).await?;
+    let auth_token = resolve_auth_token(state, session, route).await?;
 
     let proxy_mode = route.config.proxy_mode.as_str();
 
@@ -121,23 +129,27 @@ pub async fn forward_request(
             )
             .await?;
 
-            // 上游返回 401 且请求携带了 token → 尝试刷新并重试一次
+            // 上游返回 401 且请求携带了 token → 刷新会话 token 后重试一次。
+            // 必须复用 resolve_auth_token：exchange 路由会因 subject token 指纹变化
+            // 自动重交换（§5.3/§6.3），普通路由则重新注入新的会话 access token。
             if resp.status() == StatusCode::UNAUTHORIZED && auth_token.is_some() {
                 if let Some(tokens) = current_tokens(session).await {
                     if force_refresh(state, session, &tokens).await.is_ok() {
-                        let new_token = current_access_token(session).await;
-                        let retry_resp = proxy_http(
-                            state,
-                            upstream,
-                            &url,
-                            method,
-                            body_bytes.to_vec(),
-                            new_token,
-                            request_id.as_deref(),
-                        )
-                        .await?;
-                        if retry_resp.status() != StatusCode::UNAUTHORIZED {
-                            return Ok(retry_resp);
+                        if let Ok(Some(new_token)) = resolve_auth_token(state, session, route).await
+                        {
+                            let retry_resp = proxy_http(
+                                state,
+                                upstream,
+                                &url,
+                                method,
+                                body_bytes.to_vec(),
+                                Some(new_token),
+                                request_id.as_deref(),
+                            )
+                            .await?;
+                            if retry_resp.status() != StatusCode::UNAUTHORIZED {
+                                return Ok(retry_resp);
+                            }
                         }
                     }
                 }
