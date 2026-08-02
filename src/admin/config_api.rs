@@ -28,8 +28,10 @@ pub async fn import_config(
     body: Bytes,
 ) -> Result<Response, AppError> {
     let yaml = extract_yaml(&headers, body).await?;
-    let cfg: AppConfig = serde_yaml::from_str(&yaml)
+    let mut cfg: AppConfig = serde_yaml::from_str(&yaml)
         .map_err(|e| AppError::unprocessable(format!("配置解析失败: {}", e)))?;
+    // 识别 `***` 哨兵并跳过覆盖（保留当前已注入的环境值，§4.3）
+    cfg.merge_sensitive_secrets(&state.cfg());
     cfg.validate()
         .map_err(|e| AppError::unprocessable(format!("配置校验失败: {}", e)))?;
     state

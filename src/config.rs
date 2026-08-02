@@ -680,6 +680,100 @@ fn default_proxy_mode() -> String {
     "http".into()
 }
 
+/// 配置导出时用于替换敏感字段的哨兵值（导入时识别并跳过覆盖）。
+pub const SECRET_SENTINEL: &str = "***";
+
+fn default_subject_token_type() -> String {
+    "urn:ietf:params:oauth:token-type:access_token".into()
+}
+
+fn default_exchange_cache_ttl() -> Duration {
+    Duration::from_secs(30)
+}
+
+/// RFC 8693 Token Exchange 客户端认证方式（二选一）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenExchangeAuthMethod {
+    /// `Authorization: Basic base64(client_id:client_secret)`（默认，推荐）
+    #[default]
+    ClientSecretBasic,
+    /// form 中携带 `client_id` + `client_secret`
+    ClientSecretPost,
+}
+
+/// 代理路由的 RFC 8693 Token Exchange 配置段（可选）。
+///
+/// 启用后：以会话 access token 为 `subject_token` 向 `token_endpoint` 交换
+/// 面向上游资源的 access token，并作为 `Authorization: Bearer` 注入代理请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenExchangeConfig {
+    /// 授权服务器 token endpoint；缺省回退会话 provider discovery 的 token endpoint（§4.4）
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    /// 交换客户端标识（必填）
+    #[serde(default)]
+    pub client_id: String,
+    /// 交换客户端密钥，支持 `${ENV:default}` 环境变量注入（导出时打码）
+    #[serde(default, deserialize_with = "deserialize_env_or_default")]
+    pub client_secret: String,
+    /// 客户端认证方式（默认 `client_secret_basic`）
+    #[serde(default)]
+    pub client_auth_method: TokenExchangeAuthMethod,
+    /// subject token 类型 URN（默认 access_token）
+    #[serde(default = "default_subject_token_type")]
+    pub subject_token_type: String,
+    /// 请求的 audience（RFC 8693，可重复）
+    #[serde(default)]
+    pub audience: Vec<String>,
+    /// 交换后收窄 scope（空格分隔，可选）
+    #[serde(default)]
+    pub scope: String,
+    /// 期望返回的 token 类型 URN（默认 access_token）
+    #[serde(default = "default_subject_token_type")]
+    pub requested_token_type: String,
+    /// 委托场景预留（本期仅占位，无 actor_token 值来源）
+    #[serde(default)]
+    pub actor_token_type: String,
+    /// 交换结果缓存时长（实际受 `expires_in` 与后端 TTL 上限约束，§6.2）
+    #[serde(default = "default_exchange_cache_ttl", with = "humantime_serde")]
+    pub cache_ttl: Duration,
+}
+
+impl Default for TokenExchangeConfig {
+    fn default() -> Self {
+        Self {
+            token_endpoint: None,
+            client_id: String::new(),
+            client_secret: String::new(),
+            client_auth_method: TokenExchangeAuthMethod::default(),
+            subject_token_type: default_subject_token_type(),
+            audience: Vec::new(),
+            scope: String::new(),
+            requested_token_type: default_subject_token_type(),
+            actor_token_type: String::new(),
+            cache_ttl: default_exchange_cache_ttl(),
+        }
+    }
+}
+
+impl TokenExchangeConfig {
+    /// 缓存键的配置指纹（§6.1）：`token_endpoint | client_id | audience | scope | requested_token_type`。
+    pub fn fingerprint(&self) -> String {
+        let mut s = String::new();
+        s.push_str(self.token_endpoint.as_deref().unwrap_or(""));
+        s.push('|');
+        s.push_str(&self.client_id);
+        s.push('|');
+        s.push_str(&self.audience.join(","));
+        s.push('|');
+        s.push_str(&self.scope);
+        s.push('|');
+        s.push_str(&self.requested_token_type);
+        s
+    }
+}
+
 /// 路由定义（统一模型）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteDef {
@@ -744,6 +838,11 @@ pub struct RouteTypeConfig {
     /// - auto: 自动检测（根据 Upgrade/Content-Type）
     #[serde(default = "default_proxy_mode")]
     pub proxy_mode: String,
+
+    /// RFC 8693 Token Exchange（代理上游认证的前置交换，可选）。
+    /// 启用后以会话 access token 交换面向上游资源的 token 再注入代理请求。
+    #[serde(default)]
+    pub token_exchange: Option<TokenExchangeConfig>,
 
     // ---- Pipeline 专属 ----
     /// 引用 pipeline 名称（指向 pipelines 注册表）
@@ -969,6 +1068,67 @@ impl AppConfig {
                     );
                 }
             }
+
+            // Token Exchange 校验（§4.4）
+            if let Some(te) = &route.config.token_exchange {
+                if let Some(ep) = &te.token_endpoint {
+                    anyhow::ensure!(
+                        url::Url::parse(ep).is_ok(),
+                        "routes[{}] token_exchange.token_endpoint URL 非法: {}",
+                        i,
+                        ep
+                    );
+                }
+                anyhow::ensure!(
+                    !te.client_id.is_empty(),
+                    "routes[{}] token_exchange.client_id 不能为空",
+                    i
+                );
+                anyhow::ensure!(
+                    te.cache_ttl > Duration::ZERO,
+                    "routes[{}] token_exchange.cache_ttl 必须 > 0",
+                    i
+                );
+                for (label, val) in [
+                    ("subject_token_type", &te.subject_token_type),
+                    ("requested_token_type", &te.requested_token_type),
+                ] {
+                    anyhow::ensure!(
+                        val.starts_with("urn:ietf:params:oauth:token-type:"),
+                        "routes[{}] token_exchange.{} 必须为合法的 token-type URN 前缀: {}",
+                        i,
+                        label,
+                        val
+                    );
+                }
+                // 交换以会话 access token 为 subject_token，必须开启认证
+                anyhow::ensure!(
+                    route.auth_required,
+                    "routes[{}] 配置 token_exchange 要求 auth_required: true",
+                    i
+                );
+                // WS 路径本期不执行交换（§5.4），仅告警
+                if route.config.proxy_mode == "websocket" {
+                    tracing::warn!(
+                        "routes[{}] WebSocket 路由上的 token_exchange 本期不生效（保持直接注入会话 token）",
+                        i
+                    );
+                }
+                // 无 audience/scope 时交换无收窄效果，仅告警
+                if te.audience.is_empty() && te.scope.is_empty() {
+                    tracing::warn!(
+                        "routes[{}] token_exchange 未配置 audience/scope，交换无收窄效果",
+                        i
+                    );
+                }
+                // actor_token 委托为设计预留：本期无值来源，配置后不生效（§4.2），仅告警
+                if !te.actor_token_type.is_empty() {
+                    tracing::warn!(
+                        "routes[{}] token_exchange.actor_token_type 为预留字段，本期不生效",
+                        i
+                    );
+                }
+            }
         }
 
         // 熔断器校验
@@ -1006,17 +1166,50 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 脱敏副本：隐藏 client_secret 与管理 token，用于导出。
+    /// 脱敏副本：隐藏 client_secret、token_exchange.client_secret 与管理 token，用于导出。
     pub fn sanitized(&self) -> Self {
         let mut c = self.clone();
         for p in &mut c.oidc.providers {
             if !p.client_secret.is_empty() {
-                p.client_secret = "***".into();
+                p.client_secret = SECRET_SENTINEL.into();
             }
         }
         if !c.admin.auth_token.is_empty() {
-            c.admin.auth_token = "***".into();
+            c.admin.auth_token = SECRET_SENTINEL.into();
+        }
+        for r in &mut c.routes {
+            if let Some(te) = &mut r.config.token_exchange {
+                if !te.client_secret.is_empty() {
+                    te.client_secret = SECRET_SENTINEL.into();
+                }
+            }
         }
         c
+    }
+
+    /// 导入时合并敏感信息：识别 `***` 哨兵并跳过覆盖（保留当前已注入的环境值）。
+    ///
+    /// 规则（§4.3）：导入配置中 `token_exchange.client_secret == SECRET_SENTINEL` 时，
+    /// 从现有配置中按同 path 路由找回真实值并回填，避免导出-导入回环破坏密钥。
+    pub fn merge_sensitive_secrets(&mut self, existing: &AppConfig) {
+        for route in &mut self.routes {
+            let Some(te) = &mut route.config.token_exchange else {
+                continue;
+            };
+            if te.client_secret != SECRET_SENTINEL {
+                continue;
+            }
+            if let Some(ex_route) = existing
+                .routes
+                .iter()
+                .find(|r| r.path == route.path && r.config.token_exchange.is_some())
+            {
+                if let Some(ex_te) = &ex_route.config.token_exchange {
+                    if ex_te.client_secret != SECRET_SENTINEL {
+                        te.client_secret = ex_te.client_secret.clone();
+                    }
+                }
+            }
+        }
     }
 }

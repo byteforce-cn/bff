@@ -43,6 +43,38 @@ routes:
       upstream: "http://localhost:9091"
       proxy_mode: websocket
 
+  # ------------------------------------------------------------------
+  # Token Exchange 示例（RFC 8693）— 代理转发前用会话 token 换取面向上游资源的 token
+  #
+  # 启用方式：给 proxy 路由加 config.token_exchange 段即可（通用中间件能力，不绑定业务）
+  #   - 交换：以会话 access token 为 subject_token 调用授权服务器 token endpoint
+  #   - 注入：交换得到的 token 作为 Authorization: Bearer 转发 upstream
+  #   - 缓存：按「会话 + 配置指纹 + subject 指纹」缓存，TTL 内复用；会话刷新后自动失效重换
+  #   - 失败：invalid_grant/invalid_token → 刷新会话后重试一次；access_denied → 401；
+  #           token endpoint 故障 → 502；配置错误 → 500
+  # 注意：
+  #   - client_secret 建议用 ${ENV:default} 注入，不落明文；admin 导出配置时自动打码为 ***
+  #   - token_endpoint 缺省时回退会话 provider discovery 的 token endpoint
+  #   - 覆盖 HTTP / SSE / auto；WS 路由本期不执行交换（校验时告警）
+  # 详细设计：docs/token-exchange-rfc8693.md
+  #
+  # - path: "/upstream-admin/v1"
+  #   methods: ["GET", "POST", "PUT", "DELETE"]
+  #   auth_required: true
+  #   type: proxy
+  #   config:
+  #     upstream: "http://localhost:9091"
+  #     strip_prefix: false
+  #     token_exchange:
+  #       token_endpoint: "http://as:9000/oauth2/token"   # 授权服务器 token endpoint（可省，回退 discovery）
+  #       client_id: "bff"
+  #       client_secret: "${BFF_AS_CLIENT_SECRET:change-me}"  # 环境变量注入
+  #       client_auth_method: "client_secret_basic"       # client_secret_basic | client_secret_post
+  #       audience: ["admin-api"]                         # 可选，可重复
+  #       scope: "admin.api"                              # 可选，交换后收窄 scope
+  #       cache_ttl: "60s"
+  # ------------------------------------------------------------------
+
   # ==========================================================
   # Pipeline 路由 — DAG 编排
   # ==========================================================
