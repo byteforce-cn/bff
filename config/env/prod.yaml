@@ -7,3 +7,17 @@ provider:
   redis_url: "redis://bff-redis:6379"
 session:
   secure: true
+
+# 认证端点 per-IP 限流：生产启用（需按实际拓扑调整 trusted_proxies）
+auth_rate_limit:
+  enabled: true
+  trusted_proxies: 1
+  per_ip:
+    per_second: 5
+    burst_size: 20
+  paths:
+    - "/oauth2/authorize"
+    - "/oauth2/token"
+    - "/login"
+    - "/connect/logout"
+  log_over_limit: true

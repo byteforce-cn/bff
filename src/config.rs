@@ -98,6 +98,9 @@ pub struct AppConfig {
     /// 全局限流配置
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// 认证端点 per-IP 限流（网络层纵深防御，默认关闭）
+    #[serde(default)]
+    pub auth_rate_limit: AuthRateLimitConfig,
     /// CORS 跨域配置
     #[serde(default)]
     pub cors: CorsConfig,
@@ -234,6 +237,74 @@ fn default_rate_per_second() -> u64 {
 }
 fn default_rate_burst() -> u32 {
     500
+}
+
+// ── 认证端点 per-IP 限流配置 ──
+
+/// 认证端点 per-IP 限流（网络层纵深防御，与 IAM 账号锁定互补）。
+///
+/// - 仅对 `paths` 前缀命中的请求按「来源 IP + 路径前缀」独立计数（令牌桶）；
+/// - 默认关闭（`enabled: false`），不影响现有全局限流行为；
+/// - 超出 per-IP 桶容量 → 429 + Retry-After，不进入上游；
+/// - `trusted_proxies`：LB 后解析 X-Forwarded-For 时跳过的右侧可信代理数（0 = 不信任 XFF）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthRateLimitConfig {
+    /// 是否启用
+    #[serde(default)]
+    pub enabled: bool,
+    /// 可信代理数（解析 X-Forwarded-For 时跳过最右侧 N 个条目；0 = 不信任 XFF，仅用对端 IP）
+    #[serde(default)]
+    pub trusted_proxies: usize,
+    /// per-IP 限流档位
+    #[serde(default)]
+    pub per_ip: IpRateLimitBucket,
+    /// 命中即计入的路径前缀
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// 超限时是否记录审计日志（含 IP、路径、计数）
+    #[serde(default = "default_auth_rate_log")]
+    pub log_over_limit: bool,
+}
+
+impl Default for AuthRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trusted_proxies: 0,
+            per_ip: IpRateLimitBucket::default(),
+            paths: Vec::new(),
+            log_over_limit: default_auth_rate_log(),
+        }
+    }
+}
+
+fn default_auth_rate_log() -> bool {
+    true
+}
+
+/// per-IP 令牌桶档位。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpRateLimitBucket {
+    #[serde(default = "default_auth_rate_per_second")]
+    pub per_second: u64,
+    #[serde(default = "default_auth_rate_burst")]
+    pub burst_size: u32,
+}
+
+impl Default for IpRateLimitBucket {
+    fn default() -> Self {
+        Self {
+            per_second: default_auth_rate_per_second(),
+            burst_size: default_auth_rate_burst(),
+        }
+    }
+}
+
+fn default_auth_rate_per_second() -> u64 {
+    5
+}
+fn default_auth_rate_burst() -> u32 {
+    20
 }
 
 // ── CORS 配置 ──
@@ -1013,6 +1084,29 @@ impl AppConfig {
             self.rate_limit.per_second > 0,
             "rate_limit.per_second 必须 > 0"
         );
+
+        // 认证端点 per-IP 限流校验
+        if self.auth_rate_limit.enabled {
+            anyhow::ensure!(
+                self.auth_rate_limit.per_ip.per_second > 0,
+                "auth_rate_limit.per_ip.per_second 必须 > 0"
+            );
+            anyhow::ensure!(
+                self.auth_rate_limit.per_ip.burst_size > 0,
+                "auth_rate_limit.per_ip.burst_size 必须 > 0"
+            );
+            anyhow::ensure!(
+                !self.auth_rate_limit.paths.is_empty(),
+                "auth_rate_limit.enabled = true 时 paths 不能为空"
+            );
+            for p in &self.auth_rate_limit.paths {
+                anyhow::ensure!(
+                    p.starts_with('/'),
+                    "auth_rate_limit.paths 条目必须以 / 开头: {}",
+                    p
+                );
+            }
+        }
 
         // OIDC provider 校验
         for p in &self.oidc.providers {

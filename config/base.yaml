@@ -66,6 +66,25 @@ rate_limit:
   per_second: 50
   burst_size: 500
 
+# 认证端点 per-IP 限流（网络层纵深防御，与 IAM 账号锁定互补）
+#
+# - 仅对 paths 前缀命中的请求按「来源 IP + 路径前缀」独立计数（令牌桶），超出 → 429 + Retry-After，不进入上游；
+# - 只做 per-IP 维度限流，不做账号语义判断（账号锁定归 IAM）；
+# - 默认关闭，不影响现有全局限流行为；生产环境（config/env/prod.yaml）已启用；
+# - trusted_proxies: LB 后可信代理数（解析 X-Forwarded-For 时跳过右侧 N 个条目；0 = 不信任 XFF，仅用对端 IP）
+auth_rate_limit:
+  enabled: false
+  trusted_proxies: 1
+  per_ip:
+    per_second: 5
+    burst_size: 20
+  paths:
+    - "/oauth2/authorize"
+    - "/oauth2/token"
+    - "/login"
+    - "/connect/logout"
+  log_over_limit: true
+
 # CORS 跨域配置
 cors:
   permissive: false           # true = 允许所有来源（仅开发环境）
