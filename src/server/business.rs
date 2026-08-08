@@ -98,6 +98,11 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .layer(GovernorLayer {
             config: governor_conf,
         })
+        // 认证端点 per-IP 限流（网络层纵深防御；未启用/未命中路径时原样放行）
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::ip_rate_limit::ip_rate_limit_middleware,
+        ))
         // 安全响应头
         .layer(axum::middleware::from_fn(
             move |req: axum::http::Request<Body>, next: axum::middleware::Next| {
