@@ -1,7 +1,5 @@
 //! 路由统一重构测试：RouteDef 序列化/反序列化
-use bff::config::{
-    AppConfig, InputMapping, OutputMapping, RouteType, RouteTypeConfig,
-};
+use bff::config::{AppConfig, InputMapping, OutputMapping, RouteType, RouteTypeConfig};
 use serde_yaml;
 
 // ============================================================
@@ -54,7 +52,10 @@ routes:
     assert_eq!(r.config.pipeline.as_deref(), Some("dashboard"));
     assert!(r.config.pipeline_inline.is_none());
     assert_eq!(r.input_mapping.from_query.get("userId").unwrap(), "userId");
-    assert_eq!(r.input_mapping.defaults.get("pageSize").unwrap(), &serde_json::Value::Number(serde_json::Number::from(10)));
+    assert_eq!(
+        r.input_mapping.defaults.get("pageSize").unwrap(),
+        &serde_json::Value::Number(serde_json::Number::from(10))
+    );
 }
 
 #[test]
@@ -137,7 +138,10 @@ routes:
     assert_eq!(r.route_type, RouteType::Static);
     assert_eq!(r.config.status, Some(200));
     assert_eq!(r.config.body.as_ref().unwrap()["status"], "ok");
-    assert_eq!(r.config.headers.as_ref().unwrap().get("X-Custom").unwrap(), "bff");
+    assert_eq!(
+        r.config.headers.as_ref().unwrap().get("X-Custom").unwrap(),
+        "bff"
+    );
 }
 
 #[test]

@@ -20,7 +20,8 @@ pub fn match_route<'a>(routes: &'a [RouteDef], method: &str, path: &str) -> Opti
         .iter()
         .filter(|r| {
             path.starts_with(&r.path)
-                && (r.methods.is_empty() || r.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
+                && (r.methods.is_empty()
+                    || r.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
         })
         .max_by_key(|r| r.path.len())
 }
@@ -41,16 +42,15 @@ pub async fn dispatch(
 
     // 按类型分发
     match &route.route_type {
-        RouteType::Proxy => {
-            execute_proxy(state, route, session, req).await
-        }
+        RouteType::Proxy => execute_proxy(state, route, session, req).await,
         RouteType::Pipeline => {
             let (parts, body) = req.into_parts();
             let body_bytes = axum::body::to_bytes(body, 1024 * 1024)
                 .await
                 .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
             let (session_json, env_json) = build_context_json(session).await;
-            let inputs = extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
+            let inputs =
+                extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
             execute_pipeline(state, route, inputs).await
         }
         RouteType::Script => {
@@ -59,7 +59,8 @@ pub async fn dispatch(
                 .await
                 .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
             let (session_json, env_json) = build_context_json(session).await;
-            let inputs = extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
+            let inputs =
+                extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
             execute_script(state, route, inputs).await
         }
         RouteType::Static => execute_static(route),
@@ -129,7 +130,14 @@ fn extract_inputs_from_parts(
         Value::Object(map)
     };
 
-    mapping::merge_inputs(&route.input_mapping, &query_json, &body_json, &header_json, session_json, env_json)
+    mapping::merge_inputs(
+        &route.input_mapping,
+        &query_json,
+        &body_json,
+        &header_json,
+        session_json,
+        env_json,
+    )
 }
 
 /// 从请求中按 InputMapping 提取参数。
@@ -167,7 +175,9 @@ async fn execute_pipeline(
     } else if let Some(inline) = &route.config.pipeline_inline {
         inline.clone()
     } else {
-        return Err(AppError::bad_request("pipeline 路由缺少 pipeline 或 pipeline_inline"));
+        return Err(AppError::bad_request(
+            "pipeline 路由缺少 pipeline 或 pipeline_inline",
+        ));
     };
 
     // 将 inputs 转为 HashMap<String, String>
@@ -217,7 +227,9 @@ async fn execute_script(
     } else if let Some(inline) = &route.config.script_inline {
         inline.clone()
     } else {
-        return Err(AppError::bad_request("script 路由缺少 script 或 script_inline"));
+        return Err(AppError::bad_request(
+            "script 路由缺少 script 或 script_inline",
+        ));
     };
 
     let engine = crate::scripting::ScriptEngine::new();

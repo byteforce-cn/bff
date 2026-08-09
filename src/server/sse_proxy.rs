@@ -7,6 +7,7 @@
 
 use crate::utils::AppError;
 use axum::body::Body;
+use axum::http::HeaderMap;
 use axum::response::Response;
 use futures::StreamExt;
 
@@ -23,6 +24,7 @@ pub async fn sse_stream(
     body: Vec<u8>,
     auth_token: Option<String>,
     request_id: Option<&str>,
+    extra_headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let mut out_req = http.request(method, upstream_url);
 
@@ -35,6 +37,16 @@ pub async fn sse_stream(
     if !body.is_empty() {
         out_req = out_req.body(body);
     }
+    // 恢复原始实体头（Content-Type 等），覆盖 reqwest 对字节 body 的默认 octet-stream。
+    // 注意：axum 用 http 1.x、reqwest 经 openidconnect 用 http 0.2，需按字节转换类型。
+    for (name, value) in extra_headers {
+        if let (Ok(n), Ok(v)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+            reqwest::header::HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            out_req = out_req.header(n, v);
+        }
+    }
 
     let resp = out_req
         .send()
@@ -46,11 +58,10 @@ pub async fn sse_stream(
 
     // 将响应体转为 Stream<Result<Vec<u8>, Error>>
     let byte_stream = resp.bytes_stream().map(|r| {
-        r.map(|b| b.to_vec())
-            .map_err(|e| {
-                tracing::error!("SSE 流读取错误: {}", e);
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-            })
+        r.map(|b| b.to_vec()).map_err(|e| {
+            tracing::error!("SSE 流读取错误: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+        })
     });
 
     let stream_body = Body::from_stream(byte_stream);
@@ -86,6 +97,7 @@ pub async fn http_proxy(
     method: reqwest::Method,
     body: Vec<u8>,
     auth_token: Option<String>,
+    extra_headers: &HeaderMap,
 ) -> Result<(axum::http::StatusCode, axum::http::HeaderMap, Vec<u8>), AppError> {
     let mut out_req = http.request(method, upstream_url);
 
@@ -94,6 +106,16 @@ pub async fn http_proxy(
     }
     if !body.is_empty() {
         out_req = out_req.body(body);
+    }
+    // 恢复原始实体头（Content-Type 等），覆盖 reqwest 对字节 body 的默认 octet-stream。
+    // 注意：axum 用 http 1.x、reqwest 经 openidconnect 用 http 0.2，需按字节转换类型。
+    for (name, value) in extra_headers {
+        if let (Ok(n), Ok(v)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+            reqwest::header::HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            out_req = out_req.header(n, v);
+        }
     }
 
     let resp = out_req

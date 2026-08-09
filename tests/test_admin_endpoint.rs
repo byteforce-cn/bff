@@ -67,11 +67,10 @@ async fn eval_script_with_session_and_env() {
     let cfg = common::base_config();
     let state = common::make_state(cfg);
     // 注册测试脚本
-    state
-        .scripts
-        .write()
-        .await
-        .insert("test.rhai".into(), "let sub = inputs[\"sub\"]; let env = inputs[\"APP_ENV\"]; #{ sub: sub, env: env }".into());
+    state.scripts.write().await.insert(
+        "test.rhai".into(),
+        "let sub = inputs[\"sub\"]; let env = inputs[\"APP_ENV\"]; #{ sub: sub, env: env }".into(),
+    );
     let admin = common::spawn_admin(state).await;
     let client = common::test_client();
 
@@ -79,17 +78,20 @@ async fn eval_script_with_session_and_env() {
         .post(format!("{}/admin/api/scripts/test.rhai/eval", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
-        .body(serde_json::json!({
-            "inputs": {},
-            "session": {
-                "sub": "user-123",
-                "provider": "google",
-                "access_token": "simulated-token"
-            },
-            "env": {
-                "APP_ENV": "staging"
-            }
-        }).to_string())
+        .body(
+            serde_json::json!({
+                "inputs": {},
+                "session": {
+                    "sub": "user-123",
+                    "provider": "google",
+                    "access_token": "simulated-token"
+                },
+                "env": {
+                    "APP_ENV": "staging"
+                }
+            })
+            .to_string(),
+        )
         .send()
         .await
         .unwrap();
@@ -122,9 +124,12 @@ async fn eval_script_without_session_env_behaves_same() {
         .post(format!("{}/admin/api/scripts/simple.rhai/eval", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
-        .body(serde_json::json!({
-            "inputs": {}
-        }).to_string())
+        .body(
+            serde_json::json!({
+                "inputs": {}
+            })
+            .to_string(),
+        )
         .send()
         .await
         .unwrap();
@@ -164,18 +169,21 @@ steps:
         .post(format!("{}/admin/api/pipelines/test-pipe/test", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
-        .body(serde_json::json!({
-            "params": {
-                "user_id": "user-123"
-            },
-            "session": {
-                "sub": "user-123",
-                "provider": "google"
-            },
-            "env": {
-                "stage": "staging"
-            }
-        }).to_string())
+        .body(
+            serde_json::json!({
+                "params": {
+                    "user_id": "user-123"
+                },
+                "session": {
+                    "sub": "user-123",
+                    "provider": "google"
+                },
+                "env": {
+                    "stage": "staging"
+                }
+            })
+            .to_string(),
+        )
         .send()
         .await
         .unwrap();
@@ -183,7 +191,10 @@ steps:
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     // 聚合结果
-    assert_eq!(body["body"], serde_json::json!({"user": "user-123", "env": "staging"}));
+    assert_eq!(
+        body["body"],
+        serde_json::json!({"user": "user-123", "env": "staging"})
+    );
     // step 级详情
     assert_eq!(body["steps"][0]["id"], "enrich");
     assert_eq!(body["steps"][0]["status"], 200);
@@ -224,9 +235,12 @@ steps:
         .post(format!("{}/admin/api/pipelines/dry-run-pipe/test", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
-        .body(serde_json::json!({
-            "dry_run": true
-        }).to_string())
+        .body(
+            serde_json::json!({
+                "dry_run": true
+            })
+            .to_string(),
+        )
         .send()
         .await
         .unwrap();

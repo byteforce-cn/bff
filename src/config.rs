@@ -47,10 +47,16 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BffSecretConfig {
     /// 加密主密钥，支持 `${BFF_SECRET:default}` 表达式
-    #[serde(deserialize_with = "deserialize_env_or_default", default = "default_bff_secret")]
+    #[serde(
+        deserialize_with = "deserialize_env_or_default",
+        default = "default_bff_secret"
+    )]
     pub secret: String,
     /// Argon2id 盐值，支持 `${BFF_SECRET_SALT:default}` 表达式
-    #[serde(deserialize_with = "deserialize_env_or_default", default = "default_bff_salt")]
+    #[serde(
+        deserialize_with = "deserialize_env_or_default",
+        default = "default_bff_salt"
+    )]
     pub salt: String,
 }
 
@@ -330,11 +336,23 @@ impl Default for CorsConfig {
 
 // ── 安全响应头配置 ──
 
+/// 按路径前缀细分的 CSP 覆盖（最长前缀命中优先，未命中回退全局 `content_security_policy`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CspOverrideConfig {
+    /// 路径前缀（如 "/admin/templates/design"），请求路径以其开头即命中
+    pub path_prefix: String,
+    /// 该路径前缀下使用的 Content-Security-Policy
+    pub content_security_policy: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityHeadersConfig {
-    /// Content-Security-Policy
+    /// Content-Security-Policy（全局默认，未命中 csp_overrides 时使用）
     #[serde(default = "default_csp")]
     pub content_security_policy: String,
+    /// 按路径前缀细分的 CSP 覆盖（最长前缀优先；空 = 全部使用全局 CSP）
+    #[serde(default)]
+    pub csp_overrides: Vec<CspOverrideConfig>,
     /// X-Frame-Options
     #[serde(default = "default_frame_options")]
     pub x_frame_options: String,
@@ -353,6 +371,7 @@ impl Default for SecurityHeadersConfig {
     fn default() -> Self {
         Self {
             content_security_policy: default_csp(),
+            csp_overrides: vec![],
             x_frame_options: default_frame_options(),
             x_content_type_options: default_content_type_options(),
             hsts_max_age: default_hsts_max_age(),

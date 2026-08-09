@@ -108,24 +108,39 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
             move |req: axum::http::Request<Body>, next: axum::middleware::Next| {
                 let headers = sec_headers.clone();
                 async move {
+                    let path = req.uri().path().to_string();
                     let mut resp = next.run(req).await;
                     let h = resp.headers_mut();
                     if !headers.content_security_policy.is_empty() {
+                        // 按路径前缀细分 CSP：最长前缀命中优先，未命中回退全局
+                        let csp = headers
+                            .csp_overrides
+                            .iter()
+                            .filter(|o| path.starts_with(&o.path_prefix))
+                            .max_by_key(|o| o.path_prefix.len())
+                            .map(|o| o.content_security_policy.as_str())
+                            .unwrap_or(headers.content_security_policy.as_str());
                         h.insert(
                             axum::http::HeaderName::from_static("content-security-policy"),
-                            headers.content_security_policy.parse::<axum::http::HeaderValue>().unwrap(),
+                            csp.parse::<axum::http::HeaderValue>().unwrap(),
                         );
                     }
                     if !headers.x_frame_options.is_empty() {
                         h.insert(
                             axum::http::HeaderName::from_static("x-frame-options"),
-                            headers.x_frame_options.parse::<axum::http::HeaderValue>().unwrap(),
+                            headers
+                                .x_frame_options
+                                .parse::<axum::http::HeaderValue>()
+                                .unwrap(),
                         );
                     }
                     if !headers.x_content_type_options.is_empty() {
                         h.insert(
                             axum::http::HeaderName::from_static("x-content-type-options"),
-                            headers.x_content_type_options.parse::<axum::http::HeaderValue>().unwrap(),
+                            headers
+                                .x_content_type_options
+                                .parse::<axum::http::HeaderValue>()
+                                .unwrap(),
                         );
                     }
                     if headers.hsts_max_age > 0 {
@@ -139,7 +154,10 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
                     if !headers.referrer_policy.is_empty() {
                         h.insert(
                             axum::http::HeaderName::from_static("referrer-policy"),
-                            headers.referrer_policy.parse::<axum::http::HeaderValue>().unwrap(),
+                            headers
+                                .referrer_policy
+                                .parse::<axum::http::HeaderValue>()
+                                .unwrap(),
                         );
                     }
                     resp
@@ -190,34 +208,20 @@ async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
 
     let mut handles = Vec::with_capacity(upstreams.len());
     for upstream in &upstreams {
-        let url = format!(
-            "{}{}",
-            upstream.trim_end_matches('/'),
-            probe_path
-        );
+        let url = format!("{}{}", upstream.trim_end_matches('/'), probe_path);
         let client = state.http.clone();
         let u = upstream.clone();
         handles.push(tokio::spawn(async move {
             let start = std::time::Instant::now();
-            let result = tokio::time::timeout(
-                probe_timeout,
-                client.get(&url).send(),
-            )
-            .await;
+            let result = tokio::time::timeout(probe_timeout, client.get(&url).send()).await;
             let latency_ms = start.elapsed().as_millis() as u64;
             match result {
                 Ok(Ok(resp)) => {
-                    let reachable = resp.status().is_success()
-                        || resp.status().as_u16() == 404; // 404 也算可达
+                    let reachable = resp.status().is_success() || resp.status().as_u16() == 404; // 404 也算可达
                     (u, reachable, latency_ms, None::<String>)
                 }
                 Ok(Err(e)) => (u, false, latency_ms, Some(format!("{}", e))),
-                Err(_) => (
-                    u,
-                    false,
-                    latency_ms,
-                    Some("timeout".to_string()),
-                ),
+                Err(_) => (u, false, latency_ms, Some("timeout".to_string())),
             }
         }));
     }
@@ -344,9 +348,7 @@ async fn ws_upgrade_handler(
 
     let upstream = match route.config.upstream.as_deref() {
         Some(u) => u.trim_end_matches('/').to_string(),
-        None => {
-            return AppError::bad_request("WebSocket 路由缺少 upstream").into_response()
-        }
+        None => return AppError::bad_request("WebSocket 路由缺少 upstream").into_response(),
     };
 
     // 尊重 strip_prefix 配置（与 forward_request 保持一致）
@@ -362,9 +364,7 @@ async fn ws_upgrade_handler(
 
     tracing::info!(%path, %url, strip_prefix=route.config.strip_prefix, "WebSocket 升级请求");
 
-    ws.on_upgrade(move |client_ws| {
-        tunnel::ws_tunnel(client_ws, url, None)
-    })
+    ws.on_upgrade(move |client_ws| tunnel::ws_tunnel(client_ws, url, None))
 }
 
 /// SPA 静态资源 + 前端路由 fallback 到 index.html。

@@ -41,7 +41,9 @@ async fn orchestration_parallel_aggregation_with_script() {
     let users = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/users/1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "Alice"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "Alice"})),
+        )
         .expect(1)
         .mount(&users)
         .await;
@@ -71,7 +73,10 @@ async fn orchestration_parallel_aggregation_with_script() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body, serde_json::json!({"user": {"name": "Alice"}, "orders": [{"id": 1}]}));
+    assert_eq!(
+        body,
+        serde_json::json!({"user": {"name": "Alice"}, "orders": [{"id": 1}]})
+    );
 
     // 第二次调用：fetch_user 命中缓存（仍 1 次），fetch_orders 再次调用（共 2 次）
     let resp = client
@@ -129,7 +134,11 @@ steps:
     let elapsed = start.elapsed();
 
     assert_eq!(resp.status(), 504, "应返回超时: {:?}", resp);
-    assert!(elapsed < Duration::from_secs(2), "应快速失败，实际 {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "应快速失败，实际 {:?}",
+        elapsed
+    );
 }
 
 /// M1: Pipeline 内 script step 可以通过 params 读取 session/env 注入值。
@@ -181,8 +190,7 @@ async fn script_step_params_and_step_outputs_both_accessible() {
     Mock::given(method("GET"))
         .and(path("/data"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"name": "Alice"})),
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "Alice"})),
         )
         .mount(&svc)
         .await;

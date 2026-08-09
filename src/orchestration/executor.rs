@@ -55,30 +55,24 @@ impl PipelineExecutor {
 
         let exec = async {
             for layer in layers {
-                let mut set: JoinSet<anyhow::Result<(String, StepOutput), (String, anyhow::Error)>> = JoinSet::new();
+                let mut set: JoinSet<
+                    anyhow::Result<(String, StepOutput), (String, anyhow::Error)>,
+                > = JoinSet::new();
                 for i in layer {
                     let step = def.steps[i].clone();
                     let params = params.clone();
                     let mut ctx = self.ctx.clone();
                     ctx.params = params.clone();
                     let results = results.clone();
-                    let step_timeout = step
-                        .config
-                        .timeout
-                        .unwrap_or(self.default_step_timeout);
+                    let step_timeout = step.config.timeout.unwrap_or(self.default_step_timeout);
                     let failed_steps = failed_steps.clone();
                     let step_id = step.id.clone();
 
                     set.spawn(async move {
                         let inputs = results.read().await.clone();
                         // Per-step timeout (P1-8)
-                        let step_fut = execute_step(
-                            step.step_type,
-                            &step.config,
-                            &params,
-                            &inputs,
-                            &ctx,
-                        );
+                        let step_fut =
+                            execute_step(step.step_type, &step.config, &params, &inputs, &ctx);
                         match tokio::time::timeout(step_timeout, step_fut).await {
                             Ok(Ok(out)) => Ok((step_id.clone(), out)),
                             Ok(Err(e)) => Err((step_id.clone(), e)),
@@ -86,7 +80,8 @@ impl PipelineExecutor {
                                 step_id.clone(),
                                 anyhow::anyhow!(
                                     "step [{}] 执行超时（{:?}）",
-                                    step_id, step_timeout
+                                    step_id,
+                                    step_timeout
                                 ),
                             )),
                         }
@@ -151,13 +146,13 @@ impl PipelineExecutor {
                     agg.insert(
                         "_failed_steps".to_string(),
                         serde_json::Value::Array(
-                            failed.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                            failed
+                                .iter()
+                                .map(|s| serde_json::Value::String(s.clone()))
+                                .collect(),
                         ),
                     );
-                    agg.insert(
-                        "_partial".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
+                    agg.insert("_partial".to_string(), serde_json::Value::Bool(true));
                 }
                 (serde_json::Value::Object(agg), 200)
             }

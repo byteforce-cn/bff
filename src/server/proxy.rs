@@ -14,7 +14,7 @@ use crate::server::sse_proxy;
 use crate::state::AppState;
 use crate::utils::AppError;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
 use tower_sessions::Session;
 
@@ -81,6 +81,10 @@ pub async fn forward_request(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    // 透传原始请求头（实体头/媒体类型/自定义头等），跳过硬编码与 hop-by-hop 头。
+    // 关键：必须恢复 Content-Type 等实体头——否则重建 reqwest 请求时，
+    // Vec<u8> body 会被 reqwest 默认成 application/octet-stream（本 issue 根因）。
+    let passthrough_headers = passthrough_headers(req.headers());
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
         .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
@@ -99,6 +103,7 @@ pub async fn forward_request(
                 body_bytes.to_vec(),
                 auth_token,
                 request_id.as_deref(),
+                &passthrough_headers,
             )
             .await;
 
@@ -126,6 +131,7 @@ pub async fn forward_request(
                 body_c,
                 auth_c,
                 request_id.as_deref(),
+                &passthrough_headers,
             )
             .await?;
 
@@ -145,6 +151,7 @@ pub async fn forward_request(
                                 body_bytes.to_vec(),
                                 Some(new_token),
                                 request_id.as_deref(),
+                                &passthrough_headers,
                             )
                             .await?;
                             if retry_resp.status() != StatusCode::UNAUTHORIZED {
@@ -159,6 +166,41 @@ pub async fn forward_request(
     }
 }
 
+/// 提取需要透传到 upstream 的原始请求头。
+///
+/// 跳过（避免与 BFF 语义冲突）：
+/// - hop-by-hop 头：connection / keep-alive / proxy-connection / te / trailer /
+///   transfer-encoding / upgrade
+/// - 由 BFF 重新注入或基于 URL/body 推导的头：host（reqwest 按 URL 设置）、
+///   authorization（BFF 统一注入会话 Bearer token）、cookie（会话 cookie 不外泄）、
+///   content-length（reqwest 按 body 字节数重算）
+///
+/// 保留：content-type、content-encoding、accept、accept-encoding、accept-language、
+/// 自定义 x-* 头等（透传优先）。
+fn passthrough_headers(headers: &HeaderMap) -> HeaderMap {
+    const SKIP: &[&str] = &[
+        "host",
+        "authorization",
+        "cookie",
+        "content-length",
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ];
+    let mut out = HeaderMap::new();
+    for (name, value) in headers {
+        if SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        out.insert(name.clone(), value.clone());
+    }
+    out
+}
+
 /// 标准 HTTP 代理：一次性 reqwest 请求-响应。
 async fn proxy_http(
     state: &AppState,
@@ -168,12 +210,12 @@ async fn proxy_http(
     body: Vec<u8>,
     auth_token: Option<String>,
     request_id: Option<&str>,
+    extra_headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let cfg = state.cfg();
     let max_retries = cfg.http_client.retry_max_attempts;
     let backoff = cfg.http_client.retry_backoff;
-    let is_idempotent =
-        method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    let is_idempotent = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
 
     let mut last_err = None;
 
@@ -198,6 +240,17 @@ async fn proxy_http(
         }
         if !body.is_empty() {
             out_req = out_req.body(body.clone());
+        }
+        // 在设置 body 之后恢复原始实体头：覆盖 reqwest 对 Vec<u8> 的默认
+        // Content-Type: application/octet-stream（透传优先，本 issue 根因修复）。
+        // 注意：axum 用 http 1.x、reqwest 经 openidconnect 用 http 0.2，需按字节转换类型。
+        for (name, value) in extra_headers {
+            if let (Ok(n), Ok(v)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+                reqwest::header::HeaderValue::from_bytes(value.as_bytes()),
+            ) {
+                out_req = out_req.header(n, v);
+            }
         }
 
         let result = out_req.send().await;
@@ -256,7 +309,6 @@ async fn proxy_http(
     }
 
     // 所有重试均已耗尽
-    metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string())
-        .increment(1);
+    metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string()).increment(1);
     Err(last_err.unwrap_or_else(|| AppError::bad_gateway("未知代理错误")))
 }

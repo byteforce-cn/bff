@@ -26,7 +26,11 @@ impl OidcClientManager {
     }
 
     /// 获取（或构建）provider 对应的 OIDC 客户端。
-    pub async fn get(&self, cfg: &OidcProviderConfig, base_url: &str) -> anyhow::Result<Arc<CoreClient>> {
+    pub async fn get(
+        &self,
+        cfg: &OidcProviderConfig,
+        base_url: &str,
+    ) -> anyhow::Result<Arc<CoreClient>> {
         if let Some(c) = self.clients.read().await.get(&cfg.id) {
             return Ok(c.clone());
         }
@@ -47,17 +51,23 @@ impl OidcClientManager {
 
 async fn build_client(cfg: &OidcProviderConfig, base_url: &str) -> anyhow::Result<CoreClient> {
     let issuer = IssuerUrl::new(cfg.issuer_url.clone()).context("issuer_url 非法")?;
-    let metadata = CoreProviderMetadata::discover_async(issuer, openidconnect::reqwest::async_http_client)
-        .await
-        .with_context(|| format!("OIDC discovery 失败: {}", cfg.issuer_url))?;
-    let redirect = RedirectUrl::new(format!("{}{}", base_url.trim_end_matches('/'), cfg.callback_path))
-        .context("redirect_uri 非法")?;
+    let metadata =
+        CoreProviderMetadata::discover_async(issuer, openidconnect::reqwest::async_http_client)
+            .await
+            .with_context(|| format!("OIDC discovery 失败: {}", cfg.issuer_url))?;
+    let redirect = RedirectUrl::new(format!(
+        "{}{}",
+        base_url.trim_end_matches('/'),
+        cfg.callback_path
+    ))
+    .context("redirect_uri 非法")?;
     let secret = if cfg.client_secret.is_empty() {
         None
     } else {
         Some(ClientSecret::new(cfg.client_secret.clone()))
     };
-    let client = CoreClient::from_provider_metadata(metadata, ClientId::new(cfg.client_id.clone()), secret)
-        .set_redirect_uri(redirect);
+    let client =
+        CoreClient::from_provider_metadata(metadata, ClientId::new(cfg.client_id.clone()), secret)
+            .set_redirect_uri(redirect);
     Ok(client)
 }

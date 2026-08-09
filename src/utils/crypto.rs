@@ -31,9 +31,7 @@ pub fn init(secret: &str, salt: &str) -> Result<(), String> {
         .hash_password_into(secret.as_bytes(), salt.as_bytes(), &mut key_bytes)
         .map_err(|e| format!("Argon2 密钥派生失败: {}", e))?;
 
-    let _ = KEY_CACHE.set(Ok(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(
-        &key_bytes,
-    ))));
+    let _ = KEY_CACHE.set(Ok(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes))));
 
     tracing::info!("AES-256-GCM 密钥已初始化");
     Ok(())
@@ -141,4 +139,3 @@ mod tests {
         assert!(init("", "1234567890123456").is_err());
     }
 }
-

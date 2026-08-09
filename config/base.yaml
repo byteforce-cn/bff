@@ -93,6 +93,11 @@ cors:
 # 安全响应头
 security_headers:
   content_security_policy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+  # 按路径前缀细分的 CSP 覆盖（最长前缀优先，未命中回退上面的全局 CSP）。
+  # 仅用于必须放宽 eval 的编辑器类路径（Monaco / AJV），其余路径保持严格 script-src 'self'。
+  # csp_overrides:
+  #   - path_prefix: "/admin/templates/design"
+  #     content_security_policy: "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'"
   x_frame_options: "DENY"
   x_content_type_options: "nosniff"
   hsts_max_age: 0             # 0 = 不发送 HSTS（LB 处理 TLS）

@@ -76,7 +76,11 @@ async fn test_auth_rate_limit_block_with_retry_after() {
             .expect("请求失败");
         if resp.status().as_u16() == 429 {
             blocked += 1;
-            if let Some(v) = resp.headers().get("Retry-After").and_then(|v| v.to_str().ok()) {
+            if let Some(v) = resp
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+            {
                 retry_after = Some(v.parse().unwrap_or(0));
             }
         } else {
@@ -104,7 +108,11 @@ async fn test_auth_rate_limit_other_paths_unaffected() {
             .send()
             .await
             .expect("请求失败");
-        assert_ne!(resp.status().as_u16(), 429, "/live 未配置限流，不应触发 429");
+        assert_ne!(
+            resp.status().as_u16(),
+            429,
+            "/live 未配置限流，不应触发 429"
+        );
     }
 }
 
@@ -152,7 +160,10 @@ async fn test_auth_rate_limit_trusted_zero_ignores_xff() {
             blocked += 1;
         }
     }
-    assert_eq!(blocked, 1, "所有请求共享对端 IP 桶，第 4 个应被拒（伪造 XFF 无效）");
+    assert_eq!(
+        blocked, 1,
+        "所有请求共享对端 IP 桶，第 4 个应被拒（伪造 XFF 无效）"
+    );
 }
 
 /// T6：补液语义 —— 等待一个补液周期后桶恢复可放行。

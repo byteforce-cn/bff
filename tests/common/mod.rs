@@ -130,8 +130,7 @@ pub async fn spawn_mock_oidc_provider() -> MockIdp {
     fn make_id_token(st: &IdpState) -> String {
         use base64::Engine;
         let b64 = |v: serde_json::Value| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(serde_json::to_vec(&v).unwrap())
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&v).unwrap())
         };
         let header = b64(serde_json::json!({"alg": "none", "typ": "JWT"}));
         let exp = std::time::SystemTime::now()
@@ -186,10 +185,7 @@ pub async fn spawn_mock_oidc_provider() -> MockIdp {
     }
 
     let app = Router::new()
-        .route(
-            "/.well-known/openid-configuration",
-            get(discovery),
-        )
+        .route("/.well-known/openid-configuration", get(discovery))
         .route("/token", post(token))
         .route("/jwks", get(jwks))
         .with_state(st.clone());
@@ -242,11 +238,7 @@ pub async fn create_session_with_tokens(
 
 /// 构造临时 SPA 目录，返回路径。
 pub fn make_spa_dir(tag: &str) -> String {
-    let dir = std::env::temp_dir().join(format!(
-        "bff-test-spa-{}-{}",
-        tag,
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("bff-test-spa-{}-{}", tag, std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("index.html"),

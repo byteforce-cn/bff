@@ -103,7 +103,10 @@ pub fn apply_output_mapping(mapping: &OutputMapping, mut value: Value) -> Value 
         if let Value::Object(map) = &value {
             let mut renamed = serde_json::Map::new();
             for (k, v) in map {
-                let new_key = reverse.get(k).map(|&s| s.clone()).unwrap_or_else(|| k.clone());
+                let new_key = reverse
+                    .get(k)
+                    .map(|&s| s.clone())
+                    .unwrap_or_else(|| k.clone());
                 renamed.insert(new_key, v.clone());
             }
             value = Value::Object(renamed);

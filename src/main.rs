@@ -66,9 +66,7 @@ fn graceful_shutdown_signal() -> tokio::sync::oneshot::Receiver<()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let ctrl_c = async {
-            signal::ctrl_c()
-                .await
-                .expect("无法注册 Ctrl+C 处理器");
+            signal::ctrl_c().await.expect("无法注册 Ctrl+C 处理器");
         };
         #[cfg(unix)]
         let terminate = async {
@@ -93,9 +91,7 @@ fn graceful_shutdown_signal() -> tokio::sync::oneshot::Receiver<()> {
 /// 提取两个 future 都能用的 shutdown signal。
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("无法注册 Ctrl+C 处理器");
+        signal::ctrl_c().await.expect("无法注册 Ctrl+C 处理器");
     };
     #[cfg(unix)]
     let terminate = async {

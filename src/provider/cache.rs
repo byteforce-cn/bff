@@ -44,7 +44,9 @@ impl CacheProvider for InMemoryCache {
         // 检查条目级 TTL 是否过期
         let expired = {
             let ttls = self.entry_ttl.read().await;
-            ttls.get(key).map(|&expiry| expiry <= Instant::now()).unwrap_or(false)
+            ttls.get(key)
+                .map(|&expiry| expiry <= Instant::now())
+                .unwrap_or(false)
         };
         if expired {
             self.inner.invalidate(key).await;
@@ -80,9 +82,13 @@ mod tests {
         let cache = InMemoryCache::new(100, Duration::from_secs(60));
 
         // 设置短 TTL 条目
-        cache.set("short", b"value".to_vec(), Duration::from_millis(50)).await;
+        cache
+            .set("short", b"value".to_vec(), Duration::from_millis(50))
+            .await;
         // 设置长 TTL 条目
-        cache.set("long", b"value2".to_vec(), Duration::from_secs(60)).await;
+        cache
+            .set("long", b"value2".to_vec(), Duration::from_secs(60))
+            .await;
 
         // 短 TTL 未过期时应存在
         assert!(cache.get("short").await.is_some());
@@ -100,7 +106,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete_clears_ttl() {
         let cache = InMemoryCache::new(100, Duration::from_secs(60));
-        cache.set("key", b"val".to_vec(), Duration::from_secs(10)).await;
+        cache
+            .set("key", b"val".to_vec(), Duration::from_secs(10))
+            .await;
         cache.delete("key").await;
         // 删除后 get 应为 None
         assert!(cache.get("key").await.is_none());

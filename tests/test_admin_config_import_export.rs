@@ -41,8 +41,7 @@ async fn config_export_import_and_hot_reload() {
 
     // 2. 修改导出内容：新增一个纯脚本 pipeline
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-    let new_pipeline: serde_yaml::Value =
-        serde_yaml::from_str(SCRIPT_PIPELINE).unwrap();
+    let new_pipeline: serde_yaml::Value = serde_yaml::from_str(SCRIPT_PIPELINE).unwrap();
     doc["pipelines"] = new_pipeline;
     let new_yaml = serde_yaml::to_string(&doc).unwrap();
 

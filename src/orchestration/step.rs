@@ -91,10 +91,9 @@ async fn execute_http(
 
     let status = resp.status().as_u16();
     let bytes = resp.bytes().await.context("读取下游响应体失败")?;
-    let body: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::Value::String(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        ));
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+    });
     let out = StepOutput { status, body };
 
     if let Some(ttl) = config.cache_ttl {
