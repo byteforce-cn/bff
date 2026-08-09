@@ -51,9 +51,7 @@ pub async fn ws_tunnel(
     let t1 = tokio::spawn(async move {
         while let Some(msg) = client_stream.next().await {
             let upstream_msg = match msg {
-                Ok(Message::Text(t)) => {
-                    tungstenite::Message::Text(t.to_string())
-                }
+                Ok(Message::Text(t)) => tungstenite::Message::Text(t.to_string()),
                 Ok(Message::Binary(b)) => tungstenite::Message::Binary(b.to_vec()),
                 Ok(Message::Ping(d)) => tungstenite::Message::Ping(d.to_vec()),
                 Ok(Message::Pong(d)) => tungstenite::Message::Pong(d.to_vec()),
@@ -62,9 +60,7 @@ pub async fn ws_tunnel(
                         code: tungstenite::protocol::frame::coding::CloseCode::from(f.code),
                         reason: f.reason,
                     });
-                    let _ = upstream_sink
-                        .send(tungstenite::Message::Close(frame))
-                        .await;
+                    let _ = upstream_sink.send(tungstenite::Message::Close(frame)).await;
                     break;
                 }
                 Err(e) => {

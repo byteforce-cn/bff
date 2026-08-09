@@ -17,7 +17,9 @@ async fn cache_set_get_delete_and_expiry() {
     assert_eq!(cache.get("k").await, None);
 
     // 删除
-    cache.set("k2", b"v2".to_vec(), Duration::from_secs(60)).await;
+    cache
+        .set("k2", b"v2".to_vec(), Duration::from_secs(60))
+        .await;
     cache.delete("k2").await;
     assert_eq!(cache.get("k2").await, None);
 }

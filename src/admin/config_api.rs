@@ -42,7 +42,11 @@ pub async fn import_config(
         state.oidc_clients.invalidate(&p.id).await;
     }
     tracing::info!("配置已热重载");
-    Ok((StatusCode::OK, Json(serde_json::json!({"status": "applied"}))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "applied"})),
+    )
+        .into_response())
 }
 
 /// 支持 multipart/form-data（file 字段）与原始 YAML body 两种上传方式。
@@ -68,7 +72,10 @@ async fn extract_yaml(headers: &HeaderMap, body: Bytes) -> Result<String, AppErr
             }
             if let Some(idx) = part.find("\r\n\r\n") {
                 let content = &part[idx + 4..];
-                return Ok(content.trim_end_matches('\r').trim_end_matches('\n').to_string());
+                return Ok(content
+                    .trim_end_matches('\r')
+                    .trim_end_matches('\n')
+                    .to_string());
             }
         }
         Err(AppError::bad_request("multipart 中未找到文件内容"))
@@ -127,7 +134,11 @@ pub async fn create_pipeline(
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({"status": "created", "name": name}))).into_response())
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "created", "name": name})),
+    )
+        .into_response())
 }
 
 /// DELETE /admin/api/pipelines/{name}
@@ -142,7 +153,11 @@ pub async fn delete_pipeline(
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
-    Ok((StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "deleted"})),
+    )
+        .into_response())
 }
 
 /// GET /admin/api/scripts — 列出内存脚本与 config/scripts 目录脚本
@@ -171,7 +186,11 @@ pub async fn update_script(
     let script = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::bad_request("脚本必须为 UTF-8 文本"))?;
     state.scripts.write().await.insert(name.clone(), script);
-    Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok", "name": name}))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "ok", "name": name})),
+    )
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,15 +286,13 @@ pub async fn eval_script(
     let engine = crate::scripting::ScriptEngine::new();
     let inputs_value = serde_json::Value::Object(merged_inputs);
     match engine.run_json(&script, inputs_value).await {
-        Ok(v) => Ok(Json(
-            serde_json::json!({
-                "result": v,
-                "debug": {
-                    "session_injected": session_injected,
-                    "env_injected": env_injected
-                }
-            }),
-        )
+        Ok(v) => Ok(Json(serde_json::json!({
+            "result": v,
+            "debug": {
+                "session_injected": session_injected,
+                "env_injected": env_injected
+            }
+        }))
         .into_response()),
         Err(e) => Err(AppError::unprocessable(e.to_string())),
     }
@@ -299,7 +316,10 @@ pub async fn update_routes(
     // 基本校验
     for (i, r) in routes.iter().enumerate() {
         if r.path.is_empty() {
-            return Err(AppError::bad_request(format!("routes[{}].path 不能为空", i)));
+            return Err(AppError::bad_request(format!(
+                "routes[{}].path 不能为空",
+                i
+            )));
         }
     }
     let mut cfg = state.cfg().as_ref().clone();
@@ -307,7 +327,11 @@ pub async fn update_routes(
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
-    Ok((StatusCode::OK, Json(serde_json::json!({"status": "updated"}))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "updated"})),
+    )
+        .into_response())
 }
 
 /// GET /admin/api/routes/types — 返回支持的 RouteType 枚举

@@ -19,7 +19,14 @@ fn merge_defaults_applied_when_no_input() {
         },
         ..Default::default()
     };
-    let result = bff::server::mapping::merge_inputs(&im, &json!({}), &json!({}), &json!({}), &json!({}), &json!({}));
+    let result = bff::server::mapping::merge_inputs(
+        &im,
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+    );
     assert_eq!(result["pageSize"], json!(20));
     assert_eq!(result["sort"], json!("desc"));
 }
@@ -287,7 +294,14 @@ fn empty_output_mapping_passthrough() {
 #[test]
 fn empty_input_mapping_returns_empty() {
     let im = InputMapping::default();
-    let result = bff::server::mapping::merge_inputs(&im, &json!({}), &json!({}), &json!({}), &json!({}), &json!({}));
+    let result = bff::server::mapping::merge_inputs(
+        &im,
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+    );
     assert!(result.is_object());
     assert!(result.as_object().unwrap().is_empty());
 }

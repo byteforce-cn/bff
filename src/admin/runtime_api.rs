@@ -24,7 +24,10 @@ pub async fn health() -> Json<serde_json::Value> {
 /// GET /admin/api/metrics — Prometheus 文本格式
 pub async fn metrics(State(state): State<AppState>) -> Response {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         state.prometheus.render(),
     )
         .into_response()
@@ -54,7 +57,11 @@ pub async fn delete_session(
     let removed = state.sessions.write().await.remove(&session_id);
     if removed.is_some() {
         tracing::info!(session_id = %id, "管理员撤销会话");
-        Ok((StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response())
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
+        )
+            .into_response())
     } else {
         // 可能已过期自动清理
         Err(AppError::not_found(format!("会话不存在: {}", session_id)))
@@ -100,9 +107,13 @@ pub async fn test_pipeline(
         if let Some(obj) = sess.as_object() {
             for (k, v) in obj {
                 if let Some(s) = v.as_str() {
-                    test_params.entry(k.clone()).or_insert_with(|| s.to_string());
+                    test_params
+                        .entry(k.clone())
+                        .or_insert_with(|| s.to_string());
                 } else {
-                    test_params.entry(k.clone()).or_insert_with(|| v.to_string());
+                    test_params
+                        .entry(k.clone())
+                        .or_insert_with(|| v.to_string());
                 }
             }
             session_injected = true;
@@ -112,9 +123,13 @@ pub async fn test_pipeline(
         if let Some(obj) = env.as_object() {
             for (k, v) in obj {
                 if let Some(s) = v.as_str() {
-                    test_params.entry(k.clone()).or_insert_with(|| s.to_string());
+                    test_params
+                        .entry(k.clone())
+                        .or_insert_with(|| s.to_string());
                 } else {
-                    test_params.entry(k.clone()).or_insert_with(|| v.to_string());
+                    test_params
+                        .entry(k.clone())
+                        .or_insert_with(|| v.to_string());
                 }
             }
         }
@@ -170,7 +185,8 @@ pub async fn test_pipeline(
                     let out =
                         execute_step(step.step_type, &step.config, &params, &inputs, &ctx).await?;
                     let duration_ms = step_start.elapsed().as_millis() as u64;
-                    let is_dry_run = ctx.dry_run && matches!(step.step_type, crate::config::StepType::HttpRequest);
+                    let is_dry_run = ctx.dry_run
+                        && matches!(step.step_type, crate::config::StepType::HttpRequest);
                     Ok((step.id.clone(), out, duration_ms, is_dry_run))
                 });
             }

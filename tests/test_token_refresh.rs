@@ -1,7 +1,7 @@
 //! 场景 7：令牌刷新 — Stale-While-Revalidate + 防惊群 + 代理层 401 重试。
 mod common;
 
-use bff::config::{RouteDef, RouteType, RouteTypeConfig, InputMapping, OutputMapping};
+use bff::config::{InputMapping, OutputMapping, RouteDef, RouteType, RouteTypeConfig};
 use bff::oidc::StoredTokens;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -42,10 +42,14 @@ async fn test_valid_token_passes_through_no_refresh() {
 
     // Token 还有 3600s 才过期，远超 skew(60s)，不应触发刷新
     let tokens = StoredTokens::new(
-        "mock", "user-1",
-        "fresh-token", Some("mock-refresh-token"), None,
+        "mock",
+        "user-1",
+        "fresh-token",
+        Some("mock-refresh-token"),
+        None,
         3600,
-    ).unwrap();
+    )
+    .unwrap();
     let cookie = common::create_session_with_tokens(&state, &tokens).await;
 
     let bff = common::spawn_business(state).await;
@@ -54,7 +58,9 @@ async fn test_valid_token_passes_through_no_refresh() {
     let resp = client
         .get(format!("{}/api/data/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 200, "未临期 token 应直接放行");
     assert_eq!(idp.refresh_count.load(Ordering::SeqCst), 0, "不应触发刷新");
@@ -94,10 +100,14 @@ async fn test_stale_while_revalidate_background_refresh() {
 
     // Token 30s 后过期，skew=60s → is_expiring(60) = true
     let tokens = StoredTokens::new(
-        "mock", "user-1",
-        "old-access-token", Some("mock-refresh-token"), None,
+        "mock",
+        "user-1",
+        "old-access-token",
+        Some("mock-refresh-token"),
+        None,
         30,
-    ).unwrap();
+    )
+    .unwrap();
     let cookie = common::create_session_with_tokens(&state, &tokens).await;
 
     let bff = common::spawn_business(state).await;
@@ -107,19 +117,31 @@ async fn test_stale_while_revalidate_background_refresh() {
     let resp = client
         .get(format!("{}/api/data/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
-    assert_eq!(resp.status(), 200, "临期 token 应直接放行（Stale-While-Revalidate）");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "临期 token 应直接放行（Stale-While-Revalidate）"
+    );
 
     // 等待后台刷新完成
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    assert_eq!(idp.refresh_count.load(Ordering::SeqCst), 1, "后台应触发一次刷新");
+    assert_eq!(
+        idp.refresh_count.load(Ordering::SeqCst),
+        1,
+        "后台应触发一次刷新"
+    );
 
     // 后续请求应使用刷新后的新 token
     let resp = client
         .get(format!("{}/api/data/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let requests = downstream.received_requests().await.unwrap();
     let last = requests.last().unwrap();
@@ -164,10 +186,14 @@ async fn test_expired_token_blocks_until_refreshed() {
 
     // Token 已过期 120s
     let tokens = StoredTokens::new(
-        "mock", "user-1",
-        "expired-token", Some("mock-refresh-token"), None,
+        "mock",
+        "user-1",
+        "expired-token",
+        Some("mock-refresh-token"),
+        None,
         -120,
-    ).unwrap();
+    )
+    .unwrap();
     let cookie = common::create_session_with_tokens(&state, &tokens).await;
 
     let bff = common::spawn_business(state).await;
@@ -176,10 +202,16 @@ async fn test_expired_token_blocks_until_refreshed() {
     let resp = client
         .get(format!("{}/api/data/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 200, "过期 token 刷新后应成功");
-    assert_eq!(idp.refresh_count.load(Ordering::SeqCst), 1, "应触发同步刷新");
+    assert_eq!(
+        idp.refresh_count.load(Ordering::SeqCst),
+        1,
+        "应触发同步刷新"
+    );
 
     // 确认使用了新 token
     let requests = downstream.received_requests().await.unwrap();
@@ -331,10 +363,14 @@ async fn test_proxy_401_triggers_refresh_and_retry() {
 
     // Token 有效（不在 skew 窗口），但上游拒绝此 token
     let tokens = StoredTokens::new(
-        "mock", "user-1",
-        "old-access-token", Some("mock-refresh-token"), None,
+        "mock",
+        "user-1",
+        "old-access-token",
+        Some("mock-refresh-token"),
+        None,
         3600,
-    ).unwrap();
+    )
+    .unwrap();
     let cookie = common::create_session_with_tokens(&state, &tokens).await;
 
     let bff = common::spawn_business(state).await;
@@ -343,11 +379,17 @@ async fn test_proxy_401_triggers_refresh_and_retry() {
     let resp = client
         .get(format!("{}/api/data/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 200, "401 后刷新重试应成功");
     assert_eq!(resp.text().await.unwrap(), "ok-refreshed");
-    assert_eq!(idp.refresh_count.load(Ordering::SeqCst), 1, "应触发一次刷新");
+    assert_eq!(
+        idp.refresh_count.load(Ordering::SeqCst),
+        1,
+        "应触发一次刷新"
+    );
 }
 
 // ============================================================
@@ -384,11 +426,7 @@ async fn test_proxy_401_without_refresh_token_returns_401() {
     let state = common::make_state(cfg);
 
     // Token 有效，但无 refresh_token
-    let tokens = StoredTokens::new(
-        "mock", "user-1",
-        "no-refresh-token", None, None,
-        3600,
-    ).unwrap();
+    let tokens = StoredTokens::new("mock", "user-1", "no-refresh-token", None, None, 3600).unwrap();
     let cookie = common::create_session_with_tokens(&state, &tokens).await;
 
     let bff = common::spawn_business(state).await;
@@ -397,7 +435,9 @@ async fn test_proxy_401_without_refresh_token_returns_401() {
     let resp = client
         .get(format!("{}/api/data/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     // 无 refresh_token 无法刷新，直接透传上游 401
     assert_eq!(resp.status(), 401, "无 refresh_token 无法刷新，应透传 401");
@@ -446,10 +486,14 @@ async fn test_legacy_route_proxy_401_retry() {
     let state = common::make_state(cfg);
 
     let tokens = StoredTokens::new(
-        "mock", "user-1",
-        "old-legacy-token", Some("mock-refresh-token"), None,
+        "mock",
+        "user-1",
+        "old-legacy-token",
+        Some("mock-refresh-token"),
+        None,
         3600,
-    ).unwrap();
+    )
+    .unwrap();
     let cookie = common::create_session_with_tokens(&state, &tokens).await;
 
     let bff = common::spawn_business(state).await;
@@ -458,7 +502,9 @@ async fn test_legacy_route_proxy_401_retry() {
     let resp = client
         .get(format!("{}/api/legacy/data", bff))
         .header("cookie", &cookie)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 200, "legacy 路由 401 刷新重试应成功");
     assert_eq!(resp.text().await.unwrap(), "legacy-ok");

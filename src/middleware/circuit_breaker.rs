@@ -68,7 +68,10 @@ impl CircuitBreakerRegistry {
         match b.state {
             BreakerState::Closed | BreakerState::HalfOpen => true,
             BreakerState::Open => {
-                if b.opened_at.map(|t| t.elapsed() >= open_dur).unwrap_or(false) {
+                if b.opened_at
+                    .map(|t| t.elapsed() >= open_dur)
+                    .unwrap_or(false)
+                {
                     b.state = BreakerState::HalfOpen;
                     true
                 } else {

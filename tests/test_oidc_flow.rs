@@ -1,7 +1,7 @@
 //! 场景 1：OIDC 完整登录流程 — 授权码回调 → 令牌存储 → Session 创建 → 认证代理。
 mod common;
 
-use bff::config::{RouteDef, RouteType, RouteTypeConfig, InputMapping, OutputMapping};
+use bff::config::{InputMapping, OutputMapping, RouteDef, RouteType, RouteTypeConfig};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -14,7 +14,9 @@ async fn oidc_full_login_flow() {
     Mock::given(method("GET"))
         .and(path("/users/1"))
         .and(header("authorization", "Bearer mock-access-token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "Alice"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"name": "Alice"})),
+        )
         .expect(1)
         .mount(&downstream)
         .await;
@@ -43,10 +45,13 @@ async fn oidc_full_login_flow() {
     let resp = client.get(format!("{}/login", bff)).send().await.unwrap();
     assert!(resp.status().is_redirection(), "应为 3xx 重定向");
     let location = resp.headers()["location"].to_str().unwrap().to_string();
-    assert!(location.starts_with(&format!("{}/authorize", idp.url)), "应重定向到 IdP: {}", location);
+    assert!(
+        location.starts_with(&format!("{}/authorize", idp.url)),
+        "应重定向到 IdP: {}",
+        location
+    );
     let auth_url = url::Url::parse(&location).unwrap();
-    let params: std::collections::HashMap<_, _> =
-        auth_url.query_pairs().into_owned().collect();
+    let params: std::collections::HashMap<_, _> = auth_url.query_pairs().into_owned().collect();
     let state_param = params.get("state").expect("授权 URL 应含 state").clone();
     let nonce = params.get("nonce").expect("授权 URL 应含 nonce").clone();
     assert!(params.contains_key("code_challenge"), "应使用 PKCE");

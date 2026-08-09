@@ -27,7 +27,9 @@ fn test_validate_redirect() {
     assert!(!bff::oidc::handlers::validate_redirect("\\\\evil.com"));
 
     // 合法：带 query string
-    assert!(bff::oidc::handlers::validate_redirect("/admin/sessions?tab=1"));
+    assert!(bff::oidc::handlers::validate_redirect(
+        "/admin/sessions?tab=1"
+    ));
 
     // 非法：空字符串
     assert!(!bff::oidc::handlers::validate_redirect(""));
@@ -48,7 +50,10 @@ async fn simulate_login_popup_flow() {
     let client = common::test_client();
 
     let resp = client
-        .get(format!("{}/login?provider=mock&redirect=/dashboard&popup=true", bff))
+        .get(format!(
+            "{}/login?provider=mock&redirect=/dashboard&popup=true",
+            bff
+        ))
         .send()
         .await
         .unwrap();
@@ -63,8 +68,7 @@ async fn simulate_login_popup_flow() {
     );
 
     let auth_url = url::Url::parse(&location).unwrap();
-    let params: std::collections::HashMap<_, _> =
-        auth_url.query_pairs().into_owned().collect();
+    let params: std::collections::HashMap<_, _> = auth_url.query_pairs().into_owned().collect();
     let state_param = params.get("state").expect("应含 state").clone();
     let nonce = params.get("nonce").expect("应含 nonce").clone();
     *idp.nonce.lock().unwrap() = Some(nonce);
@@ -95,14 +99,8 @@ async fn simulate_login_popup_flow() {
     );
 
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("postMessage"),
-        "HTML 应包含 postMessage 脚本"
-    );
-    assert!(
-        body.contains("oidc-done"),
-        "HTML 应发送 oidc-done 消息"
-    );
+    assert!(body.contains("postMessage"), "HTML 应包含 postMessage 脚本");
+    assert!(body.contains("oidc-done"), "HTML 应发送 oidc-done 消息");
     assert!(body.contains("window.close"), "HTML 应调用 window.close");
 }
 
@@ -166,8 +164,7 @@ async fn non_popup_callback_still_redirects() {
 
     let location = resp.headers()["location"].to_str().unwrap().to_string();
     let auth_url = url::Url::parse(&location).unwrap();
-    let params: std::collections::HashMap<_, _> =
-        auth_url.query_pairs().into_owned().collect();
+    let params: std::collections::HashMap<_, _> = auth_url.query_pairs().into_owned().collect();
     let state_param = params.get("state").unwrap().clone();
     let nonce = params.get("nonce").unwrap().clone();
     *idp.nonce.lock().unwrap() = Some(nonce);
@@ -182,18 +179,7 @@ async fn non_popup_callback_still_redirects() {
         .await
         .unwrap();
 
-    assert!(
-        resp.status().is_redirection(),
-        "非 popup 模式应 302 重定向"
-    );
-    let location = resp
-        .headers()
-        .get("location")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert_eq!(
-        location, "/dashboard",
-        "应重定向到 /dashboard"
-    );
+    assert!(resp.status().is_redirection(), "非 popup 模式应 302 重定向");
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/dashboard", "应重定向到 /dashboard");
 }

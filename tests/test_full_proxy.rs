@@ -9,9 +9,7 @@
 
 mod common;
 
-use bff::config::{
-    InputMapping, OutputMapping, RouteDef, RouteType, RouteTypeConfig,
-};
+use bff::config::{InputMapping, OutputMapping, RouteDef, RouteType, RouteTypeConfig};
 use common::{base_config, make_state, spawn_business, test_client};
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
@@ -71,13 +69,66 @@ async fn test_http_proxy_with_mock_upstream() {
 }
 
 #[tokio::test]
+async fn test_http_proxy_preserves_content_type_for_body_requests() {
+    // 回归：BFF proxy 转发带 body 请求时必须透传原始 Content-Type。
+    // 此前重建 reqwest 请求时只恢复 body 字节，Vec<u8> 会被 reqwest 默认成
+    // application/octet-stream，导致上游 JSON 写接口全部 500（ISSUE-002）。
+    let mock_server = wiremock::MockServer::start().await;
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/obs/changes"))
+        .and(wiremock::matchers::header(
+            "Content-Type",
+            "application/json",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(201).set_body_string("created"))
+        .mount(&mock_server)
+        .await;
+
+    let mut cfg = base_config();
+    cfg.routes.push(RouteDef {
+        path: "/api/obs/changes".into(),
+        methods: vec![],
+        description: "带 body 的 JSON POST".into(),
+        auth_required: false,
+        route_type: RouteType::Proxy,
+        config: RouteTypeConfig {
+            upstream: Some(mock_server.uri()),
+            strip_prefix: false,
+            proxy_mode: "http".into(),
+            ..Default::default()
+        },
+        input_mapping: InputMapping::default(),
+        output_mapping: OutputMapping::default(),
+    });
+
+    let base = spawn_business(make_state(cfg)).await;
+    let client = test_client();
+
+    let resp = client
+        .post(format!("{}/api/obs/changes", base))
+        .header("Content-Type", "application/json")
+        .body(r#"{"change_action":"CREATE","obs_code":"EAST","name":"华东分部"}"#)
+        .send()
+        .await
+        .expect("POST 请求失败");
+
+    // 若 Content-Type 未透传（octet-stream），wiremock 的 header 匹配不命中，
+    // 默认返回 404，此处断言会失败，从而捕获回归。
+    assert_eq!(resp.status(), 201, "上游应收到 application/json 并返回 201");
+}
+
+#[tokio::test]
 async fn test_http_proxy_with_auth_token_injection() {
     let mock_server = wiremock::MockServer::start().await;
 
     // 验证上游收到了 Bearer token
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/api/users"))
-        .and(wiremock::matchers::header("Authorization", "Bearer test-token-123"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer test-token-123",
+        ))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("authenticated"))
         .mount(&mock_server)
         .await;
@@ -145,7 +196,9 @@ async fn test_sse_stream_proxy() {
             wiremock::ResponseTemplate::new(200)
                 .append_header("Content-Type", "text/event-stream")
                 .append_header("Cache-Control", "no-cache")
-                .set_body_string("data: {\"time\":\"12:00:00\"}\n\ndata: {\"time\":\"12:00:01\"}\n\n"),
+                .set_body_string(
+                    "data: {\"time\":\"12:00:00\"}\n\ndata: {\"time\":\"12:00:01\"}\n\n",
+                ),
         )
         .mount(&mock_server)
         .await;
@@ -313,10 +366,7 @@ async fn test_circuit_breaker_opens_on_repeated_failures() {
 
     // 连续触发失败以打开熔断
     for _ in 0..5 {
-        let _ = client
-            .get(format!("{}/api/failing", base))
-            .send()
-            .await;
+        let _ = client.get(format!("{}/api/failing", base)).send().await;
     }
 
     // 熔断器应已打开
@@ -339,9 +389,7 @@ async fn test_ws_tunnel_echo_with_fakesvc() {
     // 直接连接 fakesvc 验证 WebSocket echo
     let ws_url = "ws://localhost:9091/ws/echo";
 
-    let (mut ws, _) = connect_async(ws_url)
-        .await
-        .expect("连接 fakesvc WS 失败");
+    let (mut ws, _) = connect_async(ws_url).await.expect("连接 fakesvc WS 失败");
 
     let test_msg = "hello-from-test";
     ws.send(tokio_tungstenite::tungstenite::Message::Text(
@@ -379,8 +427,7 @@ async fn test_ws_tunnel_clock_with_fakesvc() {
         .expect("消息错误");
 
     if let tokio_tungstenite::tungstenite::Message::Text(text) = response {
-        let v: serde_json::Value =
-            serde_json::from_str(&text).expect("clock 消息应为 JSON");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("clock 消息应为 JSON");
         assert!(v.get("time").is_some(), "clock 消息应包含 time 字段");
     } else {
         panic!("期望 Text 消息");
@@ -512,20 +559,26 @@ async fn test_e2e_health_check() {
 fn test_ws_url_strip_prefix_false() {
     // 验证 strip_prefix=false 时，完整路径被传递到上游
     // 这是修复 WS 隧道 1011 的核心测试
-    let cfg = bff::config::AppConfig::load(std::path::Path::new("config"))
-        .expect("加载配置失败");
+    let cfg = bff::config::AppConfig::load(std::path::Path::new("config")).expect("加载配置失败");
 
     let ws_route = cfg.routes.iter().find(|r| r.path == "/ws").unwrap();
 
     // strip_prefix 应为 false（routes.yaml 配置）
-    assert!(!ws_route.config.strip_prefix,
-        "WS 路由 strip_prefix 必须为 false，否则上游 URL 构造错误");
+    assert!(
+        !ws_route.config.strip_prefix,
+        "WS 路由 strip_prefix 必须为 false，否则上游 URL 构造错误"
+    );
 
     // proxy_mode 应为 websocket（自动检测）
     assert_eq!(ws_route.config.proxy_mode, "websocket");
 
     // 模拟 URL 构造逻辑（与 ws_upgrade_handler 一致）
-    let upstream = ws_route.config.upstream.as_deref().unwrap().trim_end_matches('/');
+    let upstream = ws_route
+        .config
+        .upstream
+        .as_deref()
+        .unwrap()
+        .trim_end_matches('/');
     let path = "/ws/clock";
     let suffix = if ws_route.config.strip_prefix {
         path.strip_prefix(&ws_route.path).unwrap_or("")
@@ -538,20 +591,26 @@ fn test_ws_url_strip_prefix_false() {
     let url = format!("{}{}", upstream_ws, suffix);
 
     // 期望: ws://localhost:9091/ws/clock（而非 ws://localhost:9091/clock）
-    assert_eq!(url, "ws://localhost:9091/ws/clock",
-        "strip_prefix=false 时路径不应被截断，fakesvc 期望完整路径 /ws/clock");
+    assert_eq!(
+        url, "ws://localhost:9091/ws/clock",
+        "strip_prefix=false 时路径不应被截断，fakesvc 期望完整路径 /ws/clock"
+    );
 }
 
 #[test]
 fn test_sse_url_strip_prefix_false() {
-    let cfg = bff::config::AppConfig::load(std::path::Path::new("config"))
-        .expect("加载配置失败");
+    let cfg = bff::config::AppConfig::load(std::path::Path::new("config")).expect("加载配置失败");
 
     let sse_route = cfg.routes.iter().find(|r| r.path == "/sse").unwrap();
     assert!(!sse_route.config.strip_prefix);
     assert_eq!(sse_route.config.proxy_mode, "sse");
 
-    let upstream = sse_route.config.upstream.as_deref().unwrap().trim_end_matches('/');
+    let upstream = sse_route
+        .config
+        .upstream
+        .as_deref()
+        .unwrap()
+        .trim_end_matches('/');
     let path = "/sse/clock";
     let suffix = if sse_route.config.strip_prefix {
         path.strip_prefix(&sse_route.path).unwrap_or("")
@@ -561,8 +620,10 @@ fn test_sse_url_strip_prefix_false() {
     let url = format!("{}{}", upstream, suffix);
 
     // 期望: http://localhost:9091/sse/clock
-    assert_eq!(url, "http://localhost:9091/sse/clock",
-        "SSE strip_prefix=false 时路径不应被截断");
+    assert_eq!(
+        url, "http://localhost:9091/sse/clock",
+        "SSE strip_prefix=false 时路径不应被截断"
+    );
 }
 
 // ============================================================
@@ -572,8 +633,7 @@ fn test_sse_url_strip_prefix_false() {
 #[tokio::test]
 async fn test_routes_yaml_parses_fakesvc_routes() {
     // 验证 config/routes/routes.yaml 可被正确解析（包含 fakesvc 路由）
-    let cfg = bff::config::AppConfig::load(std::path::Path::new("config"))
-        .expect("加载配置失败");
+    let cfg = bff::config::AppConfig::load(std::path::Path::new("config")).expect("加载配置失败");
 
     // 查找 fakesvc 路由
     let has_users_route = cfg.routes.iter().any(|r| r.path == "/api/users");
@@ -613,7 +673,10 @@ config:
 
     let route: RouteDef = serde_yaml::from_str(yaml).expect("解析 YAML 失败");
     assert_eq!(route.config.proxy_mode, "sse");
-    assert_eq!(route.config.upstream.as_deref(), Some("http://localhost:9091"));
+    assert_eq!(
+        route.config.upstream.as_deref(),
+        Some("http://localhost:9091")
+    );
 }
 
 #[tokio::test]

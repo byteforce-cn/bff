@@ -10,8 +10,8 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreAuthenticationFlow, CoreTokenResponse};
 use openidconnect::{
-    AuthorizationCode, CsrfToken, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
-    PkceCodeVerifier, RefreshToken, Scope,
+    AuthorizationCode, CsrfToken, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier,
+    RefreshToken, Scope,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -57,7 +57,9 @@ pub fn select_provider(state: &AppState, id: Option<&str>) -> Result<OidcProvide
         None => match cfg.oidc.providers.as_slice() {
             [single] => Ok(single.clone()),
             [] => Err(AppError::bad_request("未配置任何 OIDC provider")),
-            _ => Err(AppError::bad_request("存在多个 provider，请通过 ?provider= 指定")),
+            _ => Err(AppError::bad_request(
+                "存在多个 provider，请通过 ?provider= 指定",
+            )),
         },
     }
 }
@@ -168,14 +170,7 @@ pub async fn callback(
         .await
         .map_err(|e| AppError::unauthorized(format!("令牌交换失败: {}", e)))?;
 
-    let sub = verify_id_token(
-        &state,
-        &provider,
-        &base_url,
-        &token_response,
-        &flow.nonce,
-    )
-    .await?;
+    let sub = verify_id_token(&state, &provider, &base_url, &token_response, &flow.nonce).await?;
 
     let stored = StoredTokens::new(
         &provider.id,
@@ -380,11 +375,9 @@ fn decode_jwt_payload_unverified(jwt: &str) -> Result<serde_json::Value, AppErro
         .split('.')
         .nth(1)
         .ok_or_else(|| AppError::unauthorized("id_token 格式非法"))?;
-    let bytes = base64::engine::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        payload,
-    )
-    .map_err(|e| AppError::unauthorized(format!("id_token 解码失败: {}", e)))?;
+    let bytes =
+        base64::engine::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+            .map_err(|e| AppError::unauthorized(format!("id_token 解码失败: {}", e)))?;
     serde_json::from_slice(&bytes)
         .map_err(|e| AppError::unauthorized(format!("id_token claims 解析失败: {}", e)))
 }
@@ -410,19 +403,25 @@ pub async fn try_refresh(
     let lock_key = format!("bff:refresh_lock:{}", sid);
     let Some(guard) = state
         .lock
-        .acquire(&lock_key, Duration::from_millis(500), Duration::from_secs(5))
+        .acquire(
+            &lock_key,
+            Duration::from_millis(500),
+            Duration::from_secs(5),
+        )
         .await
     else {
         // 其他请求正在刷新：等待后从 store 重读最新会话
         tokio::time::sleep(Duration::from_millis(100)).await;
         session.load().await.ok();
-        let fresh: Option<StoredTokens> = session.get(&session_key(&provider.id)).await.ok().flatten();
+        let fresh: Option<StoredTokens> =
+            session.get(&session_key(&provider.id)).await.ok().flatten();
         return Ok(fresh);
     };
 
     // 持锁后从 store 重读：可能已被并发请求刷新（内存副本可能是旧的）
     session.load().await.ok();
-    let current: Option<StoredTokens> = session.get(&session_key(&provider.id)).await.ok().flatten();
+    let current: Option<StoredTokens> =
+        session.get(&session_key(&provider.id)).await.ok().flatten();
     if let Some(cur) = &current {
         if !cur.is_expiring(provider.refresh_skew_secs) {
             guard.release().await;
@@ -473,7 +472,11 @@ pub async fn force_refresh(
     let lock_key = format!("bff:refresh_lock:{}", sid);
     let Some(guard) = state
         .lock
-        .acquire(&lock_key, Duration::from_millis(500), Duration::from_secs(5))
+        .acquire(
+            &lock_key,
+            Duration::from_millis(500),
+            Duration::from_secs(5),
+        )
         .await
     else {
         // 其他请求正在刷新：等待后从 store 重读
@@ -522,8 +525,13 @@ async fn do_refresh(
         sub,
         resp.access_token().secret(),
         resp.refresh_token().map(|t| t.secret().as_str()),
-        resp.extra_fields().id_token().map(|t| t.to_string()).as_deref(),
-        resp.expires_in().map(|d| d.as_secs() as i64).unwrap_or(3600),
+        resp.extra_fields()
+            .id_token()
+            .map(|t| t.to_string())
+            .as_deref(),
+        resp.expires_in()
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(3600),
     )?;
     Ok(stored)
 }
