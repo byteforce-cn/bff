@@ -227,6 +227,11 @@ pub struct RateLimitConfig {
     /// 突发容量
     #[serde(default = "default_rate_burst")]
     pub burst_size: u32,
+    /// 全局限流跳过的路径前缀（与 `security_headers.csp_overrides` 同风格，按前缀收窄）。
+    /// 命中前缀的请求不消耗全局限流令牌（如 SPA 静态资源 `/assets/*`、`/index.html`），
+    /// 其余路径保持 tower-governor 全局限流不变。
+    #[serde(default)]
+    pub skip_path_prefixes: Vec<String>,
 }
 
 impl Default for RateLimitConfig {
@@ -234,6 +239,7 @@ impl Default for RateLimitConfig {
         Self {
             per_second: default_rate_per_second(),
             burst_size: default_rate_burst(),
+            skip_path_prefixes: Vec::new(),
         }
     }
 }

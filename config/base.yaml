@@ -65,6 +65,15 @@ http_client:
 rate_limit:
   per_second: 50
   burst_size: 500
+  # 全局限流跳过的路径前缀（与 security_headers.csp_overrides 同风格，按路径前缀收窄）。
+  # SPA 一次页面加载会并发请求 index.html + 大量 /assets/* 静态资源 + Monaco worker（轻松上百
+  # 个 GET），全部计入同一个按对端 IP 共享的限流桶，多人/反复刷新即可瞬间打穿 burst → 429。
+  # 静态资源只有 IO/带宽成本，真正要保护的是 DB / 上游 API，因此把 SPA 资源从全局限流中摘除，
+  # 其余路径保持 tower-governor 限流不变（命中前缀的请求不消耗全局限流令牌）。
+  skip_path_prefixes:
+    - "/assets/"
+    - "/favicon.ico"
+    - "/index.html"
 
 # 认证端点 per-IP 限流（网络层纵深防御，与 IAM 账号锁定互补）
 #
