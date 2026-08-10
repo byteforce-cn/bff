@@ -291,6 +291,7 @@ dependencies = [
  "base64 0.22.1",
  "figment",
  "futures",
+ "governor",
  "humantime 1.3.0",
  "humantime-serde",
  "ipnet",

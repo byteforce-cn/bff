@@ -14,10 +14,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tower::ServiceExt;
-use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::GovernorLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -32,13 +29,6 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
     let request_id_layer = SetRequestIdLayer::new(
         axum::http::HeaderName::from_static("x-request-id"),
         MakeRequestUuid::default(),
-    );
-    let governor_conf = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(cfg.rate_limit.per_second)
-            .burst_size(cfg.rate_limit.burst_size)
-            .finish()
-            .expect("限流配置非法"),
     );
 
     // CORS：根据配置选择 permissive 或白名单模式
@@ -95,9 +85,16 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer)
-        .layer(GovernorLayer {
-            config: governor_conf,
-        })
+        // 全局限流（tower-governor）：与 CSP csp_overrides 同风格按路径前缀收窄，
+        // SPA 静态资源等 skip_path_prefixes 命中的请求不消耗全局限流令牌，其余路径保持限流
+        .layer(axum::middleware::from_fn_with_state(
+            crate::middleware::rate_limit_skip::rate_limit_skip_state(
+                cfg.rate_limit.per_second,
+                cfg.rate_limit.burst_size,
+                cfg.rate_limit.skip_path_prefixes.clone(),
+            ),
+            crate::middleware::rate_limit_skip::rate_limit_skip_middleware,
+        ))
         // 认证端点 per-IP 限流（网络层纵深防御；未启用/未命中路径时原样放行）
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

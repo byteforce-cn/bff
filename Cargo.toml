@@ -28,6 +28,7 @@ metrics-exporter-prometheus = "0.15"
 aes-gcm = "0.10"
 uuid = { version = "1", features = ["v4"] }
 tower_governor = "0.4"
+governor = "0.6"
 ipnet = "2"
 url = "2"
 base64 = "0.22"

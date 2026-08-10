@@ -103,3 +103,50 @@ async fn spa_csp_path_override() {
         .to_string();
     assert!(!csp.contains("'unsafe-eval'"), "default csp: {}", csp);
 }
+
+/// 全局限流路径跳过（与 CSP csp_overrides 同风格收窄）：
+/// SPA 静态资源（skip_path_prefixes 命中）不消耗全局限流令牌，其余路径保持 tower-governor 限流。
+#[tokio::test]
+async fn rate_limit_skip_paths_bypass_global() {
+    let mut cfg = common::base_config();
+    cfg.spa.dir = common::make_spa_dir("spa");
+    // 收紧全局限流，便于在测试中快速触达 429（默认 50/s、burst 500 需要大量请求）
+    cfg.rate_limit.per_second = 1;
+    cfg.rate_limit.burst_size = 2;
+    // 与 CSP csp_overrides 同风格：SPA 静态资源路径跳过全局限流
+    cfg.rate_limit.skip_path_prefixes = vec!["/index.html".into(), "/app.js".into()];
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state).await;
+    let client = common::test_client();
+
+    // 1. skip 路径（SPA 静态资源）：连续请求全部 200，不消耗令牌、不触发 429
+    for i in 0..12 {
+        let resp = client
+            .get(format!("{}/app.js?t={}", bff, i))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "skip 路径不应被全局限流 (i={})", i);
+    }
+
+    // 2. 非 skip 路径（/api/*）：burst=2 用尽后应触发 429（限流器对非跳过路径正常工作）
+    let mut saw_429 = false;
+    for _ in 0..8 {
+        let resp = client
+            .get(format!("{}/api/nonexistent", bff))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().as_u16() == 429 {
+            saw_429 = true;
+            let body = resp.text().await.unwrap();
+            assert!(
+                body.contains("Too Many Requests"),
+                "429 响应应为 tower-governor 默认文案: {}",
+                body
+            );
+            break;
+        }
+    }
+    assert!(saw_429, "非 skip 路径应触发全局限流 429");
+}
