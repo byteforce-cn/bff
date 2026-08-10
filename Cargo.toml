@@ -24,7 +24,7 @@ rust-embed = "8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
+metrics-exporter-prometheus = "0.18"
 aes-gcm = "0.10"
 uuid = { version = "1", features = ["v4"] }
 tower_governor = "0.4"
