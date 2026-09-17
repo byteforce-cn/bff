@@ -25,7 +25,7 @@
 - 📄 **静态 SPA 发布**：内嵌前端资源 + 前端路由 fallback
 - 🔐 **OIDC 登录**：授权码 + PKCE、令牌刷新（分布式锁防惊群）、登出
 - 🔀 **YAML 声明式服务编排**：DAG 分层并行、硬超时、fail_fast、HTTP 缓存
-- 📜 **Rhai 脚本扩展**：沙箱 + `spawn_blocking` 隔离 + 操作数/时长上限
+- 📜 **QuickJS 脚本扩展**（JavaScript）：沙箱 + `spawn_blocking` 隔离 + 内存/栈/时长上限
 - 🔁 **反向代理**：路由映射、Bearer 注入、熔断、限流、SSE / WebSocket 透传
 - 🛠️ **管理端口（`:8443`）**：配置导入/导出（脱敏 + 热重载）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
 - 🧩 **Provider 可插拔**：缓存 / 锁 / Session，POC 全内存零依赖，Redis 为后续扩展点

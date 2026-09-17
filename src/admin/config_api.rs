@@ -166,7 +166,7 @@ pub async fn list_scripts(State(state): State<AppState>) -> Json<serde_json::Val
     if let Ok(rd) = std::fs::read_dir("config/scripts") {
         for e in rd.flatten() {
             if let Some(name) = e.file_name().to_str() {
-                if name.ends_with(".rhai") {
+                if name.ends_with(".js") {
                     if let Ok(content) = std::fs::read_to_string(e.path()) {
                         map.entry(name.to_string()).or_insert(content);
                     }

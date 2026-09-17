@@ -13,7 +13,7 @@ echo:
       type: script
       config:
         script: |
-          #{ message: "hello from pipeline echo", timestamp: now(), params: inputs }
+          ({ message: "hello from pipeline echo", timestamp: now(), params: inputs })
 
 # dashboard: 聚合用户信息 + 订单列表
 # 依赖 from_session.userId → sub，由路由层自动注入
@@ -44,6 +44,6 @@ dashboard:
       depends_on: [fetch_user, fetch_orders]
       config:
         script: |
-          let user = inputs["fetch_user"].body;
-          let orders = inputs["fetch_orders"].body;
-          #{ user: user, orders: orders, generated_at: now() }
+          const user = inputs["fetch_user"].body;
+          const orders = inputs["fetch_orders"].body;
+          ({ user: user, orders: orders, generated_at: now() })

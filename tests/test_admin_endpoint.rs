@@ -68,14 +68,14 @@ async fn eval_script_with_session_and_env() {
     let state = common::make_state(cfg);
     // 注册测试脚本
     state.scripts.write().await.insert(
-        "test.rhai".into(),
-        "let sub = inputs[\"sub\"]; let env = inputs[\"APP_ENV\"]; #{ sub: sub, env: env }".into(),
+        "test.js".into(),
+        "({ sub: inputs[\"sub\"], env: inputs[\"APP_ENV\"] })".into(),
     );
     let admin = common::spawn_admin(state).await;
     let client = common::test_client();
 
     let resp = client
-        .post(format!("{}/admin/api/scripts/test.rhai/eval", admin))
+        .post(format!("{}/admin/api/scripts/test.js/eval", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
         .body(
@@ -116,12 +116,12 @@ async fn eval_script_without_session_env_behaves_same() {
         .scripts
         .write()
         .await
-        .insert("simple.rhai".into(), "#{ ok: true }".into());
+        .insert("simple.js".into(), "({ ok: true })".into());
     let admin = common::spawn_admin(state).await;
     let client = common::test_client();
 
     let resp = client
-        .post(format!("{}/admin/api/scripts/simple.rhai/eval", admin))
+        .post(format!("{}/admin/api/scripts/simple.js/eval", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
         .body(
@@ -154,9 +154,9 @@ steps:
     type: script
     config:
       script: |
-        let uid = inputs["user_id"];
-        let stage = inputs["stage"];
-        #{ user: uid, env: stage }
+        const uid = inputs["user_id"];
+        const stage = inputs["stage"];
+        ({ user: uid, env: stage })
 "#;
     let mut cfg = common::base_config();
     cfg.pipelines
@@ -221,8 +221,8 @@ steps:
     depends_on: [http_step]
     config:
       script: |
-        let mock_body = inputs["http_step"].body;
-        #{ dry_run_ok: true, mock: mock_body }
+        const mock_body = inputs["http_step"].body;
+        ({ dry_run_ok: true, mock: mock_body })
 "#;
     let mut cfg = common::base_config();
     cfg.pipelines
@@ -264,7 +264,7 @@ async fn test_endpoints_disabled_when_config_false() {
 
     // eval 端点 → 403
     let resp = client
-        .post(format!("{}/admin/api/scripts/test.rhai/eval", admin))
+        .post(format!("{}/admin/api/scripts/test.js/eval", admin))
         .header("x-admin-token", "test-admin-token")
         .header("Content-Type", "application/json")
         .body(r#"{"inputs":{}}"#)
