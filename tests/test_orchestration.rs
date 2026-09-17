@@ -29,9 +29,9 @@ steps:
     depends_on: [fetch_user, fetch_orders]
     config:
       script: |
-        let user = inputs["fetch_user"].body;
-        let orders = inputs["fetch_orders"].body;
-        #{{ user: user, orders: orders }}
+        const user = inputs["fetch_user"].body;
+        const orders = inputs["fetch_orders"].body;
+        ({{ user: user, orders: orders }})
 "#
     )
 }
@@ -153,9 +153,9 @@ steps:
     type: script
     config:
       script: |
-        let user_id = inputs["user_id"];
-        let stage = inputs["stage"];
-        #{ user: user_id, env: stage }
+        const user_id = inputs["user_id"];
+        const stage = inputs["stage"];
+        ({ user: user_id, env: stage })
 "#;
     let mut cfg = common::base_config();
     cfg.pipelines
@@ -211,10 +211,10 @@ steps:
     depends_on: [fetch]
     config:
       script: |
-        let name = inputs["fetch"].body.name;     // 来自 HTTP step 输出
-        let uid = inputs["user_id"];               // 来自 params
-        let env = inputs["stage"];                 // 来自 params
-        #{{ user: uid, name: name, env: env }}
+        const name = inputs["fetch"].body.name;   // 来自 HTTP step 输出
+        const uid = inputs["user_id"];             // 来自 params
+        const env = inputs["stage"];               // 来自 params
+        ({{ user: uid, name: name, env: env }})
 "#,
         svc.uri()
     );
@@ -255,7 +255,7 @@ steps:
     type: script
     config:
       script: |
-        #{ ok: true, count: 42 }
+        ({ ok: true, count: 42 })
 "#;
     let mut cfg = common::base_config();
     cfg.pipelines

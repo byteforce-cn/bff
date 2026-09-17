@@ -210,7 +210,7 @@ export default function RoutesPage() {
               id="rscript"
               value={editing.config.script || ""}
               onChange={(e) => setEditing({ ...editing, config: { ...editing.config, script: e.target.value || undefined } })}
-              placeholder="transform.rhai"
+              placeholder="transform.js"
             />
           </div>
         );

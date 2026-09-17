@@ -12,7 +12,7 @@ hello:
     - id: greet
       type: script
       config:
-        script: '#{ msg: "hi from pipeline" }'
+        script: '({ msg: "hi from pipeline" })'
 "#;
 
 #[tokio::test]

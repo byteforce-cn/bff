@@ -18,8 +18,8 @@ steps:
     type: script
     config:
       script: |
-        let mut i = 0;
-        for x in 0..100_000_000 { i += 1; }
+        let i = 0;
+        for (let x = 0; x < 100000000; x++) { i += 1; }
         i
 "#,
         )

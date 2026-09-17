@@ -129,7 +129,7 @@ export default function ScriptsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">脚本管理</h1>
-          <p className="text-sm text-muted-foreground mt-1">管理 Rhai 脚本并在线调试</p>
+          <p className="text-sm text-muted-foreground mt-1">管理 JavaScript（QuickJS）脚本并在线调试</p>
         </div>
         <div className="flex gap-2">
           <Dialog open={newScriptOpen} onOpenChange={setNewScriptOpen}>
@@ -148,7 +148,7 @@ export default function ScriptsPage() {
                   <Input
                     value={newScriptName}
                     onChange={(e) => setNewScriptName(e.target.value)}
-                    placeholder="例如 transform.rhai"
+                    placeholder="例如 transform.js"
                   />
                 </div>
               </div>

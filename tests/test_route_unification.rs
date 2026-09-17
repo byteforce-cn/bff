@@ -103,7 +103,7 @@ routes:
     methods: ["POST"]
     description: "数据转换脚本"
     config:
-      script: "transform.rhai"
+      script: "transform.js"
     input_mapping:
       from_body:
         payload: "."
@@ -114,7 +114,7 @@ routes:
     let r = &cfg.routes[0];
     assert_eq!(r.route_type, RouteType::Script);
     assert_eq!(r.methods, vec!["POST"]);
-    assert_eq!(r.config.script.as_deref(), Some("transform.rhai"));
+    assert_eq!(r.config.script.as_deref(), Some("transform.js"));
     assert!(r.config.script_inline.is_none());
     assert_eq!(r.input_mapping.from_body.get("payload").unwrap(), ".");
     assert_eq!(r.output_mapping.wrap.as_deref(), Some("data"));
