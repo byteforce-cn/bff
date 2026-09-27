@@ -281,7 +281,7 @@ pub async fn callback(
     let token_response: CoreTokenResponse = client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(PkceCodeVerifier::new(flow.pkce_verifier))
-        .request_async(crate::oidc::http_client::client_fn(state.oidc_http.clone()))
+        .request_async(&state.oidc_http)
         .await
         .map_err(|e| {
             // S12：不向调用方回显 IdP 内部细节
@@ -673,7 +673,7 @@ async fn do_refresh(
     let client = state.oidc_clients.get(provider, &base_url).await?;
     let resp: CoreTokenResponse = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token))
-        .request_async(crate::oidc::http_client::client_fn(state.oidc_http.clone()))
+        .request_async(&state.oidc_http)
         .await
         .map_err(|e| anyhow::anyhow!("refresh_token 交换失败: {}", e))?;
     let stored = StoredTokens::new(

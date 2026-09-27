@@ -16,35 +16,18 @@ ignore = [
     # 或替换配置层为自研合并 + serde_norway/serde_yaml_ng。
     "RUSTSEC-2024-0320",
 
-    # idna 0.3.0 DoS（RUSTSEC-2024-0421）。
-    # 引入链：dev-dependencies reqwest(cookies) → cookie_store 0.20 → idna 0.3。
-    # 影响界定：**仅测试构建**。发布二进制不含该链：
-    #   `cargo tree -e normal -i cookie_store` → nothing to print。
-    # 整改计划：跟随 reqwest 0.12 升级（cookie_store 新版本换用 idna 1.x）。
-    "RUSTSEC-2024-0421",
+    # rustls-pemfile 2.2.0 停维（RUSTSEC-2025-0134，2025-11-28）。
+    # 引入链：tonic 0.12（OTLP/gRPC 导出栈）→ rustls-pemfile。
+    # 影响界定：unmaintained 公告（无在野漏洞）。BFF 仅以**客户端**身份使用 tonic
+    # （OTLP 导出；TLS 走 rustls/tls-roots 读系统证书库），不解析外部 PEM 材料，
+    # 该 crate 的维护缺口（PEM 解析）不构成运行时暴露面。
+    # 整改计划：随 OTel 栈升级（opentelemetry-otlp 0.27 → 更高版本 / tonic 0.13+）
+    # 整体移除；升级需回归 tests/test_telemetry.rs 的进程内 collector 契约。
+    "RUSTSEC-2025-0134",
 
-    # ── 第五轮（2026-09-27）新增：reqwest 0.11 旧栈（openidconnect 3.5 → oauth2 4.4 锁定）──
-    # 三项均为**出网客户端**方向（BFF 入站由 nginx/ALB 终止 TLS，不经过该栈）。
-    # 共同整改计划（P1，见 docs/production-progress.md §2）：升级
-    # openidconnect 3.5 → 4.0（连带 oauth2 5 / reqwest 0.12），整体移除
-    # h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14 旧栈。
-
-    # h2 0.3.27：空 DATA 帧无界处理（RUSTSEC-2026-0258；0.3 线已 EOL，无修复版本）。
-    # 引入链：reqwest 0.11 → hyper 0.14 → h2 0.3（仅出网 HTTP/2 协商）。
-    # 影响界定：**生产不可达**——共享出网客户端统一 `.http1_only()`
-    # （src/state.rs::build_http_client），出网不再使用 h2；OTLP 走 tonic 独立栈（h2 0.4）。
-    # 残余风险：仅当未来放开 HTTP/2 出网时需重估。
-    "RUSTSEC-2026-0258",
-
-    # rustls-webpki 0.101.7 三条公告（RUSTSEC-2026-0098 / 0099 / 0104）：
-    # 名称约束（URI/通配）校验绕过与 CRL 解析 panic。
-    # 引入链：reqwest 0.11 → hyper-rustls 0.24 → rustls 0.21 → rustls-webpki 0.101。
-    # 影响界定：仅**出网 TLS 证书校验**，且 0.101 栈不启用 CRL 处理（0104 不可达）；
-    # 0098/0099 需攻击者持有受信 CA 签发的、声明名称约束的中间证书链（典型为
-    # 企业 CA/私有 CA 场景），BFF 出网对端为内网 IdP/上游。暴露面有限且可接受。
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
+    # ── 第六轮（2026-09-27）更正：原 reqwest 0.11 旧栈例外（h2 0.3 / rustls-webpki 0.101）
+    #    已随 openidconnect 4.0 / oauth2 5 / reqwest 0.12 迁移清零，不再需要例外。
+    #    迁移后审计结果：仅余「停维」类告警，无漏洞类告警。
 
     # rsa 0.9.10 Marvin 计时侧信道（RUSTSEC-2023-0071；上游无修复版本）。
     # 引入链：openidconnect → rsa（RS256 验签）；dev-deps rsa（测试签发用）。

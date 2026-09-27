@@ -221,7 +221,8 @@ kubectl -n bff apply -k deploy/k8s/
   与导出 span **严格一致** → collector/Jaeger/Tempo 中 BFF → 上游可串成同一 trace（已由契约测试锁定）。
 - **资源属性**：`service.name`（可配，默认 `bff`）、`service.version`、`deployment.environment`（取 `BFF_ENV`）。
 - **关停**：SIGTERM 排空后 flush 导出队列再退出；异常退出最多丢失批量窗口（默认 5s）内的 span。
-- **出网方向**：BFF 自身出网统一 **HTTP/1.1**（`.http1_only()`，供应链收敛）；OTLP 走独立 tonic 栈（HTTP/2）。
+- **出网方向**：BFF 自身出网统一 **HTTP/1.1**（`.http1_only()`，连接池/超时行为确定性优先；
+  第六轮 openidconnect 4.0 / reqwest 0.12 迁移后已与供应链例外无关）；OTLP 走独立 tonic 栈（HTTP/2）。
 - collector 最小接收示例（验证用）：
 
   ```yaml

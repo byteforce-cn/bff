@@ -360,3 +360,120 @@ fn inputs_to_string_map(inputs: &Value) -> HashMap<String, String> {
     }
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{InputMapping, OutputMapping, RouteTypeConfig};
+
+    fn r(path: &str, methods: &[&str]) -> RouteDef {
+        RouteDef {
+            path: path.into(),
+            methods: methods.iter().map(|s| s.to_string()).collect(),
+            description: String::new(),
+            auth_required: false,
+            route_type: RouteType::Static,
+            config: RouteTypeConfig::default(),
+            input_mapping: InputMapping::default(),
+            output_mapping: OutputMapping::default(),
+        }
+    }
+
+    #[test]
+    fn match_route_exact_and_boundary() {
+        let routes = vec![r("/api/dt", &[]), r("/api/dt-secret", &[])];
+        assert_eq!(
+            match_route(&routes, "GET", "/api/dt").unwrap().path,
+            "/api/dt"
+        );
+        assert_eq!(
+            match_route(&routes, "GET", "/api/dt/1").unwrap().path,
+            "/api/dt"
+        );
+        // F2：段边界——/api/dt 不得命中 /api/dt-secret
+        assert_eq!(
+            match_route(&routes, "GET", "/api/dt-secret").unwrap().path,
+            "/api/dt-secret"
+        );
+        assert!(match_route(&routes, "GET", "/api/dt-secretx").is_none());
+    }
+
+    #[test]
+    fn match_route_longest_prefix_wins() {
+        let routes = vec![r("/api", &[]), r("/api/users", &[])];
+        assert_eq!(
+            match_route(&routes, "GET", "/api/users/1").unwrap().path,
+            "/api/users"
+        );
+        assert_eq!(
+            match_route(&routes, "GET", "/api/orders").unwrap().path,
+            "/api"
+        );
+    }
+
+    #[test]
+    fn match_route_method_filter_is_case_insensitive() {
+        let routes = vec![r("/api/only-post", &["POST"])];
+        assert!(match_route(&routes, "GET", "/api/only-post").is_none());
+        assert!(
+            match_route(&routes, "post", "/api/only-post").is_some(),
+            "方法匹配应大小写不敏感"
+        );
+        let any = vec![r("/api/any", &[])];
+        assert!(
+            match_route(&any, "DELETE", "/api/any").is_some(),
+            "空 methods = 全部放行"
+        );
+    }
+
+    #[test]
+    fn match_route_trailing_slash_config_normalized() {
+        let routes = vec![r("/api/", &[])];
+        assert!(
+            match_route(&routes, "GET", "/api").is_some(),
+            "配置尾部斜杠应归一"
+        );
+        assert!(match_route(&routes, "GET", "/api/x").is_some());
+    }
+
+    #[test]
+    fn inputs_to_string_map_converts_all_scalar_kinds() {
+        let v = serde_json::json!({"s": "str", "n": 42, "o": {"k": 1}, "b": true});
+        let m = inputs_to_string_map(&v);
+        assert_eq!(m.get("s").unwrap(), "str");
+        assert_eq!(m.get("n").unwrap(), "42");
+        assert!(m.get("o").unwrap().contains('k'));
+        assert_eq!(m.get("b").unwrap(), "true");
+        // 非对象输入 → 空表（不 panic）
+        assert!(inputs_to_string_map(&serde_json::json!("x")).is_empty());
+    }
+
+    #[test]
+    fn build_env_context_respects_explicit_and_wildcard() {
+        std::env::set_var("BFF_UT_ENV_A", "va");
+
+        // 空映射 → 不收集（S5：非显式引用不注入）
+        assert_eq!(
+            build_env_context(&InputMapping::default()),
+            serde_json::json!({})
+        );
+
+        // 显式引用（带 / 不带 env. 前缀均可）→ 上下文以**变量名**为键
+        let mut m = InputMapping::default();
+        m.from_env.insert("a".into(), "env.BFF_UT_ENV_A".into());
+        m.from_env.insert("b".into(), "BFF_UT_ENV_A".into());
+        let ctx = build_env_context(&m);
+        assert_eq!(ctx["BFF_UT_ENV_A"], "va");
+
+        // 未设置的变量不注入
+        let mut m2 = InputMapping::default();
+        m2.from_env
+            .insert("c".into(), "env.BFF_UT_ENV_DOES_NOT_EXIST".into());
+        assert!(build_env_context(&m2).as_object().unwrap().is_empty());
+
+        // "." 通配：注入全量（含刚设置的变量）
+        let mut m3 = InputMapping::default();
+        m3.from_env.insert("all".into(), ".".into());
+        assert_eq!(build_env_context(&m3)["BFF_UT_ENV_A"], "va");
+    }
+}

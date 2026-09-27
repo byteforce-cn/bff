@@ -30,15 +30,30 @@
   消息大小上限 1009（双向）、心跳保活与空闲超时（`tests/test_ws_tunnel.rs`，9 用例）
 - **真实验签契约测试**：进程内 RS256 签名 IdP + JWKS，登录链路在**不跳过验签**下回归；
   覆盖伪造密钥 / `alg:none` 混淆 / nonce 不一致三类攻击拒绝（`tests/test_oidc_signature.rs`）
+- **统一路由分发器覆盖补测（第六轮）**：经业务端口真实 HTTP 链路覆盖 Static / Pipeline /
+  Script / Proxy 分发与鉴权开关、输入映射（query/body/path/session/defaults 及优先级）、
+  输出映射（pick/rename/wrap/status_map 与 default 兜底）、段边界与方法过滤
+  （`tests/test_route_dispatch.rs` + 模块内单测 ×6）
 
 ### Changed
 
 - 首次开源：补充 LICENSE、CONTRIBUTING、SECURITY、CI 等公开仓库基础设施
-- CI 覆盖率门禁按棘轮策略上调：`--fail-under-lines 68` → **70**（第五轮实测 lines 72.82%）
+- CI 覆盖率门禁按棘轮策略持续上调：`--fail-under-lines 68` → 70（第五轮，lines 72.82%）→ **75**（第六轮，lines **79.03%**；`route_dispatcher.rs` 11.87% → 96.47%）
 - 出网 HTTP 客户端统一强制 HTTP/1.1（`.http1_only()`）：供应链收敛（旧栈 h2 0.3 生产不可达）
+- **OIDC 依赖栈迁移（第六轮）**：`openidconnect` 3.5 → **4.0**（连带 `oauth2` 5.0、`reqwest` 0.12），
+  整体移除 h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14 / idna 0.3 旧栈；
+  OIDC 出网改为向 `request_async`/`discover_async` 直传共享 `reqwest::Client`
+  （oauth2 5 的 `AsyncHttpClient` 已为该类型实现，删除自研闭包适配层）；
+  `CoreClient` typestate 化后，provider discovery 缺 `token_endpoint` 由“换码时失败”提前为
+  **构建期快速失败**；对应审计例外（RUSTSEC-2026-0258 / 0098 / 0099 / 0104、RUSTSEC-2024-0421）**清零**
 
 ### Fixed
 
+- **映射引擎静默失效（第六轮补测发现，`tests/test_route_dispatch.rs`）**：
+  `InputMapping.from_path` 从未生效（提取阶段以**目标键**产出，合并层却用模板串
+  `path./api/{id}` 当 JSON 路径查询 → 恒 Null，F9 实际未接线）；`from_env` 文档推荐写法
+  `env.NAME` 恒为 Null（被拆成 `["env","NAME"]` 嵌套路径查询，仅裸变量名可用）。
+  两处均改为专用合并（`apply_path_source` / `apply_env_source`），并以集成 + 单测双层锁定
 - **供应链修复（第五轮审计）**：`h2` → 0.4.19、`rustls` → 0.23.45（修复 RUSTSEC-2026-0258 /
   RUSTSEC-2026-0285）；其余不可修复项（reqwest 0.11 旧栈 TLS / rsa 验签）已在 `.cargo/audit.toml`
   例外界定（含引入链、影响范围与 openidconnect 4 迁移计划）

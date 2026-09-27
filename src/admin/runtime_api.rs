@@ -56,11 +56,8 @@ pub async fn verify_provider(
     let issuer = openidconnect::IssuerUrl::new(provider.issuer_url.clone())
         .map_err(|e| AppError::bad_request(format!("issuer_url 非法: {}", e)))?;
     let started = std::time::Instant::now();
-    let result = openidconnect::core::CoreProviderMetadata::discover_async(
-        issuer,
-        crate::oidc::http_client::client_fn(state.oidc_http.clone()),
-    )
-    .await;
+    let result =
+        openidconnect::core::CoreProviderMetadata::discover_async(issuer, &state.oidc_http).await;
     let latency_ms = started.elapsed().as_millis() as u64;
     match result {
         Ok(metadata) => Ok(axum::Json(serde_json::json!({

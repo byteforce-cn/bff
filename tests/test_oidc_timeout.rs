@@ -1,7 +1,7 @@
 //! R13 回归：IdP 无响应（黑洞）时，登录链路必须在超时窗口内失败而非永久挂起。
 //!
-//! 背景：官方 `openidconnect::reqwest::async_http_client` 无任何超时；
-//! 修复后 OIDC 出网使用带超时的共享客户端（`AppState.oidc_http`）。
+//! 背景：历史实现（oauth2 4.x 的 `async_http_client`）无任何超时、每次调用新建客户端；
+//! 现 OIDC 出网使用共享的 `AppState.oidc_http`（oauth2 5 起直传 `&reqwest::Client`）。
 
 mod common;
 

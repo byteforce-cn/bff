@@ -305,3 +305,108 @@ fn empty_input_mapping_returns_empty() {
     assert!(result.is_object());
     assert!(result.as_object().unwrap().is_empty());
 }
+
+// ============================================================
+// from_env / from_path（第六轮修复回归）
+//
+// 背景：两处“接入层键名 vs 合并层路径”不一致导致特性从未生效：
+// - from_env：上下文以**变量名**为键，而合并层把 `env.NAME` 当 JSON 路径查 `["env"]["NAME"]`；
+// - from_path：提取阶段以**目标键**产出，而合并层用模板串（`path./api/{id}`）当 JSON 路径查。
+// 修复前两者恒为 Null → 配置静默失效；以下用例锁定修复后的解析语义。
+// ============================================================
+
+#[test]
+fn from_env_accepts_prefixed_and_bare_names() {
+    let im = InputMapping {
+        from_env: std::collections::HashMap::from([
+            ("a".to_string(), "env.BFF_MAP_TEST_TOKEN".to_string()),
+            ("b".to_string(), "BFF_MAP_TEST_TOKEN".to_string()),
+            ("missing".to_string(), "env.BFF_MAP_TEST_NOPE".to_string()),
+        ]),
+        ..Default::default()
+    };
+    // 模拟 route_dispatcher::build_env_context 的输出：以变量名为键
+    let env_json = json!({"BFF_MAP_TEST_TOKEN": "t0k"});
+    let result = bff::server::mapping::merge_inputs_full(
+        &im,
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &env_json,
+    );
+    assert_eq!(result["a"], "t0k", "env.NAME 形式必须生效（第六轮修复）");
+    assert_eq!(result["b"], "t0k", "裸变量名形式保持可用");
+    assert!(
+        result.get("missing").is_none(),
+        "未设置的变量不得注入（值为 Null 时跳过）"
+    );
+}
+
+#[test]
+fn from_env_wildcard_injects_whole_object() {
+    let im = InputMapping {
+        from_env: std::collections::HashMap::from([("all".to_string(), ".".to_string())]),
+        ..Default::default()
+    };
+    let env_json = json!({"A": "1", "B": "2"});
+    let result = bff::server::mapping::merge_inputs_full(
+        &im,
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &env_json,
+    );
+    assert_eq!(result["all"], json!({"A": "1", "B": "2"}));
+}
+
+#[test]
+fn from_path_merged_by_target_key() {
+    let im = InputMapping {
+        from_path: std::collections::HashMap::from([(
+            "userId".to_string(),
+            "path./api/users/{userId}".to_string(),
+        )]),
+        ..Default::default()
+    };
+    // 模拟 route_dispatcher 提取阶段产物：以目标键为键
+    let path_json = json!({"userId": "42"});
+    let result = bff::server::mapping::merge_inputs_full(
+        &im,
+        &json!({}),
+        &json!({}),
+        &json!({}),
+        &path_json,
+        &json!({}),
+        &json!({}),
+    );
+    assert_eq!(result["userId"], "42", "from_path 必须生效（第六轮修复）");
+}
+
+#[test]
+fn from_path_priority_lower_than_body_and_query() {
+    // 优先级：defaults < env < session < header < path < body < query
+    let im = InputMapping {
+        from_path: std::collections::HashMap::from([(
+            "id".to_string(),
+            "path./api/{id}".to_string(),
+        )]),
+        from_body: std::collections::HashMap::from([("id".to_string(), "id".to_string())]),
+        ..Default::default()
+    };
+    let path_json = json!({"id": "from-path"});
+    let body_json = json!({"id": "from-body"});
+    let result = bff::server::mapping::merge_inputs_full(
+        &im,
+        &json!({}),
+        &body_json,
+        &json!({}),
+        &path_json,
+        &json!({}),
+        &json!({}),
+    );
+    assert_eq!(result["id"], "from-body", "body 应覆盖 path");
+}

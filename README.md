@@ -7,8 +7,10 @@
 
 基于 **Axum** 的 Backend-For-Frontend 聚合层 · **生产就绪**（P0 阻断全关；上线前仅剩环境类终验）
 
-> ✅ **状态**：五轮生产化改造完成——M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、
-> M3 可观测性与运营、P0-4 配置持久化全部落地；**P0 阻断项已全部关闭**；
+> ✅ **状态**：六轮生产化改造完成——M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、
+> M3 可观测性与运营、P0-4 配置持久化；**P0 阻断项已全部关闭**；
+> **OIDC 依赖栈已迁移至 openidconnect 4.0 / oauth2 5 / reqwest 0.12**（整体移除
+> h2 0.3 / rustls 0.21 / rustls-webpki 0.101 旧栈，对应审计例外清零）；
 > **真实 IdP 契约验证**（Keycloak 26：登录/回调/RS256 验签/刷新/登出/Bearer/Redis 会话，
 > 见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）与**真实验签回归**
 > （进程内 RS256/JWKS + 伪造密钥/`alg:none`/nonce 攻击拒绝）均已入库；
@@ -27,7 +29,8 @@
 - **Kimi K3**
 - **DeepSeek V4**
 
-当前项目已完成五轮生产化改造（P0 阻断全部关闭，见上述进度文档）；
+当前项目已完成六轮生产化改造（P0 阻断全部关闭，见上述进度文档）；
+OIDC 依赖栈已迁移至 openidconnect 4.0 / oauth2 5 / reqwest 0.12（审计例外清零），
 真实 IdP 兼容性已用 Keycloak 26 完成契约验证（`deploy/keycloak/`），
 真实验签已入库回归（`tests/test_oidc_signature.rs`），
 SLO/容量基线已实测标定（单实例 ≥10.4k QPS、0 错误，`benchmark/README.md`），
@@ -117,7 +120,8 @@ make check           # fmt + clippy + test 全量检查
 ```
 
 关键契约测试：WS 隧道（`tests/test_ws_tunnel.rs`）、RS256 真实验签（`tests/test_oidc_signature.rs`）、
-OTel OTLP 导出（`tests/test_telemetry.rs`）；生产级 E2E 见 [deploy/https/](deploy/https/) 与 [deploy/keycloak/](deploy/keycloak/)。
+OTel OTLP 导出（`tests/test_telemetry.rs`）、统一路由分发与映射（`tests/test_route_dispatch.rs`、
+`tests/test_mapping_engine.rs`）；生产级 E2E 见 [deploy/https/](deploy/https/) 与 [deploy/keycloak/](deploy/keycloak/)。
 
 ## 📚 文档
 

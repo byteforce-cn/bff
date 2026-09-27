@@ -475,9 +475,8 @@ fn build_http_client(
         .connect_timeout(cfg.http_client.connect_timeout)
         .pool_max_idle_per_host(cfg.http_client.pool_max_idle_per_host)
         .pool_idle_timeout(cfg.http_client.pool_idle_timeout)
-        // 供应链收敛（审计例外 RUSTSEC-2026-0258，见 .cargo/audit.toml）：
-        // reqwest 0.11 旧栈携带 h2 0.3（已 EOL、无修复版本）。出网统一强制
-        // HTTP/1.1，使 h2 0.3 的代码路径在生产**不可达**（gRPC/OTLP 走 tonic 独立栈）。
+        // 出网统一 HTTP/1.1：连接池与超时语义简单可预期（reqwest 未启用 `http2` feature，
+        // h2 仅出现在 tonic/OTLP 独立栈）。第六轮迁移后此处不再与供应链例外相关。
         .http1_only();
 
     // R1/R16：TCP keepalive 探活（0 表示禁用）

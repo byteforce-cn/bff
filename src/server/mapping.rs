@@ -56,8 +56,9 @@ pub fn merge_inputs_full(
         result.insert(key.clone(), val.clone());
     }
 
-    // 2. from_env
-    apply_source(&mut result, &mapping.from_env, env_json);
+    // 2. from_env（第六轮修正：`env.NAME` 与裸 `NAME` 均可解析；
+    //    原实现把 `env.NAME` 当 JSON 路径拆成 ["env","NAME"] → 恒 Null，文档推荐写法失效）
+    apply_env_source(&mut result, &mapping.from_env, env_json);
 
     // 3. from_session
     apply_source(&mut result, &mapping.from_session, session_json);
@@ -65,8 +66,9 @@ pub fn merge_inputs_full(
     // 4. from_header
     apply_source(&mut result, &mapping.from_header, header_json);
 
-    // 5. from_path（F9：原实现静默忽略该配置）
-    apply_source(&mut result, &mapping.from_path, path_json);
+    // 5. from_path（F9；第六轮修正：path_json 由 route_dispatcher 以**目标键**预提取，
+    //    模板匹配已在提取阶段完成——原实现用模板串当 JSON 路径查询 → 恒 Null，from_path 从未生效）
+    apply_path_source(&mut result, &mapping.from_path, path_json);
 
     // 6. from_body
     apply_source(&mut result, &mapping.from_body, body_json);
@@ -110,6 +112,53 @@ fn apply_source(
         let val = extract_json_path(source, source_path);
         if !val.is_null() {
             result.insert(target_key.clone(), val);
+        }
+    }
+}
+
+/// `from_env` 专用合并。
+///
+/// `env_json` 的键是**变量名**（见 `route_dispatcher::build_env_context`），因此：
+/// - 路径写 `env.NAME`（文档推荐）或裸 `NAME`，均按变量名取值；
+/// - `"."` 通配返回整个 env 对象（S5：route_dispatcher 会对该形式告警）。
+fn apply_env_source(
+    result: &mut serde_json::Map<String, Value>,
+    mapping: &HashMap<String, String>,
+    env_json: &Value,
+) {
+    for (target_key, source_path) in mapping {
+        let val = if source_path == "." {
+            env_json.clone()
+        } else {
+            let name = source_path
+                .strip_prefix("env.")
+                .unwrap_or(source_path.as_str());
+            env_json
+                .get(name)
+                .or_else(|| env_json.get(source_path.as_str()))
+                .cloned()
+                .unwrap_or(Value::Null)
+        };
+        if !val.is_null() {
+            result.insert(target_key.clone(), val);
+        }
+    }
+}
+
+/// `from_path` 专用合并。
+///
+/// `path_json` 的键是**目标变量名**：模板匹配（`path./api/users/{id}`）在
+/// `route_dispatcher::extract_inputs_from_parts` 阶段完成，此处只做取值。
+fn apply_path_source(
+    result: &mut serde_json::Map<String, Value>,
+    mapping: &HashMap<String, String>,
+    path_json: &Value,
+) {
+    for target_key in mapping.keys() {
+        if let Some(val) = path_json.get(target_key) {
+            if !val.is_null() {
+                result.insert(target_key.clone(), val.clone());
+            }
         }
     }
 }

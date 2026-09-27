@@ -5,10 +5,10 @@
 
 | 项目 | 内容 |
 | ---- | ---- |
-| 记录日期 | 2026-09-27（第五轮：P1 遗留收口——WS 隧道补测、真实验签契约、OTel OTLP 导出、供应链审计修复） |
-| 实施阶段 | **P0 全部关闭**；M2/M3 完成；真实 IdP 兼容性已验证；SLO 基线已标定；**OTel OTLP 导出就绪**；上线前仅剩**环境类动作**（外部渗透测试、生产域名 HTTPS 终验） |
-| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**183 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 72.82%**（CI 门禁已上调至 ≥70，E5）/ `cargo audit` ✅（例外清单含风险界定与升级计划，见 §1.8-D） |
-| 新增测试 | 第五轮：WS 隧道 ×9 + OTel 契约 ×7 + 真实验签 ×5（+ telemetry 单测 ×2；并修复 1 处短 trace-id 校验缺口） |
+| 记录日期 | 2026-09-27（第六轮：OIDC 依赖栈迁移 openidconnect 4.0 + 路由分发器覆盖补测，修复 2 个映射静默失效缺陷） |
+| 实施阶段 | **P0 全部关闭**；M2/M3 完成；真实 IdP 兼容性已验证（Keycloak 26）；SLO 基线已标定；OTel OTLP 导出就绪；**审计例外清零（仅余停维类告警）**；上线前仅剩**环境类动作**（外部渗透测试、生产域名 HTTPS 终验） |
+| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**206 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 79.03%**（CI 门禁上调至 ≥75，见 §1.9-C）/ `cargo audit --no-fetch` ✅（无漏洞类告警；仅 1 条停维类，含界定） |
+| 新增测试 | 第六轮：路由分发 ×13 + 映射回归 ×4 + 分发器单测 ×6（并修复 `from_path`/`from_env` 两个静默失效缺陷） |
 
 ---
 
@@ -470,11 +470,82 @@ CI 覆盖率门禁：--fail-under-lines 68 → **70**（棘轮策略）
 
 ---
 
+## 1.9 第六轮：OIDC 依赖栈迁移（openidconnect 4.0）+ 分发器覆盖补测（2026-09-27）
+
+> 对应审计 §2「P1 迭代」最后两项：openidconnect 3.5 → 4.0 迁移（清零 4 条审计例外）
+> 与 `route_dispatcher.rs` 覆盖率补测（11.87%）。本轮由补测**发现并修复 2 个映射静默失效缺陷**。
+
+### A. OIDC 依赖栈迁移（openidconnect 4.0 / oauth2 5 / reqwest 0.12）
+
+| 项 | 变更 | 说明 |
+| --- | --- | --- |
+| 依赖升级 | `openidconnect 3.5 → 4.0.1`、`oauth2 4.4 → 5.0.0`、`reqwest 0.11 → 0.12.28`（含 dev-deps） | 整体移除 h2 0.3 / rustls 0.21 / hyper 0.14 / rustls-webpki 0.101 / idna 0.3 旧栈（`cargo tree` 零命中） |
+| 出网客户端 | 删除 `src/oidc/http_client.rs` 闭包适配层 | oauth2 5 起 `reqwest::Client` 直接实现 `AsyncHttpClient`：`request_async`/`discover_async` 直传 `&state.oidc_http`（R13 语义不变：15s 总超时、禁重定向、连接池复用） |
+| typestate | `CoreClient` 4.0 起为 typestate 泛型：新增 `BffCoreClient` 别名；`build_client` 以 discovery 元数据的 `token_endpoint` 经 `set_token_uri` 升级 | provider 缺 `token_endpoint` 由「换码时失败」提前为**构建期 fail-fast** |
+| 审计例外 | 删除 RUSTSEC-2026-0258（h2 0.3）、RUSTSEC-2026-0098/0099/0104（rustls-webpki 0.101）、RUSTSEC-2024-0421（idna 0.3） | `cargo audit` 现无漏洞类告警；新增 1 条**停维类**（rustls-pemfile ← tonic，已界定） |
+
+验证：`cargo tree` 旧栈零命中；`cargo audit --no-fetch` 通过；全量测试全绿；
+**Keycloak 26 真实 IdP E2E 8/8 全绿**（见 §1.9-D）。
+
+### B. 路由分发器覆盖补测（P1 热点）+ 2 个真实缺陷修复
+
+**新增测试**：`tests/test_route_dispatch.rs`（13 例，业务端口真实 HTTP 链路：Static/Pipeline/Script 分发、
+鉴权开关、输入映射 query/body/path/session/env 与优先级、输出映射 pick/rename/wrap/status_map、
+段边界与方法过滤）；`route_dispatcher.rs` 模块内单测 ×6（match_route 段边界/最长前缀/方法大小写/
+尾斜杠归一、inputs_to_string_map、build_env_context）。
+
+**由补测发现并修复**：
+
+| # | 缺陷 | 根因 | 修复 | 验证 |
+| --- | --- | --- | --- | --- |
+| M1 | `InputMapping.from_path` **从未生效**（F9 接线错误，静默丢参） | 提取阶段 `path_json` 以**目标键**产出，合并层 `apply_source` 却用模板串（`path./api/{id}`）当 JSON 路径查询 → 恒 Null | `mapping.rs` 新增 `apply_path_source`（按目标键取值） | 集成 `script_route_extracts_inputs_across_sources` + 单测 ×2 |
+| M2 | `from_env` 文档推荐写法 `env.NAME` **恒为 Null**（仅裸变量名可用） | 上下文以变量名为键，合并层把 `env.NAME` 拆成 `["env","NAME"]` 查嵌套路径 | `mapping.rs` 新增 `apply_env_source`（`env.NAME`/裸名/`"."` 通配均正确解析） | 集成 ×1（含 S5 未引用变量不注入断言）+ 单测 ×2 |
+
+> 两个缺陷均为「配置可写、UI 可编、运行期静默变空值」类型：M1 使 F9（第二轮声明完成）实际未生效，
+> M2 使 S5 建议的脱敏写法不可用——均为**静默失效**，排障成本高；现均以集成 + 单测双层锁定。
+
+### C. 覆盖率与门禁（E5 棘轮）
+
+```text
+BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo llvm-cov --all-features --summary-only
+→ lines 79.03% / regions 77.72% / functions 73.04%
+热点清零：server/route_dispatcher.rs 11.87% → 96.47%；server/mapping.rs → 96.55%
+CI 覆盖率门禁：--fail-under-lines 70 → 75（棘轮策略）
+```
+
+### D. Keycloak 真实 IdP E2E（迁移后契约回归）
+
+```text
+$ FORCE_BUILD=1 bash deploy/keycloak/e2e-keycloak.sh   # 镜像构建（受限网络经 CARGO_MIRROR，见 §4）
+== 1) discovery 契约          ✅ issuer / end_session_endpoint / S256 / client_secret_post + BFF 容器内真实 discovery
+== 2) 登录重定向              ✅ redirect_uri 恒为 public_base_url 推导值（伪造 Host ×2 未污染）
+== 3) 真实登录                ✅ 授权码+PKCE+RS256/JWKS 验签；Cookie HttpOnly+Secure+SameSite=Lax；会话登记
+== 4) Bearer 注入             ✅ 上游收到真实 Keycloak access token（iss/azp/typ 校验）
+== 5) Redis 会话              ✅ bff 容器重启后登录态不丢
+== 6) 令牌刷新                ✅ SWR 轮换（旧≠新）+ Keycloak REFRESH_TOKEN 事件
+== 7) RP-Initiated Logout     ✅ 本地会话清除 + Keycloak LOGOUT 事件
+== 8) 汇总                    ✅ 全链路通过
+```
+
+> 迁移后真实 IdP 契约无回退；Q1（scope 去重）/K2（会话登记）/K3（SameSite）等既有修复继续有效。
+
+### E. 本轮变更文件
+
+- 新增：`tests/test_route_dispatch.rs`；
+- 删除：`src/oidc/http_client.rs`（被 oauth2 5 直传客户端取代）；
+- 修改：`Cargo.toml`/`Cargo.lock`（openidconnect 4.0/oauth2 5/reqwest 0.12）、`src/oidc/{client,handlers,mod}.rs`、
+  `src/server/{token_exchange,mapping,route_dispatcher}.rs`、`src/admin/runtime_api.rs`、`src/state.rs`、
+  `tests/{test_mapping_engine,test_oidc_timeout}.rs`、`.cargo/audit.toml`、`.github/workflows/ci.yml`（覆盖率门禁 → 75）、
+  `CHANGELOG.md`、`README.md`、`docs/production-deployment.md`、本文件。
+
+---
+
 ## 2. 剩余事项（上线前 Should / 灰度期迭代）
 
 > P0 阻断项已全部关闭（含 P0-4；P0-2 的“https + LB 全链路”已提供本地 E2E 与 K8s 清单；
 > 真实 IdP 已用 Keycloak 26 完成契约验证；**生产域名 HTTPS 终验**属部署环境动作）。
-> 第五轮起，工程仓库内可推进的 P1 项已全部收口（WS 补测 / 真实验签 / OTel / 供应链）。
+> 第六轮完成后，工程仓库内可推进的 P1 项**已全部收口**（WS 补测 / 真实验签 / OTel / 供应链 /
+> openidconnect 4.0 迁移 / 分发器补测）；剩余为**环境类动作**与 P2 灰度期迭代。
 
 | 优先级 | 项 | 说明与建议 |
 | --- | --- | --- |
@@ -482,11 +553,11 @@ CI 覆盖率门禁：--fail-under-lines 68 → **70**（棘轮策略）
 | ✅ 已完成 | **SLO/负载基线（本地标定）** | 2026-09-27 实测单实例 ≥10.4k QPS、0 错误、p95 39ms（见 §1.7）；生产/预发环境复测仍建议（同名压测脚本可直接复用：`benchmark/README.md`） |
 | 上线前 | **外部渗透测试** | 重点：OIDC 回调、`/pipeline`、代理注入、管理面（审计 §M2 DoD）。第五轮已入库内测回归：伪造密钥/`alg:none`/nonce 攻击拒绝、开放重定向单测、IP 伪造限流用例 |
 | 上线前 | 生产域名 HTTPS 终验 | 用 `deploy/https/` 同构流程在预发执行并留档 |
-| ✅ 已完成 | E5 覆盖率（第五轮收口） | lines **72.82%**；CI 门禁上调至 **≥70**；`tunnel.rs` 0% → **84.01%**、`telemetry.rs` 94.37%；仍低：`route_dispatcher.rs` 11.87%（P1 后续） |
+| ✅ 已完成 | E5 覆盖率（第六轮再上调） | lines 第五轮 72.82% → 第六轮 **79.03%**（regions 77.72%）；CI 门禁 68 → 70 → **75**；`route_dispatcher.rs` 11.87% → **96.47%**、`mapping.rs` → 96.55%；仍低：`admin/config_api.rs` 34%（P2 可再补） |
 | ✅ 已完成 | 真实验签契约测试（第五轮） | 进程内 RS256/JWKS，不跳过验签 + 三类攻击拒绝（`tests/test_oidc_signature.rs`） |
 | ✅ 已完成 | OTel（OTLP）导出（第五轮） | OTLP/gRPC + traceparent 衔接（span 树一致）+ ParentBased 采样 + 关停 flush + 端到端契约测试（`tests/test_telemetry.rs`） |
-| P1 迭代 | **openidconnect 3.5 → 4.0 迁移**（连带 oauth2 4.4 → 5、reqwest 0.11 → 0.12） | 整体移除旧栈（h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14），清零审计例外中的 4 条；当前缓释：出网 `.http1_only()` + 例外界定（`.cargo/audit.toml`） |
-| P1 迭代 | `route_dispatcher.rs`/`business.rs` 覆盖率补测（11.87% / 69.82%） | 路由分发大量分支未覆盖；建议按分支矩阵补测 |
+| ✅ 已完成 | **openidconnect 3.5 → 4.0 迁移**（第六轮，连带 oauth2 5、reqwest 0.12） | 整体移除旧栈（h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14 / idna 0.3）；审计例外清零（仅余 1 条停维类）；Keycloak E2E 契约回归 8/8（见 §1.9） |
+| ✅ 已完成 | `route_dispatcher.rs` 覆盖率补测（第六轮） | 11.87% → **96.47%**（13 集成 + 6 单测）；**连带发现并修复 2 个映射静默失效缺陷（M1 from_path / M2 from_env）**；`business.rs` 69.82% → 71.28%（剩余分支属灰度期 P2） |
 | P2 | E14 `serde_yaml` 整改 | 跟踪 figment 上游；或自研合并 + serde_norway |
 | P2 | 性能专项 | k6 基线已数值化（§1.7）；QuickJS 池化经实测**无需**（脚本路径 p95 32ms @10k QPS，SLO 余量 ~15×）；ServeDir 缓存按需评估 |
 | P2 | 灰度（M4） | 1%→10%→50%→100% + 回滚演练 |
@@ -507,6 +578,10 @@ CI 覆盖率门禁：--fail-under-lines 68 → **70**（棘轮策略）
 
 **第四/五轮修改**：`src/middleware/{rate_limit_skip,trace_context}.rs`、`src/server/business.rs`（OTel span 与层序）、`src/state.rs`（出网 `.http1_only()`）、`src/main.rs`（OTel 接线/关停 flush）、`src/config.rs`（telemetry）、`src/lib.rs`、`config/env/prod.yaml`、`.cargo/audit.toml`、`.github/workflows/ci.yml`（覆盖率门禁 → 70）、`Cargo.toml`/`Cargo.lock`、`benchmark/{README.md,k6-load-test.js}`、`docs/production-deployment.md`、`README.md`、`CHANGELOG.md`、本文件；逐项证据见 §1.7-E / §1.8-F。
 
+**第六轮新增**：`tests/test_route_dispatch.rs`。
+**第六轮删除**：`src/oidc/http_client.rs`（oauth2 5 直传 `reqwest::Client`，闭包适配层不再需要）。
+**第六轮修改**：`Cargo.toml`/`Cargo.lock`（openidconnect 4.0.1 / oauth2 5.0.0 / reqwest 0.12.28）、`src/oidc/{client,handlers,mod}.rs`、`src/server/{mapping,route_dispatcher,token_exchange}.rs`、`src/admin/runtime_api.rs`、`src/state.rs`（`.http1_only()` 注释）、`tests/{test_mapping_engine,test_oidc_timeout}.rs`、`.cargo/audit.toml`、`.github/workflows/ci.yml`（覆盖率门禁 → 75）、`CHANGELOG.md`、`README.md`、`docs/production-deployment.md`、本文件；逐项证据见 §1.9。
+
 ---
 
 ## 4. 复现验证（本地）
@@ -515,11 +590,11 @@ CI 覆盖率门禁：--fail-under-lines 68 → **70**（棘轮策略）
 # 1) Redis（Docker）
 docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine
 
-# 2) 门禁（183 用例；CI 另含 audit + 覆盖率门禁 ≥70）
+# 2) 门禁（206 用例；CI 另含 audit + 覆盖率门禁 ≥75）
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 env -u HTTP_PROXY -u HTTPS_PROXY BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
-cargo audit                       # 读取 .cargo/audit.toml（例外均含界定）
+cargo audit --no-fetch              # 读取 .cargo/audit.toml（例外均含界定）
 env -u HTTP_PROXY -u HTTPS_PROXY BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo llvm-cov --all-features --summary-only
 
 # 3) 生产防呆拒绝演示
@@ -545,6 +620,12 @@ kubectl apply -k deploy/k8s --dry-run=client
 
 # 8) Keycloak 真实 IdP 契约验证（Docker；首次拉取镜像，约 3–5 分钟）
 bash deploy/keycloak/e2e-keycloak.sh            # 结束自动清理；KEEP_STACK=1 保留现场
+# 受限网络：镜像内 cargo 走镜像源（Cargo.lock 变更后依赖层需全量重编，
+# 否则 crates.io 下载会显著拖慢构建）：
+#   export CARGO_MIRROR='sparse+https://rsproxy.cn/index/'
+#   FORCE_BUILD=1 bash deploy/keycloak/e2e-keycloak.sh
+# 重跑前建议清理残留（占 8180/6379/9443 等端口；需注入三个 BFF_* 密钥变量）：
+#   docker compose -f docker-compose.yml -f deploy/keycloak/docker-compose.keycloak.yml down --remove-orphans
 ```
 
 ---
