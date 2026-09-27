@@ -7,10 +7,12 @@
 
 基于 **Axum** 的 Backend-For-Frontend 聚合层 · **生产化进行中**（原 POC/alpha）
 
-> ⚠️ **状态**：M0 工程止血、M1 核心（Redis 多实例状态、生产配置防呆、密钥治理、优雅停机、
-> OIDC 出网超时、回调地址固定）已落地并通过测试；**配置持久化/多副本热重载一致性等阻断项仍在推进**。
-> 完整实施记录与验证证据见 [docs/production-progress.md](docs/production-progress.md)。
-> 在全部 P0 关闭前，不建议直接承载生产流量。生产环境必须通过环境变量注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
+> ⚠️ **状态**：M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、M3 可观测性与运营资产
+> 已落地并通过测试（详见 [docs/production-progress.md](docs/production-progress.md)）；
+> **P0 阻断项已全部关闭**。上线前仍需：真实 IdP 兼容性验证（非 Spring AS）、外部渗透测试、
+> 目标负载/SLO 基线标定（见 [docs/production-deployment.md](docs/production-deployment.md) §SLO）。
+> 生产环境必须通过环境变量/密钥管理注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
+> 部署与运维：[production-deployment.md](docs/production-deployment.md) · [runbook.md](docs/runbook.md)。
 
 ## 🤖 AI 辅助开发
 
@@ -19,7 +21,8 @@
 - **Kimi K3**
 - **DeepSeek V4**
 
-当前项目已完成主要生产化改造（见上述进度文档）；剩余阻断项关闭前不可运行于生产环境
+当前项目已完成主要生产化改造（P0 阻断全部关闭，见上述进度文档）；
+真实 IdP 兼容性、渗透测试与 SLO 基线标定仍属上线前 Should 项
 
 > AI 生成内容均经过人工审查与测试验证。
 
@@ -29,9 +32,11 @@
 - 🔐 **OIDC 登录**：授权码 + PKCE、令牌刷新（分布式锁防惊群）、登出
 - 🔀 **YAML 声明式服务编排**：DAG 分层并行、硬超时、fail_fast、HTTP 缓存
 - 📜 **QuickJS 脚本扩展**（JavaScript）：沙箱 + `spawn_blocking` 隔离 + 内存/栈/时长上限
-- 🔁 **反向代理**：路由映射、Bearer 注入、熔断、限流、SSE / WebSocket 透传
-- 🛠️ **管理端口（`:8443`）**：配置导入/导出（脱敏 + 热重载）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
+- 🔁 **反向代理**：路由映射、Bearer 注入、熔断（滚动窗口 + 半开单探针）、限流、SSE / WebSocket 透传（WS 鉴权/心跳/上限）
+- 🛠️ **管理端口（`:8443`）**：配置导入/导出（脱敏 + 热重载 + **落盘持久化**）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
 - 🧩 **Provider 可插拔**：缓存 / 锁 / Session，支持 `memory | redis`（Redis 为多实例共享实现，含跨实例会话/锁验证）
+- 📈 **可观测性**：请求/上游延迟直方图（低基数标签）、W3C `traceparent` 传播、Grafana 面板与告警规则（`deploy/`）
+- 📦 **交付物**：多阶段 Dockerfile、docker-compose（含本地 HTTPS E2E）、K8s 清单（Deployment/Service/Ingress/PDB/HPA/NetworkPolicy/PVC）
 
 ## 🏗️ 项目结构
 
@@ -92,6 +97,9 @@ cargo run            # 启动 bff
 
 ```bash
 cargo test           # 单元 + 全部集成测试（内存 provider，无外部依赖）
+# Redis provider / 跨实例会话测试（需本地 Redis，可用 Docker）：
+docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine
+BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --test test_redis_providers
 make check           # fmt + clippy + test 全量检查
 ```
 
@@ -99,6 +107,11 @@ make check           # fmt + clippy + test 全量检查
 
 | 文档 | 说明 |
 | ---- | ---- |
+| [docs/production-deployment.md](docs/production-deployment.md) | 生产部署（TLS 方案/K8s/热生效对照表/SLO） |
+| [docs/production-readiness.md](docs/production-readiness.md) | 生产就绪审计报告（v2）与路线图 |
+| [docs/production-progress.md](docs/production-progress.md) | 实施进度与验证证据 |
+| [docs/runbook.md](docs/runbook.md) | 告警处置手册（Runbook） |
+| [docs/token-exchange-rfc8693.md](docs/token-exchange-rfc8693.md) | RFC 8693 Token Exchange 设计与运维 |
 | [benchmark/README.md](benchmark/README.md) | k6 压测说明 |
 
 ## 🤝 贡献

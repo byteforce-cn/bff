@@ -30,6 +30,14 @@ RUN pnpm build
 FROM rust:1.93-slim-bookworm AS builder
 WORKDIR /app
 
+# 可选构建参数：cargo 注册表镜像（网络受限环境，如：
+#   --build-arg CARGO_MIRROR="sparse+https://rsproxy.cn/index/"
+# CI/公网环境留空即使用 crates.io）。
+ARG CARGO_MIRROR=""
+RUN if [ -n "$CARGO_MIRROR" ]; then \
+      printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "%s"\n' "$CARGO_MIRROR" > /usr/local/cargo/config.toml; \
+    fi
+
 # 先拷贝清单以利用依赖缓存
 COPY Cargo.toml Cargo.lock ./
 # 最小 src 占位以缓存依赖编译（target 层在 src 变更时仍可复用）

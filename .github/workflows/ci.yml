@@ -17,6 +17,17 @@ env:
   # 若作为全局 RUSTFLAGS 注入，会连 `cargo test` 的 rustc 编译一起打死（历史事故）。
 
 jobs:
+  audit:
+    name: Dependency audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # E4/E14：依赖漏洞与维护状态审计。
+      # 例外清单在 .cargo/audit.toml（每条均有整改说明/影响范围界定）
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   rust:
     name: Rust (fmt + clippy + test)
     runs-on: ubuntu-latest

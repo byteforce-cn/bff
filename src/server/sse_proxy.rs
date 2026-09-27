@@ -57,10 +57,11 @@ pub async fn sse_stream(
         }
     }
 
-    let resp = out_req
-        .send()
-        .await
-        .map_err(|e| AppError::bad_gateway(format!("上游 SSE 连接失败: {}", e)))?;
+    let resp = out_req.send().await.map_err(|e| {
+        tracing::warn!(%upstream_url, error = %e, "上游 SSE 连接失败");
+        // S12：对外不暴露上游地址/错误细节
+        AppError::bad_gateway("上游服务暂不可用")
+    })?;
 
     let status = resp.status();
     let headers = resp.headers().clone();

@@ -115,6 +115,9 @@ fn apply_source(
 }
 
 /// 简单 JSON 路径提取：`"."` 返回整个对象，`"a.b.c"` 返回深层值。
+///
+/// S5 注意：`"."` 为通配（返回整个来源对象）——对 `from_env` 不应使用，
+/// route_dispatcher 会在使用该形式时打印告警，并限制为显式引用。
 fn extract_json_path(source: &Value, path: &str) -> Value {
     if path == "." {
         return source.clone();

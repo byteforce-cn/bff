@@ -127,3 +127,5 @@ config/local.yaml
 config/env/local.yaml
 config/env/*.local.yaml
 .codegraph/
+# 本地 HTTPS E2E 自签证书（勿入库）
+deploy/https/certs/

@@ -183,7 +183,11 @@ pub async fn login(
         .oidc_clients
         .get(&provider, &base_url)
         .await
-        .map_err(|e| AppError::bad_gateway(e.to_string()))?;
+        .map_err(|e| {
+            // S12：对外统一文案；内部细节（含拓扑/元数据错误）仅进日志
+            tracing::error!(provider = %provider.id, error = %e, "OIDC client 构建失败");
+            AppError::bad_gateway("身份服务暂不可用（discovery 失败）")
+        })?;
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let mut req = client.authorize_url(
@@ -250,14 +254,21 @@ pub async fn callback(
         .oidc_clients
         .get(&provider, &base_url)
         .await
-        .map_err(|e| AppError::bad_gateway(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(provider = %provider.id, error = %e, "OIDC client 构建失败（callback）");
+            AppError::bad_gateway("身份服务暂不可用（discovery 失败）")
+        })?;
 
     let token_response: CoreTokenResponse = client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(PkceCodeVerifier::new(flow.pkce_verifier))
         .request_async(crate::oidc::http_client::client_fn(state.oidc_http.clone()))
         .await
-        .map_err(|e| AppError::unauthorized(format!("令牌交换失败: {}", e)))?;
+        .map_err(|e| {
+            // S12：不向调用方回显 IdP 内部细节
+            tracing::warn!(error = %e, "code 换 token 失败");
+            AppError::unauthorized("登录失败：令牌交换未完成，请重试")
+        })?;
 
     let sub = verify_id_token(&state, &provider, &base_url, &token_response, &flow.nonce).await?;
 

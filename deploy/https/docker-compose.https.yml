@@ -1,0 +1,39 @@
+# 本地 HTTPS 全链路验收（叠加在根 docker-compose.yml 之上）
+#
+# 拓扑：浏览器/curl → nginx(LB, TLS 终止, :9443) → bff(:8080, 明文回源)
+# Mock IdP 以宿主机进程运行（`cargo run --release --example mock_idp`），
+# 容器内经 host.docker.internal 访问。
+#
+# 用法：
+#   bash deploy/https/gen-certs.sh
+#   cargo run --release --example mock_idp        # 终端 A（宿主）
+#   docker compose -f docker-compose.yml -f deploy/https/docker-compose.https.yml up --build   # 终端 B
+#   bash deploy/https/e2e.sh                      # 终端 C
+services:
+  bff:
+    environment:
+      # 验收形态使用 dev 环境（允许 mock IdP 跳过 id_token 验签；生产禁止）
+      BFF_ENV: dev
+      # 固定对外地址：redirect_uri / post_logout_redirect_uri 不再依赖 Host 头
+      BFF_SERVER__PUBLIC_BASE_URL: https://localhost:9443
+      # 演示不落盘（生产形态见根 compose / K8s 清单）
+      BFF_PERSISTENCE__ENABLED: "false"
+      # 注：oidc.providers 为数组，无法经 BFF_* 环境变量注入（figment 仅支持标量），
+      # 演示栈通过挂载配置文件提供（见下方 volumes）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./deploy/https/providers.demo.yaml:/app/config/oidc/providers.yaml:ro
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - bff
+    ports:
+      - "9443:9443"
+    volumes:
+      # 注意：多文件 compose 的相对路径统一相对**项目目录**（第一个 -f 文件所在处，
+      # 即仓库根目录）解析，因此这里写 deploy/https/...
+      - ./deploy/https/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/https/certs:/etc/nginx/certs:ro
+    restart: unless-stopped

@@ -179,3 +179,75 @@ loop:
         .unwrap();
     assert_eq!(resp.status(), 422);
 }
+
+/// F5：provider 连通性校验与真实删除端点。
+#[tokio::test]
+async fn provider_verify_and_delete() {
+    let idp = common::spawn_mock_oidc_provider().await;
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
+    let state = common::make_state(cfg);
+    let admin = common::spawn_admin(state.clone()).await;
+    let client = common::test_client();
+
+    // 1. verify：对可达的 mock IdP 执行 discovery → ok=true
+    let resp = client
+        .post(format!("{}/admin/api/v1/oidc/providers/mock/verify", admin))
+        .header("x-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], true, "可达 IdP 应校验通过: {}", body);
+    assert!(
+        body["token_endpoint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("/token"),
+        "应返回 token_endpoint: {}",
+        body
+    );
+
+    // 2. 不可达 provider → ok=false（HTTP 仍 200，供 UI 展示错误）
+    let mut cfg2 = state.cfg().as_ref().clone();
+    let mut bad = common::mock_provider_cfg(&idp);
+    bad.id = "unreachable".into();
+    bad.issuer_url = "http://127.0.0.1:1".into();
+    cfg2.oidc.providers.push(bad);
+    state.replace_config(cfg2).unwrap();
+    let resp = client
+        .post(format!(
+            "{}/admin/api/v1/oidc/providers/unreachable/verify",
+            admin
+        ))
+        .header("x-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], false, "不可达 IdP 应返回 ok=false: {}", body);
+
+    // 3. DELETE：真实删除并热更新
+    let resp = client
+        .delete(format!("{}/admin/api/v1/oidc/providers/mock", admin))
+        .header("x-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(
+        state.cfg().oidc.providers.iter().all(|p| p.id != "mock"),
+        "provider 应已删除"
+    );
+
+    // 4. 重复删除 → 404
+    let resp = client
+        .delete(format!("{}/admin/api/v1/oidc/providers/mock", admin))
+        .header("x-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}

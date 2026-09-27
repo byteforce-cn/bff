@@ -35,7 +35,14 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
         .route("/config/export", get(config_api::export_config))
         .route("/config/import", post(config_api::import_config))
         .route("/oidc/providers", get(config_api::list_providers))
-        .route("/oidc/providers/:id", put(config_api::update_provider))
+        .route(
+            "/oidc/providers/:id",
+            put(config_api::update_provider).delete(config_api::delete_provider),
+        )
+        .route(
+            "/oidc/providers/:id/verify",
+            post(runtime_api::verify_provider),
+        )
         .route(
             "/pipelines",
             get(config_api::list_pipelines).post(config_api::create_pipeline),
@@ -57,6 +64,8 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
         // 兼容旧路径（无版本前缀）
         .nest("/admin/api", api_routes)
         .fallback(admin_ui_fallback)
+        // E6：管理 UI 静态资源启用 gzip
+        .layer(tower_http::compression::CompressionLayer::new())
         // R18：请求体上限
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             admin_body_limit,

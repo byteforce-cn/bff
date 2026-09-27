@@ -1,0 +1,14 @@
+# 本地 HTTPS E2E 演示用 OIDC provider（指向宿主 Mock IdP）。
+# 仅用于验收演示：insecure_skip_id_token_verification=true 允许未签名 id_token，
+# 生产环境禁止（validate 会在 BFF_ENV=prod 时拒绝）。
+oidc:
+  providers:
+    - id: demo
+      display_name: "本地 Mock IdP"
+      issuer_url: "http://host.docker.internal:9090"
+      client_id: "bff-demo"
+      client_secret: "demo-secret"
+      callback_path: "/auth/callback"
+      scopes: ["openid"]
+      insecure_skip_id_token_verification: true
+      refresh_skew_secs: 60

@@ -207,6 +207,10 @@ pub struct HttpClientConfig {
     /// 重试初始退避时间
     #[serde(default = "default_retry_backoff", with = "humantime_serde")]
     pub retry_backoff: Duration,
+    /// R11：每个上游的最大并发请求数（0 = 不限制）。
+    /// 用于隔离慢上游，避免单一上游耗尽全局连接/任务（仅 http 代理模式；SSE 为长连接不占名额）。
+    #[serde(default)]
+    pub max_concurrent_per_upstream: usize,
 }
 
 impl Default for HttpClientConfig {
@@ -222,6 +226,7 @@ impl Default for HttpClientConfig {
             ca_cert_path: None,
             retry_max_attempts: 0,
             retry_backoff: default_retry_backoff(),
+            max_concurrent_per_upstream: 0,
         }
     }
 }
@@ -1141,7 +1146,10 @@ pub struct InputMapping {
     #[serde(default)]
     pub from_header: HashMap<String, String>,
 
-    /// 从 OIDC Session 提取，如 { "userId": "session.sub" }
+    /// 从 OIDC Session 提取。
+    ///
+    /// 上下文为**扁平**对象：`{ "sub": ..., "provider": ..., "access_token": ... }`，
+    /// 因此路径写 `sub` / `provider`（F8：文档曾误写为 `session.sub`，会解析为 Null 静默丢弃）。
     #[serde(default)]
     pub from_session: HashMap<String, String>,
 

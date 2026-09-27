@@ -47,4 +47,13 @@ time = "0.3"
 
 [dev-dependencies]
 wiremock = "0.6"
-reqwest = { version = "0.11", features = ["cookies", "json"] }
+# E9：dev-deps 也统一 rustls（原默认特性引入 native-tls/openssl-sys，
+# 导致 `cargo test` 依赖系统 libssl-dev/pkg-config）
+reqwest = { version = "0.11", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+
+# E6：release 构建优化（体积/性能）
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

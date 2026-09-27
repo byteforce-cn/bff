@@ -5,10 +5,10 @@
 
 | 项目 | 内容 |
 | ---- | ---- |
-| 记录日期 | 2026-09-27 |
-| 实施阶段 | **M0 全部** + **M1 核心（P0-1 / P0-2 / R4 / R13）** |
-| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**130 passed / 0 failed**） |
-| 新增测试 | 15 个用例（P0-5×3、P0-3×4、P0-1×4、P0-2×3、R13×1） |
+| 记录日期 | 2026-09-27（第二轮：M1 收尾 + M2 安全主体 + M3 观测 + P0-4 持久化） |
+| 实施阶段 | **P0 全部关闭**；M2 安全主体完成；M3 观测/运营资产完成；M4 灰度待环境 |
+| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**156 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored） |
+| 新增测试 | 本轮新增 12 个用例（持久化×3、provider 端点×1、映射/限流/趋势/重定向单测等）；含既有全量回归 |
 
 ---
 
@@ -119,29 +119,155 @@ BFF_ENV=prod BFF_PROVIDER__REDIS_URL=redis://127.0.0.1:6379 \
 
 ---
 
-## 2. 未完成 / 下一步（按优先级）
+## 1.5 第二轮：M1 收尾 + M2 安全主体 + M3 观测 + P0-4（2026-09-27）
 
-| 优先级 | 项 | 说明 |
+### A. 可靠性与容量（M1 收尾）
+
+| 项 | 实施 | 证据 |
 | --- | --- | --- |
-| **P0** | **P0-4 配置热重载持久化与多实例一致** | 当前仍为进程内存热重载（重启丢失/副本分叉）；管理面审计补全（操作者/差异/查询）；管理面 `ip_whitelist` 冻结问题未修 |
-| P0 收尾 | 镜像 + K8s 清单 + HTTPS E2E | Dockerfile/compose 已交付；K8s Deployment/Service/Ingress/PDB/HPA + 探针清单待补；`https 域名 + LB` 全链路验收待部署环境 |
-| P1 | S1 开放重定向绕过 / S2 会话轮换 (`cycle_id`) | 认证链路缺陷，建议紧随其后 |
-| P1 | S3 admin 常量时间比较 + 独立限流；S4 管理面安全头 + UI token 存储 | 管理面加固 |
-| P1 | S6/R7 WS 鉴权/心跳/上限；S9 上游响应头过滤（含 SSE 路径）；S13 限流 IP 解析统一 | 代理与限流语义 |
-| P1 | R1/R2 代理超时与三处请求体上限统一（读配置）；R3/R15 熔断语义与半开探针；R5 会话 TTL/Cookie 对齐 + sessions GC；R14 内存 provider 无界增长；R17 登出清交换缓存；R18 管理 API 体上限 | 可靠性与语义 |
-| P1 | O1 指标低基数化、O2 延迟直方图、O3 W3C traceparent | 可观测性 |
-| P1 | F1/F9/F10 映射引擎（output_mapping/from_path/status_map）、F12 登出端点 discovery、F13 前端 API 路径 | 功能正确性 |
-| P2 | E4/E14 供应链（`serde_yaml` 停维）、E5 覆盖率与真实验签、E6 性能（QuickJS Runtime 复用/压缩）、K8s/运维文档 | 工程化 |
+| **R1** 代理超时 | `http_client.timeout` 默认 **30s**；SSE 改用独立 `http_stream`（无总超时，connect 5s + TCP keepalive 60s）；`route.config.timeout` 路由级覆盖；WS 握手 5s | `state.rs`/`proxy.rs`/`tunnel.rs`；配置 `base.yaml` |
+| **R2** 体量上限 | 代理请求体改读 `body_limit.max_bytes`（原硬编码 10MiB）；pipeline/script 1MiB → 同配置；新增 `max_response_bytes`（默认 64MiB）流式累计硬上限 + Content-Length 快速拒绝 | `proxy.rs::read_capped_body`、`route_dispatcher.rs` |
+| **R3/R15** 熔断 | 滚动窗口失败计数（成功不清零，间歇故障可触发）；半开**单探针**（含探针超时复位）；`allow(key, threshold)` 路由级阈值生效（键改为路由 path，0=全局默认）；SSE 按**流终态**计（正常结束=成功、读错误=失败） | `circuit_breaker.rs` 单测 5 例；`sse_proxy.rs::stream_with_outcome` |
+| **R5** 会话治理 | `session.ttl`（默认 14d）→ Cookie `Max-Age` 与服务端 `expiry_date` 对齐；`sessions` 索引后台 GC（按 store 实际存在性，`session.gc_interval` 默认 10min）；`last_seen` 60s 节流更新 | `provider/session.rs`、`state.rs::gc_sessions_once/run_session_gc/touch_session`、`main.rs` |
+| **R14** 内存无界增长 | `InMemoryCache` 改为 moka `Expiry` per-entry TTL（删除旁挂 `entry_ttl` 表，容量约束重新生效）；`InMemoryLock` 引用计数 + Drop 兜底回收（含超时路径） | `provider/cache.rs`（+3 测试）、`provider/lock.rs`（+4 测试，断言锁表归零） |
+| **R16/R17/R18** | WS 上游握手超时；登出/管理撤销按 `bff:token_exchange:{sid}:` 前缀清理交换缓存（Redis 后端 SCAN 实现）；管理 API `max_body_bytes`（默认 8MiB） | `tunnel.rs`、`token_exchange.rs::clear_session_cache`、`handlers.rs`、`runtime_api.rs`、`admin/mod.rs` |
 
-> 注：M2/M3/M4 的其余条目（渗透、OTel、灰度）尚未开始。
+### B. 安全加固（M2 主体）
 
----
+| 项 | 实施 | 证据 |
+| --- | --- | --- |
+| **S1** 开放重定向 | `validate_redirect` 改为 URL 解析同源校验：拒绝 `\`、`%5C`、控制字符、非 `/` 开头、协议相对/绝对外链 | `handlers.rs` 单测 2 组（含 `/\evil.com`、`\\evil.com`） |
+| **S2** 会话固定 | 登录成功后 `session.cycle_id()` 轮换 ID | `handlers.rs::callback` |
+| **S3** 管理认证 | token 比较改 SHA-256 摘要常量时间比较；失败按来源 IP 计数（`auth_fail_limit_per_minute`，默认 30/min）超限 429 | `admin/mod.rs` |
+| **S4** 管理面加固 | 安全响应头（CSP/XFO/nosniff/Referrer-Policy/HSTS）挂管理路由；Admin UI token 从 localStorage 改 **sessionStorage + 内存** | `admin/mod.rs`、`admin-ui/src/lib/api.ts`、`hooks/useAuth.tsx` |
+| **S5** 过度收集 | env 上下文仅在 `from_env` 非空时收集、且只注入显式引用变量（`.` 通配保留但告警）；header 上下文过滤 `cookie/authorization/x-admin-token` | `route_dispatcher.rs` |
+| **S6/R7** WS | 仅 `proxy` + `websocket/auto` 路由可升级；按 `auth_required` 强制会话鉴权并向上游握手注入 Bearer；心跳/空闲超时/消息大小上限（1009 关闭）；`connect` 超时 | `business.rs::ws_upgrade_handler`、`tunnel.rs`、`websocket.*` 配置 |
+| **S9** 响应头 | 代理与 SSE 统一过滤：hop-by-hop + `access-control-*` + 默认剥离 `set-cookie`（路由级 `forward_set_cookie: true` 可显式放开） | `proxy.rs::should_strip_response_header` |
+| **S11** 交换缓存 | Token Exchange 缓存值 AES-256-GCM 加密（fail-closed：加密失败不写缓存；旧明文条目视为 miss） | `token_exchange.rs::read_cache/store_result` |
+| **S12** 错误文案 | OIDC discovery/token 交换、代理/SSE 上游错误的对外文案统一为类别描述；细节仅进日志（响应带 `x-request-id` 关联） | `handlers.rs`、`proxy.rs`、`sse_proxy.rs` |
+| **S13** IP 解析统一 | 新增 `middleware/client_ip.rs`（nginx `proxy_add_x_forwarded_for` 语义，修正原 `len - trusted - 1` off-by-one；左侧伪造条目被忽略）；认证限流/全局限流（自定义 KeyExtractor）/管理白名单三处复用；管理白名单改**每请求实时读取**（P0-4） | `client_ip.rs`（5 单测）、`rate_limit_skip.rs`、`admin/mod.rs`；`tests/test_ip_rate_limit.rs` 全量重写判据 |
 
-## 3. 变更文件清单（本阶段）
+### C. 功能正确性（M2 功能项）
 
-**新增**：`src/provider/redis.rs`、`src/oidc/http_client.rs`、`tests/test_pipeline_auth.rs`、`tests/test_redis_providers.rs`、`tests/test_public_base_url.rs`、`tests/test_oidc_timeout.rs`、`Dockerfile`、`.dockerignore`、`docker-compose.yml`、本文件。
+| 项 | 实施 | 证据 |
+| --- | --- | --- |
+| **F1/F10** 输出映射 | `dispatch` 对 pipeline/script 结果执行 `pick/rename/wrap`；`status_map` 按响应体 `status` 字段查表（`default` 兜底） | `mapping.rs::resolve_status`、`route_dispatcher.rs` |
+| **F9** from_path | 新增 `extract_path_param`（段模板 `{name}` 匹配）+ `merge_inputs_full`（优先级 defaults<env<session<header<path<body<query） | `mapping.rs` |
+| **F2** 段边界 | `match_route` 前缀匹配改 `p == path \|\| path.starts_with(p + "/")`（`/api` 不再命中 `/api-secret`） | `route_dispatcher.rs` |
+| **F5** Provider 管理 | 新增 `DELETE /oidc/providers/:id` 与 `POST /oidc/providers/:id/verify`（真实 discovery，连通失败以 `{ok:false}` 返回）；Admin UI 接入真实调用 | `config_api.rs`、`runtime_api.rs`、`admin-ui/pages/Providers.tsx`；集成测试 `provider_verify_and_delete` |
+| **F6** 编排缓存键 | 键加入**调用参数指纹**（排序后 SHA-256 前 16 位），URL 不含用户维度时不再跨用户串数据 | `step.rs` |
+| **F11** callback_path | 启动时按 provider `callback_path` 动态注册回调路由（去重、保留 `/auth/callback`）；validate 校验路径合法且不与保留路径冲突 | `business.rs`、`config.rs` |
+| **F12** 登出兼容 | 登出端点改用 discovery `end_session_endpoint`（各 IdP 路径不同），失败回退本地清会话并告警；Mock IdP/Spring AS 均提供该元数据 | `oidc/client.rs::end_session_endpoint`、`handlers.rs` |
+| **F13** 前端契约 | 演示 SPA 管理 API 路径修正为 `/admin/api/routes`（可配 `window.__BFF_ADMIN_BASE__`）；业务端口 `/admin/api/*` 返回 404 JSON（不再 200+HTML）；管理端未匹配 API 404 JSON | `frontend/src/lib/api.ts`、`business.rs`、`admin/mod.rs` |
+| **F8/F14** | 修正 `from_session` 文档（扁平 `sub`）；环境变量优先级已在本轮前修正 | `config.rs` |
+| **R9** discovery 缓存 | token_endpoint 缺省时的 discovery 结果缓存 10 分钟 | `token_exchange.rs::resolve_token_endpoint` |
 
-**修改**：`src/state.rs`（provider 装配 / oidc_http / verify_dependencies / bff_secret 热更新拒绝 / replace_config 守卫）、`src/config.rs`（脱敏/回填、provider 校验、prod 防呆、public_base_url、F14 优先级）、`src/oidc/{handlers,client}.rs`、`src/server/business.rs`（P0-5）、`src/admin/{config_api,runtime_api,mod}.rs`、`src/main.rs`（R4 + 依赖自检）、`src/provider/{mod,session}.rs`、`src/orchestration/executor.rs`、`src/middleware/ip_rate_limit.rs`、`src/utils/crypto.rs`、`src/server/{proxy,sse_proxy,tunnel,route_dispatcher}.rs`、`src/server/token_exchange.rs`、`config/{base.yaml,env/prod.yaml}`、`.github/workflows/ci.yml`、`tests/`（common、ip_rate_limit、route_unification、admin_config_import_export、orchestration、script_engine、token_exchange）、`Cargo.toml`（+`redis`、+`time`）。
+### D. 可观测性与运营（M3）
+
+| 项 | 实施 | 证据 |
+| --- | --- | --- |
+| **O1** 指标低基数 | `bff_http_requests_total{path}` 标签归一化（路由模板/固定路径/`other`），消除任意 URL 撑爆基数 | `business.rs::metrics_path_label` |
+| **O2** 直方图 | 新增 `bff_http_request_duration_seconds`（全局）与 `bff_upstream_request_duration_seconds{upstream,status_class}` | `business.rs`、`proxy.rs` |
+| **O3** 链路传播 | W3C `traceparent` 解析/生成/逐跳续接，注入请求头（经代理透传上游）与响应头；非法/缺失则新建根上下文 | `middleware/trace_context.rs`（3 单测） |
+| **O4/P0-4** 审计 | 管理写操作统一结构化审计 `admin.audit`（actor=admin-token、来源 IP、method/path/status）；配置变更输出 `admin.config.changed` 含**变更摘要 diff**（routes/pipelines/providers 增删计数、token 是否变更等） | `admin/mod.rs`、`config_api.rs::summarize_change` |
+| **R10** /ready | 探测结果缓存 `health.cache_ttl`（默认 1s）；响应裁剪为 `{status, upstreams_total, upstreams_unreachable}`（不再匿名暴露上游 URL/错误串） | `business.rs::readiness` |
+| **资产** | Grafana 面板（`deploy/grafana/bff-dashboard.json`）、Prometheus 告警（`deploy/prometheus/bff-alerts.yaml`）、Runbook（`docs/runbook.md`）、部署指南含热生效对照表与 SLO 模板（`docs/production-deployment.md`） | 见文件 |
+
+### E. P0-4 配置持久化与多副本一致性（**P0 关闭项**）
+
+| 能力 | 实施 | 证据 |
+| --- | --- | --- |
+| 落盘 | `persistence.enabled/path/watch_interval`；管理写操作**先原子写文件（tmp+rename）再应用内存**，失败即拒绝（无内存/磁盘分裂）；文件为脱敏快照（`***` 哨兵） | `state.rs::persist_config/replace_config` |
+| 启动恢复 | 加载优先级 `base/分文件 < runtime.yaml < BFF_* 环境变量`；哨兵按环境/基础配置回填 | `config.rs::load` |
+| 多副本收敛 | watcher 轮询文件哈希（自身写入跳过；外部变更校验后热重载并 invalidate OIDC 客户端；校验失败仅告警） | `state.rs::run_config_watcher`、`main.rs` |
+| 脚本持久化 | `update_script` 在持久化开启时同步写 `config/scripts/<name>`（临时文件+rename） | `config_api.rs` |
+| 验证 | 集成测试×3：导入→落盘（无明文密钥）→重启恢复；外部文件变更 ~5s 内热重载；关闭时零写入 | `tests/test_config_persistence.rs` |
+
+### F. 工程化（E）
+
+| 项 | 实施 |
+| --- | --- |
+| **E4/E14** 供应链 | CI 新增 RustSec `audit` job；`.cargo/audit.toml` 例外清单（serde_yaml 停维=figment 锁定、影响界定与整改计划；idna 0.3=仅测试构建） |
+| **E9** 构建依赖 | dev-deps reqwest 改 `default-features=false + rustls-tls` → **整个依赖图移除 openssl-sys**（`cargo tree -e normal` 零命中） |
+| **E6** 性能 | 业务/管理路由启用 gzip（谓词排除 `text/event-stream`）；`[profile.release]` lto=thin + codegen-units=1 + strip |
+| **E1/E13** CI | （上轮）admin-ui 构建前置 + `-D warnings` 收敛到 clippy 步骤 |
+| **E15** 文档 | 补齐 `docs/token-exchange-rfc8693.md`；新增部署/运维/Runbook 文档 |
+| **Docker/发布** | release.yml 增加 GHCR 多架构镜像构建推送；本地 HTTPS E2E 栈（`deploy/https/`：nginx TLS 终止 + Mock IdP 示例 + `e2e.sh` 一键验收） |
+
+### G. 本轮实测记录
+
+```text
+# 全量测试（含 Redis provider / 跨实例会话 / 持久化 / 安全回归）
+env -u HTTP_PROXY -u HTTPS_PROXY BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
+→ 156 passed / 0 failed（另有 2 ignored：依赖 fakesvc）
+
+# 门禁
+cargo fmt --all -- --check        → OK
+cargo clippy --all-targets --all-features -- -D warnings → OK
+
+# 供应链
+cargo tree -e normal -i openssl-sys → 无匹配（纯 rustls）
+cargo tree -e normal -i cookie_store → 无匹配（idna 0.3 仅测试链）
+
+# HTTPS + LB 全链路（登录/回调/会话/登出）
+bash deploy/https/e2e.sh          → 见 §G.2（部署环境实测记录）
+```
+
+#### G.2 HTTPS E2E 实测（本机 Docker，2026-09-27）
+
+> 环境：docker 29.x；nginx 1.27 TLS 终止（:9443）→ bff:8080；宿主机运行 `examples/mock_idp.rs`。
+
+```text
+$ bash deploy/https/e2e.sh
+== 0) 等待 https://localhost:9443/live 就绪
+  ✅ /live = 200（经 nginx TLS 终止）
+== 1) redirect_uri 必须基于 public_base_url（防 Host 污染，P0-2）
+  ✅ 登录重定向含固定 redirect_uri（https://localhost:9443/auth/callback）
+  ✅ 伪造 Host x3 后 redirect_uri 仍为 public_base_url 推导值
+== 2) 完整登录（跟随 Mock IdP 自动授权回跳）
+  ✅ 登录成功，/api/session = {"logged_in":true}
+== 3) 登出（discovery end_session_endpoint + 回跳）
+  ✅ 登出成功，/api/session = {"logged_in":false}
+
+🎉 HTTPS 全链路 E2E 通过（登录/回调/会话/登出；经 LB TLS 终止）
+```
+
+Mock IdP 侧同源证据（authorize 回跳 + RP-Initiated Logout）：
+
+```text
+INFO mock_idp: 自动授权回跳 redirect=https://localhost:9443/auth/callback?code=...&state=...
+INFO mock_idp: RP-Initiated Logout 回跳 target=https://localhost:9443/
+```
+
+> 生产域名与真实 IdP 的终验仍属上线前 Should 项（见 §2）。
+> 构建备注：受限网络环境可用 `CARGO_MIRROR` 构建参数指定 cargo 镜像加速镜像构建。
+
+
+
+## 2. 剩余事项（上线前 Should / 灰度期迭代）
+
+> P0 阻断项已全部关闭（含 P0-4；P0-2 的“https + LB 全链路”已提供本地 E2E 与 K8s 清单，
+> 生产域名 + 真实 IdP 终验属部署环境动作）。
+
+| 优先级 | 项 | 说明与建议 |
+| --- | --- | --- |
+| 上线前 | **真实 IdP 兼容性验证** | 非 Spring AS（Keycloak/Okta/Entra）走一遍登录/回调/刷新/登出（F12 已按 discovery 实现，仍需契约实测） |
+| 上线前 | **外部渗透测试** | 重点：OIDC 回调、`/pipeline`、代理注入、管理面（审计 §M2 DoD） |
+| 上线前 | **SLO/负载基线** | 按 `docs/production-deployment.md` §SLO 模板填入目标 QPS/并发并反推限流与 HPA |
+| 上线前 | 生产域名 HTTPS 终验 | 用 `deploy/https/` 同构流程在预发执行并留档 |
+| P1 迭代 | E5 覆盖率门禁 + 真实验签契约测试；WS/Redis/停机路径补测 | 现有 156 用例（+2 ignored）已覆盖主链路 |
+| P1 迭代 | OTel（OTLP）导出 | traceparent 已就绪；引入 exporter 即可衔接上游 span |
+| P2 | E14 `serde_yaml` 整改 | 跟踪 figment 上游；或自研合并 + serde_norway |
+| P2 | 性能专项 | QuickJS Runtime 复用/池化、ServeDir 缓存、k6 基线数值化 |
+| P2 | 灰度（M4） | 1%→10%→50%→100% + 回滚演练 |
+
+
+
+## 3. 变更文件清单（第二轮增量）
+
+**新增**：`src/middleware/client_ip.rs`、`src/middleware/trace_context.rs`、`tests/test_config_persistence.rs`、`examples/mock_idp.rs`、`deploy/k8s/*`、`deploy/https/*`、`deploy/grafana/bff-dashboard.json`、`deploy/prometheus/bff-alerts.yaml`、`.cargo/audit.toml`、`docs/{production-deployment,runbook,token-exchange-rfc8693}.md`。
+
+**修改**：`src/config.rs`（persistence/websocket/response limit/熔断窗口/admin 加固字段/会话 TTL/路由级超时/回调路径校验/F8 注释）、`src/state.rs`（持久化/GC/watcher/http_stream/哈希）、`src/provider/{cache,lock,session,redis}.rs`、`src/middleware/{circuit_breaker,ip_rate_limit,rate_limit_skip,token_refresh,mod}.rs`、`src/server/{business,proxy,sse_proxy,tunnel,route_dispatcher,mapping,token_exchange}.rs`、`src/oidc/{handlers,client}.rs`、`src/admin/{mod,config_api,runtime_api}.rs`、`src/orchestration/step.rs`、`src/main.rs`、`config/{base.yaml,env/prod.yaml}`、`docker-compose.yml`、`Cargo.toml`（profile/dev-deps）、`.github/workflows/{ci,release}.yml`、`admin-ui/src/{lib/api.ts,hooks/useAuth.tsx,pages/Providers.tsx}`、`frontend/src/lib/api.ts`、`README.md`、本文件。
 
 ---
 
@@ -151,29 +277,44 @@ BFF_ENV=prod BFF_PROVIDER__REDIS_URL=redis://127.0.0.1:6379 \
 # 1) Redis（Docker）
 docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine
 
-# 2) 门禁
+# 2) 门禁（156 用例）
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-env -u HTTP_PROXY -u HTTPS_PROXY cargo test --all-features
+env -u HTTP_PROXY -u HTTPS_PROXY BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
 
-# 3) Redis provider 集成测试（含跨实例会话共享）
-BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --test test_redis_providers
-
-# 4) 生产防呆拒绝演示
+# 3) 生产防呆拒绝演示
 BFF_ENV=prod ./target/debug/bff            # → Error: admin.auth_token 必须为 ≥32 字符...
 
-# 5) 容器（compose）
+# 4) 配置持久化
+#    见 tests/test_config_persistence.rs（导入→落盘→重启恢复 / 外部热重载 / 关闭零写入）
+
+# 5) 容器（prod 形态）
 export BFF_ADMIN_TOKEN=$(openssl rand -hex 32)
 export BFF_SECRET=$(openssl rand -hex 32)
 export BFF_SECRET_SALT=$(openssl rand -hex 16)
 docker compose up --build
+
+# 6) HTTPS + LB 全链路 E2E（本地）
+MOCK_IDP_ISSUER=http://host.docker.internal:9090 cargo run --release --example mock_idp &
+bash deploy/https/gen-certs.sh
+docker compose -f docker-compose.yml -f deploy/https/docker-compose.https.yml up --build -d
+bash deploy/https/e2e.sh
+
+# 7) K8s 清单静态校验（可选）
+kubectl apply -k deploy/k8s --dry-run=client
 ```
 
 ---
 
 ## 5. 风险与注意事项
 
-- **Session store 切换（memory→redis）为有损变更**：全部在线会话失效（用户重登），灰度前需公告（审计 §6.5）。
-- **`bff_secret` 轮换**同样等价全员重登；当前已拒绝“热切换”，轮换需按“双密钥过渡或合并切换窗口”实施。
-- `OidcClientManager.get` 的写锁内做 discovery 仍是全局放大点（R13 已加超时，缓存键已隔离，但未彻底拆锁）。
-- compose 默认 `BFF_ENV=prod` 需要宿主环境变量注入三个密钥；`BFF_ADMIN__IP_WHITELIST` 为本地 Docker 网段放宽，生产须按实际入口收紧。
+- **有损变更**：Session store 切换（memory→redis）与 `bff_secret` 轮换均等价“全员重登”，
+  须按 `docs/production-deployment.md` 迁移预警合并窗口执行（新版已拒绝 `bff_secret` 热更新）。
+- **多副本配置收敛依赖共享存储**：`persistence.path` 需挂 RWX 卷；无共享存储时各副本
+  仍会“各自持久化、以自身为准”，需回到单副本或引入配置中心。
+- `OidcClientManager.get` 写锁内 discovery 仍是潜在放大点（超时与缓存键已修复；未拆锁）。
+- 熔断阈值对**已建 key** 固化（路由级阈值在首次调用时生效）；如需在线调整需重启。
+- compose 默认 `BFF_ENV=prod` 需宿主注入三个密钥；演示用 `deploy/https/` 为 dev 形态
+  （允许 Mock IdP 跳过验签），**不可用于生产**。
+- CI `audit` 例外清单（`.cargo/audit.toml`）为已知缺口，新增例外需评审并记录整改计划。
+- `deploy/https/e2e.sh` 依赖宿主机 Mock IdP 进程（`examples/mock_idp.rs`），仅用于本地/验收演示。

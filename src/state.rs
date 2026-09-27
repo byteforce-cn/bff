@@ -49,8 +49,53 @@ pub struct AppState {
     pub breakers: CircuitBreakerRegistry,
     pub scripts: Arc<RwLock<HashMap<String, String>>>,
     pub prometheus: PrometheusHandle,
+    /// R11：按上游的并发舱壁（0 = 不限制）
+    pub upstream_limits: UpstreamLimits,
     /// P0-4：最近一次由本进程写入持久化文件的 sha256（避免 watcher 自触发）
     last_config_hash: Arc<std::sync::RwLock<Option<String>>>,
+}
+
+/// R11：按上游分组的并发信号量（舱壁），隔离慢上游对全局连接/任务的耗尽。
+#[derive(Clone)]
+pub struct UpstreamLimits {
+    max_per_upstream: usize,
+    semaphores: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
+}
+
+/// R11：舱壁决策。
+pub enum BulkheadDecision {
+    /// 未启用（上限 0）
+    Disabled,
+    /// 已占用名额（持 permit 期间计数）
+    Acquired(tokio::sync::OwnedSemaphorePermit),
+    /// 已打满
+    Saturated,
+}
+
+impl UpstreamLimits {
+    pub fn new(max_per_upstream: usize) -> Self {
+        Self {
+            max_per_upstream,
+            semaphores: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 尝试占用一个名额（未启用 → Disabled；满 → Saturated）。
+    pub fn try_acquire(&self, upstream: &str) -> BulkheadDecision {
+        if self.max_per_upstream == 0 {
+            return BulkheadDecision::Disabled;
+        }
+        let sem = {
+            let mut map = self.semaphores.lock().expect("舱壁锁损坏");
+            map.entry(upstream.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(self.max_per_upstream)))
+                .clone()
+        };
+        match sem.try_acquire_owned() {
+            Ok(permit) => BulkheadDecision::Acquired(permit),
+            Err(_) => BulkheadDecision::Saturated,
+        }
+    }
 }
 
 impl AppState {
@@ -135,6 +180,7 @@ impl AppState {
         let cb_threshold = config.circuit_breaker.failure_threshold;
         let cb_window = config.circuit_breaker.failure_window;
         let cb_open_duration = config.circuit_breaker.open_duration;
+        let upstream_limit = config.http_client.max_concurrent_per_upstream;
 
         Ok(Self {
             config: Arc::new(ArcSwap::from_pointee(config)),
@@ -155,6 +201,7 @@ impl AppState {
             ),
             scripts: Arc::new(RwLock::new(HashMap::new())),
             prometheus: init_metrics(),
+            upstream_limits: UpstreamLimits::new(upstream_limit),
             last_config_hash: Arc::new(std::sync::RwLock::new(None)),
         })
     }
@@ -444,4 +491,49 @@ fn build_http_client(
     }
 
     Ok(b.build()?)
+}
+
+#[cfg(test)]
+mod upstream_limits_tests {
+    use super::{BulkheadDecision, UpstreamLimits};
+
+    #[test]
+    fn disabled_never_limits() {
+        let limits = UpstreamLimits::new(0);
+        for _ in 0..100 {
+            assert!(matches!(
+                limits.try_acquire("http://up"),
+                BulkheadDecision::Disabled
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn saturates_at_configured_bound() {
+        let limits = UpstreamLimits::new(2);
+        let p1 = match limits.try_acquire("http://up") {
+            BulkheadDecision::Acquired(p) => p,
+            _ => panic!("应占用名额"),
+        };
+        let _p2 = match limits.try_acquire("http://up") {
+            BulkheadDecision::Acquired(p) => p,
+            _ => panic!("应占用名额"),
+        };
+        // 第 3 个请求被拒（舱壁打满）
+        assert!(matches!(
+            limits.try_acquire("http://up"),
+            BulkheadDecision::Saturated
+        ));
+        // 不同上游互不影响
+        assert!(matches!(
+            limits.try_acquire("http://other"),
+            BulkheadDecision::Acquired(_)
+        ));
+        // 释放后恢复
+        drop(p1);
+        assert!(matches!(
+            limits.try_acquire("http://up"),
+            BulkheadDecision::Acquired(_)
+        ));
+    }
 }

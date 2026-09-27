@@ -62,6 +62,7 @@ http_client:
   pool_idle_timeout: "90s"
   retry_max_attempts: 0       # 代理重试次数（0 = 不重试，仅幂等请求）
   retry_backoff: "100ms"      # 重试初始退避
+  max_concurrent_per_upstream: 0   # R11: 每上游并发上限（0 = 不限制；防慢上游耗尽全局连接）
   # mTLS（可选）
   # client_cert_path: "/etc/bff/certs/client.pem"
   # client_key_path: "/etc/bff/certs/client-key.pem"

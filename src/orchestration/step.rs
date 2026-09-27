@@ -59,8 +59,25 @@ async fn execute_http(
     let url = template::render(&url_tpl, params);
     let method = config.method.to_uppercase();
 
-    // 缓存命中直接返回
-    let cache_key = format!("pipeline:http:{}:{}", method, url);
+    // 缓存命中直接返回。
+    // F6：键必须包含参数指纹（身份/会话维度）——原实现仅 method+url，
+    // 若 URL 不含用户维度会跨用户串数据；现在调用参数不同则缓存自然隔离。
+    let cache_key = if config.cache_ttl.is_some() {
+        let mut entries: Vec<(&String, &String)> = params.iter().collect();
+        entries.sort();
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest;
+        for (k, v) in entries {
+            hasher.update(k.as_bytes());
+            hasher.update(b"\x1f");
+            hasher.update(v.as_bytes());
+            hasher.update(b"\x1e");
+        }
+        let fp = format!("{:x}", hasher.finalize());
+        format!("pipeline:http:{}:{}:{}", method, url, &fp[..16])
+    } else {
+        format!("pipeline:http:{}:{}", method, url)
+    };
     if config.cache_ttl.is_some() {
         if let Some(hit) = ctx.cache.get(&cache_key).await {
             if let Ok(out) = serde_json::from_slice::<StepOutput>(&hit) {

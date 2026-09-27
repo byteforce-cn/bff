@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { verifyToken } from "@/lib/api";
+import { clearToken, getToken, setToken, verifyToken } from "@/lib/api";
 
 interface AuthContextType {
   token: string | null;
@@ -23,25 +23,24 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() =>
-    localStorage.getItem("bff_admin_token")
-  );
+  // S4：token 存取走 api.ts 的 sessionStorage 实现（关标签页失效）
+  const [token, setTokenState] = useState<string | null>(() => getToken() || null);
   const [isLoading, setIsLoading] = useState(true);
 
   // 启动时校验已有 token
   useEffect(() => {
-    const stored = localStorage.getItem("bff_admin_token");
+    const stored = getToken();
     if (stored) {
       verifyToken()
         .then((ok) => {
           if (!ok) {
-            localStorage.removeItem("bff_admin_token");
-            setToken(null);
+            clearToken();
+            setTokenState(null);
           }
         })
         .catch(() => {
-          localStorage.removeItem("bff_admin_token");
-          setToken(null);
+          clearToken();
+          setTokenState(null);
         })
         .finally(() => setIsLoading(false));
     } else {
@@ -51,25 +50,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (newToken: string): Promise<boolean> => {
     // 临时保存以验证
-    const prev = localStorage.getItem("bff_admin_token");
-    localStorage.setItem("bff_admin_token", newToken);
+    const prev = getToken();
+    setToken(newToken);
     try {
       const ok = await verifyToken();
       if (ok) {
-        setToken(newToken);
+        setTokenState(newToken);
         return true;
       }
-      localStorage.setItem("bff_admin_token", prev || "");
+      if (prev) {
+        setToken(prev);
+      } else {
+        clearToken();
+      }
       return false;
     } catch {
-      localStorage.setItem("bff_admin_token", prev || "");
+      if (prev) {
+        setToken(prev);
+      } else {
+        clearToken();
+      }
       return false;
     }
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem("bff_admin_token");
-    setToken(null);
+    clearToken();
+    setTokenState(null);
   }, []);
 
   return (

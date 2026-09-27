@@ -4,8 +4,36 @@
 
 const BASE = "/admin/api";
 
-function getToken(): string {
-  return localStorage.getItem("bff_admin_token") || "";
+// S4：管理 token 存 sessionStorage（关标签页即失效）而非 localStorage，
+// 降低持久化窃取面；cookie/localStorage 都不可用时退化为仅内存（刷新需重登）。
+const TOKEN_KEY = "bff_admin_token";
+let memoryToken = "";
+
+export function getToken(): string {
+  if (memoryToken) return memoryToken;
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setToken(token: string): void {
+  memoryToken = token;
+  try {
+    sessionStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* 存储受限：仅内存持有 */
+  }
+}
+
+export function clearToken(): void {
+  memoryToken = "";
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
 async function request<T = unknown>(
@@ -20,7 +48,7 @@ async function request<T = unknown>(
   const resp = await fetch(`${BASE}${path}`, { ...options, headers });
 
   if (resp.status === 401) {
-    localStorage.removeItem("bff_admin_token");
+    clearToken();
     window.location.href = "/login";
     throw new Error("未授权，请重新登录");
   }
@@ -77,6 +105,24 @@ export const updateProvider = (id: string, provider: Record<string, unknown>) =>
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(provider),
+  });
+
+/** F5：真实删除 provider（后端 DELETE 端点） */
+export const deleteProvider = (id: string) =>
+  request(`/oidc/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+/** F5：真实连通性校验（后端执行 OIDC discovery） */
+export interface ProviderVerifyResult {
+  ok: boolean;
+  issuer?: string;
+  token_endpoint?: string;
+  jwks_uri?: string;
+  latency_ms?: number;
+  error?: string;
+}
+export const verifyProvider = (id: string) =>
+  request<ProviderVerifyResult>(`/oidc/providers/${encodeURIComponent(id)}/verify`, {
+    method: "POST",
   });
 
 // ---- Pipelines ----

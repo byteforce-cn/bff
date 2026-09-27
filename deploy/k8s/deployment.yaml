@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bff
+  labels:
+    app.kubernetes.io/name: bff
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bff
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bff
+      annotations:
+        # 配置指纹（变更后触发滚动更新；亦可交给 CI 注入镜像 tag）
+        bff.io/config-rev: "1"
+    spec:
+      # R4：BFF 优雅停机排空窗口 30s；留 15s 余量给 preStop 与摘除
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bff
+          image: ghcr.io/byteforce-cn/bff:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: business
+              containerPort: 8080
+            - name: admin
+              containerPort: 8443
+          envFrom:
+            - secretRef:
+                name: bff-secrets
+          env:
+            - name: BFF_ENV
+              value: "prod"
+            # P0-2：固定对外地址（redirect_uri 不再依赖 Host 头）
+            - name: BFF_SERVER__PUBLIC_BASE_URL
+              value: "https://bff.example.com"
+            # P0-4：配置持久化（共享存储时多副本收敛）
+            - name: BFF_PERSISTENCE__ENABLED
+              value: "true"
+            - name: BFF_PERSISTENCE__PATH
+              value: "/data/bff/runtime.yaml"
+            # S13：按实际入口拓扑标定（LB 后为 1；直连为 0）
+            - name: BFF_AUTH_RATE_LIMIT__TRUSTED_PROXIES
+              value: "1"
+            - name: BFF_ADMIN__TRUSTED_PROXIES
+              value: "1"
+          volumeMounts:
+            - name: state
+              mountPath: /data/bff
+            # 如通过 ConfigMap 管理声明式配置（routes/pipelines/oidc），整目录挂载：
+            # - name: config
+            #   mountPath: /app/config
+            #   readOnly: true
+          startupProbe:
+            httpGet: { path: /live, port: business }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /live, port: business }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /ready, port: business }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          lifecycle:
+            preStop:
+              # 先从 Service Endpoints 摘除，再等待在途请求自然结束
+              exec:
+                command: ["sleep", "5"]
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: bff-state
+        # - name: config
+        #   configMap:
+        #     name: bff-config

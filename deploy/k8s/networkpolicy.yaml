@@ -1,0 +1,61 @@
+# 管理端口网络准入：仅允许运维命名空间访问 8443；业务端口允许 ingress 命名空间。
+#
+# 说明：
+# - admin.ip_whitelist 仍是应用层第二道防线（且支持 trusted_proxies）；
+# - 出网策略按实际拓扑收窄（Redis / IdP / 上游服务）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bff
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bff
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ops
+      ports:
+        - protocol: TCP
+          port: 8443
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Redis（多实例状态）
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # IdP / 上游服务（按实际网段/命名空间收窄；此处示例放行集群内 80/443/8080/9090）
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9090

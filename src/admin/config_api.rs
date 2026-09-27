@@ -54,6 +54,11 @@ pub async fn export_config(State(state): State<AppState>) -> Result<Response, Ap
 }
 
 /// POST /admin/api/config/import — 导入配置（YAML 原文或 multipart），原子热重载
+///
+/// R12 语义说明：导入体是**完整配置**（与 `/config/export` 同一形状），
+/// 经 `serde_yaml` 解析 + `merge_sensitive_secrets` 哨兵回填后整体应用；
+/// 不再叠加 `BFF_*` 环境变量/分文件层级（那是启动加载与持久化 overlay 的职责）。
+/// 即：运行中 import 的环境相关字段以导入体为准（密钥类以哨兵回填现网值）。
 pub async fn import_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -121,6 +126,36 @@ async fn extract_yaml(headers: &HeaderMap, body: Bytes) -> Result<String, AppErr
     } else {
         String::from_utf8(body.to_vec()).map_err(|_| AppError::bad_request("body 非 UTF-8"))
     }
+}
+
+/// DELETE /admin/api/oidc/providers/{id} — 删除 provider（F5：补齐真实删除端点）
+pub async fn delete_provider(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let before = state.cfg().as_ref().clone();
+    let mut cfg = before.clone();
+    let len = cfg.oidc.providers.len();
+    cfg.oidc.providers.retain(|p| p.id != id);
+    if cfg.oidc.providers.len() == len {
+        return Err(AppError::not_found(format!("OIDC provider 不存在: {}", id)));
+    }
+    state
+        .replace_config(cfg)
+        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    state.oidc_clients.invalidate(&id).await;
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "delete_provider",
+        provider_id = %id,
+        summary = %summarize_change(&before, &state.cfg()),
+        "OIDC provider 已删除"
+    );
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "deleted"})),
+    )
+        .into_response())
 }
 
 /// GET /admin/api/oidc/providers — 列出（脱敏）

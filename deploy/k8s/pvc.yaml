@@ -1,0 +1,14 @@
+# P0-4：配置持久化卷。
+#
+# 多副本收敛要求各副本共享同一文件 → 需要 ReadWriteMany（NFS/CephFS/EFS 等）。
+# 单副本（replicas=1）可用 ReadWriteOnce。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bff-state
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: nfs-client   # 按集群实际 StorageClass 指定

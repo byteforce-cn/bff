@@ -59,9 +59,10 @@ pub async fn forward_request(
     if !state.breakers.allow(&breaker_key, threshold).await {
         metrics::counter!("bff_proxy_rejected_total", "upstream" => upstream.to_string())
             .increment(1);
+        // S12：不向外回显上游地址
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("上游熔断中: {}", upstream),
+            "服务暂不可用（上游熔断中）",
         ));
     }
 
@@ -130,6 +131,20 @@ pub async fn forward_request(
         }
         // "http" | "auto" | "" | 其他 → 标准一次性 HTTP 代理（含 401 刷新重试）
         _ => {
+            // R11：上游并发舱壁（0 = 不限制；仅 http 模式，占用至响应读取完成）
+            use crate::state::BulkheadDecision;
+            let _permit = match state.upstream_limits.try_acquire(upstream) {
+                BulkheadDecision::Disabled => None,
+                BulkheadDecision::Acquired(p) => Some(p),
+                BulkheadDecision::Saturated => {
+                    metrics::counter!("bff_upstream_saturated_total", "upstream" => upstream.to_string())
+                        .increment(1);
+                    return Err(AppError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "服务繁忙，请稍后重试",
+                    ));
+                }
+            };
             let method_c = method.clone();
             let body_c = body_bytes.to_vec();
             let auth_c = auth_token.clone();
@@ -348,8 +363,12 @@ async fn proxy_http(
     }
 
     // 所有重试均已耗尽
+    if let Some(e) = &last_err {
+        tracing::warn!(upstream, error = %e, "代理请求最终失败");
+    }
     metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string()).increment(1);
-    Err(last_err.unwrap_or_else(|| AppError::bad_gateway("未知代理错误")))
+    // S12：对外统一文案（详情已进日志，可用 x-request-id 关联）
+    Err(AppError::bad_gateway("上游服务暂不可用"))
 }
 
 /// R2：按上限读取响应体（reqwest 无默认上限；大响应会造成内存膨胀/OOM）。

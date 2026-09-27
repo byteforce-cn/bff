@@ -15,6 +15,8 @@ use axum::routing::get;
 use axum::Router;
 use std::collections::HashMap;
 use tower::ServiceExt;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -62,6 +64,11 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
 
     // 安全响应头中间件
     let sec_headers = cfg.security_headers.clone();
+
+    // E6：gzip 压缩（原依赖 tower-http "compression-gzip" 特性但从未挂载 CompressionLayer）。
+    // 谓词排除 `text/event-stream`：SSE 需要逐块低延迟，不能被压缩缓冲。
+    let compression_layer = CompressionLayer::new()
+        .compress_when(DefaultPredicate::new().and(NotForContentType::new("text/event-stream")));
 
     let mut app = Router::new()
         .route("/login", get(oidc::login))
@@ -114,6 +121,8 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         ))
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer)
+        // E6：gzip（SSE 已由谓词排除）
+        .layer(compression_layer)
         // 全局限流（tower-governor）：与 CSP csp_overrides 同风格按路径前缀收窄，
         // SPA 静态资源等 skip_path_prefixes 命中的请求不消耗全局限流令牌，其余路径保持限流
         .layer(axum::middleware::from_fn_with_state(

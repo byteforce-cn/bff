@@ -1,0 +1,25 @@
+# cargo-audit 配置（RustSec 审计例外清单）
+#
+# 每一项都必须有：整改说明 + 影响范围界定。禁止“静默忽略”。
+# CI 中由 rustsec/audit-check 执行审计并读取本文件。
+
+[advisories]
+ignore = [
+    # serde_yaml 0.9.34+deprecated 已停维（RUSTSEC-2024-0320）。
+    # 引入链：figment 0.10（启动配置加载）→ serde_yaml。BFF 直接使用处：
+    #   - src/config.rs（配置加载/持久化）
+    #   - src/admin/config_api.rs（import 解析）
+    #   - 测试与管线 YAML 解析
+    # 影响界定：这是“unmaintained”公告而非在野漏洞；解析对象为受信来源
+    # （本地配置文件 + 持 token 的管理操作），且管理命体上限 8 MiB（R18）。
+    # 整改计划：跟踪 figment 上游迁移（如上游切换 serde_yaml_ng），
+    # 或替换配置层为自研合并 + serde_norway/serde_yaml_ng。
+    "RUSTSEC-2024-0320",
+
+    # idna 0.3.0 DoS（RUSTSEC-2024-0421）。
+    # 引入链：dev-dependencies reqwest(cookies) → cookie_store 0.20 → idna 0.3。
+    # 影响界定：**仅测试构建**。发布二进制不含该链：
+    #   `cargo tree -e normal -i cookie_store` → nothing to print。
+    # 整改计划：跟随 reqwest 0.12 升级（cookie_store 新版本换用 idna 1.x）。
+    "RUSTSEC-2024-0421",
+]

@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff
+  labels:
+    app.kubernetes.io/name: bff
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: bff
+  ports:
+    - name: http
+      port: 8080
+      targetPort: business
+---
+# 管理端口：独立 ClusterIP，仅在集群内暴露；不要挂到 Ingress。
+# 访问方式：跳板机 + `kubectl port-forward svc/bff-admin 8443:8443`，
+# 或专门的运维网关（配合 admin.ip_whitelist / trusted_proxies）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: bff-admin
+  labels:
+    app.kubernetes.io/name: bff
+    app.kubernetes.io/component: admin
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: bff
+  ports:
+    - name: admin
+      port: 8443
+      targetPort: admin

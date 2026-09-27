@@ -1,0 +1,30 @@
+# TLS 终止在 Ingress（nginx-ingress 示例；证书由 cert-manager 管理或手工 Secret）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bff
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # SSE：关闭代理缓冲
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    # X-Forwarded-* 由 ingress 自动注入；BFF 侧 public_base_url 已固定对外地址
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["bff.example.com"]
+      secretName: bff-tls
+  rules:
+    - host: bff.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff
+                port:
+                  number: 8080

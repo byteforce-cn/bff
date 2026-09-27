@@ -1,0 +1,62 @@
+# BFF Prometheus 告警规则（示例；按 SLO 基线调参，见 docs/production-deployment.md §SLO）
+groups:
+  - name: bff
+    rules:
+      - alert: BffDown
+        expr: up{job="bff"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "BFF 实例不可达（{{ $labels.instance }}）"
+          runbook: "docs/runbook.md#bffdown"
+
+      - alert: BffHighErrorRate
+        expr: |
+          sum(rate(bff_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(bff_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "BFF 5xx 错误率 > 5%"
+          runbook: "docs/runbook.md#high-error-rate"
+
+      - alert: BffHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(bff_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "BFF P95 延迟 > 1s"
+          runbook: "docs/runbook.md#high-latency"
+
+      - alert: BffCircuitBreakerOpen
+        expr: increase(bff_circuit_breaker_open_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "上游熔断器打开（{{ $labels.upstream }}）"
+          runbook: "docs/runbook.md#circuit-breaker"
+
+      - alert: BffReadyNotReady
+        expr: kube_deployment_status_replicas_available{deployment="bff"} < 1
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "BFF 无可用副本（readiness 失败或滚动卡住）"
+          runbook: "docs/runbook.md#not-ready"
+
+      - alert: BffRateLimitBlockedSurge
+        expr: sum(rate(bff_iprl_blocked_total[5m])) > 5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "认证端点 429 激增（疑似撞库/配置阈值过紧）"
+          runbook: "docs/runbook.md#rate-limit"
+
+      - alert: BffTokenExchangeErrors
+        expr: sum(rate(bff_token_exchange_error_total[5m])) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Token Exchange 错误持续出现"
+          runbook: "docs/runbook.md#token-exchange"

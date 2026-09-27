@@ -27,7 +27,7 @@ import {
 import { TableSkeleton } from "@/components/ui/table-skeleton";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { listProviders, updateProvider } from "@/lib/api";
+import { deleteProvider, listProviders, updateProvider, verifyProvider } from "@/lib/api";
 import type { OidcProviderConfig } from "@/types";
 import { Plus, Pencil, Trash2, ShieldCheck, Globe, Key, FlaskConical } from "lucide-react";
 import { toast } from "sonner";
@@ -93,8 +93,8 @@ export default function ProvidersPage() {
   const handleDelete = async () => {
     if (!deleteId) return;
     try {
-      // 后端 DELETE 端点暂未实现前，通过 PUT 空配置触发删除逻辑
-      await updateProvider(deleteId, { id: deleteId, _delete: true } as unknown as Record<string, unknown>);
+      // F5：调用真实 DELETE 端点（原实现用 PUT {_delete:true} 冒充删除，后端从不识别）
+      await deleteProvider(deleteId);
       toast.success(`Provider "${deleteId}" 已删除`);
       setDeleteId(null);
       load();
@@ -106,8 +106,15 @@ export default function ProvidersPage() {
   const handleTest = async (id: string) => {
     setTestingId(id);
     try {
-      // 后端 test 端点暂未实现前，通过健康检查模拟
-      toast.success(`Provider "${id}" 连接测试通过`);
+      // F5：后端执行真实 OIDC discovery（原实现不发任何请求、无条件报“通过”）
+      const res = await verifyProvider(id);
+      if (res.ok) {
+        toast.success(
+          `Provider "${id}" 连接测试通过（${res.latency_ms ?? 0}ms）`
+        );
+      } else {
+        toast.error(`Provider "${id}" 连接测试失败: ${res.error ?? "未知错误"}`);
+      }
     } catch (e) {
       toast.error(`连接测试失败: ${errMsg(e)}`);
     } finally {

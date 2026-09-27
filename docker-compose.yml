@@ -31,6 +31,9 @@ services:
   bff:
     build:
       context: .
+      # 可选：受限网络下指定 cargo 镜像加速构建（CI 留空使用 crates.io）
+      args:
+        CARGO_MIRROR: ${CARGO_MIRROR:-}
     image: bff:local
     depends_on:
       bff-redis:

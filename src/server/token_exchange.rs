@@ -404,6 +404,13 @@ async fn resolve_token_endpoint(
         .ok_or_else(|| {
             ExchangeError::ClientConfig(format!("provider 不存在: {}", tokens.provider))
         })?;
+    // R9：discovery 结果缓存（缺省 token_endpoint 时避免每次缓存 miss 都做一次 IdP 往返）
+    let cache_key = format!("bff:oidc:token_endpoint:{}", provider.id);
+    if let Some(v) = state.cache.get(&cache_key).await {
+        if let Ok(s) = String::from_utf8(v) {
+            return Ok(s);
+        }
+    }
     // openidconnect 的 CoreClient 不暴露 provider metadata，缺省路径做一次 discovery
     // R13：使用带超时的共享客户端（避免默认实现每次新建连接池且无超时）
     let issuer = openidconnect::IssuerUrl::new(provider.issuer_url.clone())
@@ -414,12 +421,21 @@ async fn resolve_token_endpoint(
     )
     .await
     .map_err(|e| ExchangeError::ClientConfig(format!("OIDC discovery 失败: {}", e)))?;
-    metadata
+    let endpoint = metadata
         .token_endpoint()
         .map(|u| u.to_string())
         .ok_or_else(|| {
             ExchangeError::ClientConfig("provider discovery 未提供 token endpoint".into())
-        })
+        })?;
+    state
+        .cache
+        .set(
+            &cache_key,
+            endpoint.clone().into_bytes(),
+            Duration::from_secs(600),
+        )
+        .await;
+    Ok(endpoint)
 }
 
 #[cfg(test)]

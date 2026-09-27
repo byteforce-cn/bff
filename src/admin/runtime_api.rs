@@ -37,6 +37,47 @@ pub async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Va
     Json(serde_json::json!({ "sessions": sessions, "count": sessions.len() }))
 }
 
+/// POST /admin/api/oidc/providers/:id/verify — F5：真实连通性校验（discovery）。
+///
+/// 返回 200 + `{ok, ...}`：连通性问题作为业务结果返回（非 5xx），便于 UI 展示。
+pub async fn verify_provider(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, AppError> {
+    let provider = state
+        .cfg()
+        .oidc
+        .providers
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .ok_or_else(|| AppError::not_found(format!("OIDC provider 不存在: {}", id)))?;
+
+    let issuer = openidconnect::IssuerUrl::new(provider.issuer_url.clone())
+        .map_err(|e| AppError::bad_request(format!("issuer_url 非法: {}", e)))?;
+    let started = std::time::Instant::now();
+    let result = openidconnect::core::CoreProviderMetadata::discover_async(
+        issuer,
+        crate::oidc::http_client::client_fn(state.oidc_http.clone()),
+    )
+    .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(metadata) => Ok(axum::Json(serde_json::json!({
+            "ok": true,
+            "issuer": metadata.issuer().as_str(),
+            "token_endpoint": metadata.token_endpoint().map(|u| u.to_string()),
+            "jwks_uri": metadata.jwks_uri().as_str(),
+            "latency_ms": latency_ms,
+        }))),
+        Err(e) => Ok(axum::Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+            "latency_ms": latency_ms,
+        }))),
+    }
+}
+
 /// DELETE /admin/api/sessions/:id — 撤销会话（从 MemoryStore 和内存 HashMap 中移除）
 pub async fn delete_session(
     State(state): State<AppState>,
