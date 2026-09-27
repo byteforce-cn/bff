@@ -19,9 +19,13 @@ hello:
 async fn config_export_import_and_hot_reload() {
     let idp = common::spawn_mock_oidc_provider().await;
     let mut cfg = common::base_config();
+    // P0-3：指定可识别的真实主密钥，断言导出绝不泄露
+    cfg.bff_secret.secret = "e2e-master-secret-777".into();
+    cfg.bff_secret.salt = "e2e-master-salt-888".into();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     let state = common::make_state(cfg);
     let admin = common::spawn_admin(state.clone()).await;
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
     let auth = || "test-admin-token";
@@ -38,6 +42,17 @@ async fn config_export_import_and_hot_reload() {
     assert!(yaml.contains("mock"), "导出应包含 provider: {}", yaml);
     assert!(yaml.contains("***"), "导出应脱敏: {}", yaml);
     assert!(!yaml.contains("bff-secret"), "导出不应包含真实密钥");
+    // P0-3：主密钥（secret/salt）绝不能出现在导出结果中
+    assert!(
+        !yaml.contains("e2e-master-secret-777"),
+        "导出不得泄露 bff_secret.secret: {}",
+        yaml
+    );
+    assert!(
+        !yaml.contains("e2e-master-salt-888"),
+        "导出不得泄露 bff_secret.salt: {}",
+        yaml
+    );
 
     // 2. 修改导出内容：新增一个纯脚本 pipeline
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
@@ -59,12 +74,61 @@ async fn config_export_import_and_hot_reload() {
     // 4. 新 pipeline 立即生效
     let resp = client
         .get(format!("{}/pipeline/hello", bff))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["msg"], "hi from pipeline");
+
+    // 5. P0-3：导出→回导回环后，原管理口令必须仍然有效（哨兵已回填真实值）
+    let resp = client
+        .get(format!("{}/admin/api/config/export", admin))
+        .header("x-admin-token", auth())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "回导后原管理口令失效——导出入侵回环破坏了密钥（P0-3）"
+    );
+}
+
+/// P0-3：热导入 bff_secret 必须被显式拒绝（不得静默分裂配置与运行态）。
+#[tokio::test]
+async fn import_rejects_bff_secret_change() {
+    let cfg = common::base_config();
+    let state = common::make_state(cfg);
+    let admin = common::spawn_admin(state).await;
+    let client = common::test_client();
+
+    let mut new_cfg = common::base_config();
+    new_cfg.server.business_port = 8080;
+    new_cfg.server.admin_port = 8443;
+    new_cfg.bff_secret.secret = "another-secret-999".into();
+    let mut doc = serde_yaml::to_value(&new_cfg).unwrap();
+    // 模拟导出→编辑回导：管理口令用哨兵，bff_secret 是“新密钥”
+    doc["admin"]["auth_token"] = serde_yaml::Value::String("***".into());
+    let yaml = serde_yaml::to_string(&doc).unwrap();
+
+    let resp = client
+        .post(format!("{}/admin/api/config/import", admin))
+        .header("x-admin-token", "test-admin-token")
+        .header("content-type", "application/yaml")
+        .body(yaml)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422, "bff_secret 热更新应被拒绝");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("bff_secret"),
+        "错误信息应明确指出 bff_secret 不可热更新: {}",
+        err
+    );
 }
 
 #[tokio::test]

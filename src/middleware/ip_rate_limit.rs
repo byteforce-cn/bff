@@ -103,17 +103,13 @@ pub async fn ip_rate_limit_middleware(
     bucket.tokens = (bucket.tokens + elapsed * rate).min(capacity);
     bucket.last = now;
 
-    let blocked;
-    let retry_after;
-    if bucket.tokens >= 1.0 {
+    let (blocked, retry_after) = if bucket.tokens >= 1.0 {
         bucket.tokens -= 1.0;
-        blocked = false;
-        retry_after = 0;
+        (false, 0)
     } else {
         // 距下一个令牌的等待秒数（向上取整，至少 1s）
-        blocked = true;
-        retry_after = ((1.0 - bucket.tokens) / rate).ceil().max(1.0) as u64;
-    }
+        (true, ((1.0 - bucket.tokens) / rate).ceil().max(1.0) as u64)
+    };
 
     // 写回桶状态（TTL = 空桶补满所需时间 + 60s 冗余，空闲 key 自动过期）
     let ttl = Duration::from_secs_f64(capacity / rate + 60.0);
@@ -172,7 +168,7 @@ fn parse_xff(req: &Request<Body>) -> Option<Vec<IpAddr>> {
         .headers()
         .get_all("x-forwarded-for")
         .iter()
-        .last()?
+        .next_back()?
         .to_str()
         .ok()?;
     let ips: Vec<IpAddr> = v

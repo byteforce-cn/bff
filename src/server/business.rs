@@ -28,7 +28,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
     // Trace ID: 为每个请求生成 UUID 并传播到响应头
     let request_id_layer = SetRequestIdLayer::new(
         axum::http::HeaderName::from_static("x-request-id"),
-        MakeRequestUuid::default(),
+        MakeRequestUuid,
     );
 
     // CORS：根据配置选择 permissive 或白名单模式
@@ -273,12 +273,24 @@ async fn session_info(session: Session) -> Json<serde_json::Value> {
     }))
 }
 
-/// GET/POST /pipeline/:name — 兼容旧入口，内部转为统一 Route 分发
+/// GET/POST /pipeline/:name — 兼容旧入口，内部转为统一 Route 分发。
+///
+/// P0-5：该显式路由不经过统一路由分发器（`route_dispatcher::dispatch`），
+/// 因此必须在此强制会话鉴权——否则任何匿名请求都可携带任意参数触发
+/// pipeline 真实执行（含其访问内网上游的步骤）。
+/// 需要匿名访问的 pipeline 应通过 `routes.yaml` 显式声明 `auth_required: false`，
+/// 经统一分发器执行。
 async fn run_pipeline(
     State(state): State<AppState>,
+    session: Session,
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
+    // P0-5 鉴权：必须有有效会话（与统一分发器的 auth_required 语义对齐）
+    crate::oidc::handlers::current_access_token(&session)
+        .await
+        .ok_or_else(|| AppError::unauthorized("未登录或会话已过期（/pipeline/:name 需要认证）"))?;
+
     let def = state
         .cfg()
         .pipelines

@@ -26,6 +26,7 @@ steps:
         .unwrap(),
     );
     let state = common::make_state(cfg);
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
@@ -33,6 +34,7 @@ steps:
     let start = Instant::now();
     let resp = client
         .get(format!("{}/pipeline/heavy", bff))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();

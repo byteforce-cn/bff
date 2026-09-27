@@ -5,8 +5,8 @@
 //! 2. `config/oidc/providers.yaml`
 //! 3. `config/pipelines/*.yaml`（每个文件顶层 map 合并到 `pipelines` 键下）
 //! 4. `config/routes/routes.yaml`
-//! 5. 环境变量 `BFF_` 前缀（`__` 分隔层级）
-//! 6. `config/env/{BFF_ENV}.yaml`
+//! 5. `config/env/{BFF_ENV}.yaml`
+//! 6. 环境变量 `BFF_` 前缀（`__` 分隔层级）——最高优先级（F14：12-factor）
 
 use figment::providers::{Env, Format, Serialized, Yaml};
 use figment::Figment;
@@ -137,6 +137,15 @@ pub struct ServerConfig {
     pub business_port: u16,
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
+    /// 对外基础 URL（如 `https://bff.example.com`）。
+    /// 设置后 OIDC `redirect_uri` / `post_logout_redirect_uri` 一律基于它推导，
+    /// **不再信任 Host 头**（P0-2：防止匿名 Host 污染全体用户的授权地址）。
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+    /// 可信 Host 白名单（未配置 `public_base_url` 时的回退路径防护）。
+    /// 非空时：Host 必须命中白名单，否则拒绝；为空时仅允许 loopback Host。
+    #[serde(default)]
+    pub trusted_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -144,6 +153,8 @@ impl Default for ServerConfig {
         Self {
             business_port: default_business_port(),
             admin_port: default_admin_port(),
+            public_base_url: None,
+            trusted_hosts: Vec::new(),
         }
     }
 }
@@ -321,7 +332,7 @@ fn default_auth_rate_burst() -> u32 {
 
 // ── CORS 配置 ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CorsConfig {
     /// 允许的来源列表（空 = 使用 permissive）
     #[serde(default)]
@@ -329,15 +340,6 @@ pub struct CorsConfig {
     /// 是否允许所有来源（仅开发环境）
     #[serde(default)]
     pub permissive: bool,
-}
-
-impl Default for CorsConfig {
-    fn default() -> Self {
-        Self {
-            allowed_origins: vec![],
-            permissive: false,
-        }
-    }
 }
 
 // ── 安全响应头配置 ──
@@ -1041,16 +1043,17 @@ impl AppConfig {
         pipelines_root.insert("pipelines".to_string(), pipelines);
         fig = fig.merge(Serialized::defaults(pipelines_root));
 
-        fig = fig
-            .merge(Yaml::file(config_dir.join("routes/routes.yaml")))
-            .merge(Env::prefixed("BFF_").split("__"));
+        fig = fig.merge(Yaml::file(config_dir.join("routes/routes.yaml")));
 
+        // F14：env 文件优先级低于 `BFF_*` 环境变量（环境变量最高，符合 12-factor）
         if let Ok(env) = std::env::var("BFF_ENV") {
             let env_file = config_dir.join("env").join(format!("{}.yaml", env));
             if env_file.is_file() {
                 fig = fig.merge(Yaml::file(env_file));
             }
         }
+
+        fig = fig.merge(Env::prefixed("BFF_").split("__"));
 
         let cfg: AppConfig = fig.extract()?;
         cfg.validate()?;
@@ -1069,16 +1072,35 @@ impl AppConfig {
             self.bff_secret.salt.len()
         );
 
-        // Provider 类型校验
-        for kind in [
+        // Provider 类型校验（P0-1：支持 memory | redis）
+        for (label, kind) in [
+            ("session_store", &self.provider.session_store),
+            ("cache", &self.provider.cache),
+            ("lock", &self.provider.lock),
+        ] {
+            anyhow::ensure!(
+                kind == "memory" || kind == "redis",
+                "provider.{} 仅支持 memory | redis，收到: {}",
+                label,
+                kind
+            );
+        }
+        let uses_redis = [
             &self.provider.session_store,
             &self.provider.cache,
             &self.provider.lock,
-        ] {
+        ]
+        .iter()
+        .any(|k| k.as_str() == "redis");
+        if uses_redis {
             anyhow::ensure!(
-                kind == "memory",
-                "POC 阶段仅支持 memory provider，收到: {}",
-                kind
+                !self.provider.redis_url.is_empty(),
+                "provider.* 配置 redis 时必须配置 provider.redis_url"
+            );
+            anyhow::ensure!(
+                redis::Client::open(self.provider.redis_url.as_str()).is_ok(),
+                "provider.redis_url 非法: {}",
+                self.provider.redis_url
             );
         }
 
@@ -1087,6 +1109,22 @@ impl AppConfig {
             self.server.business_port > 0 && self.server.business_port != self.server.admin_port,
             "业务端口与管理端口不能相同"
         );
+
+        // public_base_url 校验（P0-2）
+        if let Some(base) = &self.server.public_base_url {
+            let parsed = url::Url::parse(base)
+                .map_err(|e| anyhow::anyhow!("server.public_base_url 非法: {}", e))?;
+            anyhow::ensure!(
+                parsed.scheme() == "http" || parsed.scheme() == "https",
+                "server.public_base_url 必须为 http(s) URL: {}",
+                base
+            );
+            anyhow::ensure!(
+                parsed.host_str().is_some(),
+                "server.public_base_url 缺少主机名: {}",
+                base
+            );
+        }
 
         // Session 校验
         let valid_same_site = ["Strict", "Lax", "None"];
@@ -1101,6 +1139,56 @@ impl AppConfig {
             anyhow::ensure!(
                 !self.admin.auth_token.is_empty(),
                 "admin.auth_token 不能为空（auth_mode = token）"
+            );
+        }
+
+        // 生产环境防呆（M0：BFF_ENV=prod 时拒绝 POC 配置）
+        let is_prod = std::env::var("BFF_ENV")
+            .map(|v| v == "prod")
+            .unwrap_or(false);
+        if is_prod {
+            for (label, kind) in [
+                ("session_store", &self.provider.session_store),
+                ("cache", &self.provider.cache),
+                ("lock", &self.provider.lock),
+            ] {
+                anyhow::ensure!(
+                    kind != "memory",
+                    "生产环境（BFF_ENV=prod）不允许 provider.{}=memory（无法多实例、重启丢状态）",
+                    label
+                );
+            }
+            anyhow::ensure!(
+                self.admin.auth_mode == "token",
+                "生产环境（BFF_ENV=prod）不允许 admin.auth_mode=none（管理面将无鉴权）"
+            );
+            anyhow::ensure!(
+                self.admin.auth_token != "changeme" && self.admin.auth_token.len() >= 32,
+                "生产环境（BFF_ENV=prod）admin.auth_token 必须为 ≥32 字符的随机值（当前为默认弱口令或过短）"
+            );
+            anyhow::ensure!(
+                !self.admin.enable_test_endpoints,
+                "生产环境（BFF_ENV=prod）必须设置 admin.enable_test_endpoints=false"
+            );
+            for p in &self.oidc.providers {
+                anyhow::ensure!(
+                    !p.insecure_skip_id_token_verification,
+                    "生产环境（BFF_ENV=prod）不允许 oidc.providers[{}].insecure_skip_id_token_verification=true",
+                    p.id
+                );
+            }
+            anyhow::ensure!(
+                self.session.secure,
+                "生产环境（BFF_ENV=prod）必须 session.secure=true（否则会话 Cookie 明文传输）"
+            );
+            anyhow::ensure!(
+                self.server.public_base_url.is_some() || !self.server.trusted_hosts.is_empty(),
+                "生产环境（BFF_ENV=prod）必须配置 server.public_base_url 或 server.trusted_hosts（防止 Host 头污染 redirect_uri）"
+            );
+            anyhow::ensure!(
+                self.bff_secret.secret != "change-me-in-production"
+                    && self.bff_secret.salt != "default-salt-at-least-16-bytes",
+                "生产环境（BFF_ENV=prod）必须通过 BFF_SECRET / BFF_SECRET_SALT 注入真实主密钥"
             );
         }
 
@@ -1285,9 +1373,24 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 脱敏副本：隐藏 client_secret、token_exchange.client_secret 与管理 token，用于导出。
+    /// 脱敏副本：隐藏 bff_secret 主密钥、各 client_secret、管理 token、
+    /// 含凭据的 Redis URL、TLS 私钥路径，用于导出。
     pub fn sanitized(&self) -> Self {
         let mut c = self.clone();
+        // P0-3：主密钥绝不能出现在导出结果中——结合会话数据可解密全部用户令牌
+        if !c.bff_secret.secret.is_empty() {
+            c.bff_secret.secret = SECRET_SENTINEL.into();
+        }
+        if !c.bff_secret.salt.is_empty() {
+            c.bff_secret.salt = SECRET_SENTINEL.into();
+        }
+        // Redis URL 含凭据（user:pass@host）时整体打码
+        if c.provider.redis_url.contains('@') {
+            c.provider.redis_url = SECRET_SENTINEL.into();
+        }
+        if c.http_client.client_key_path.is_some() {
+            c.http_client.client_key_path = Some(SECRET_SENTINEL.into());
+        }
         for p in &mut c.oidc.providers {
             if !p.client_secret.is_empty() {
                 p.client_secret = SECRET_SENTINEL.into();
@@ -1306,11 +1409,36 @@ impl AppConfig {
         c
     }
 
-    /// 导入时合并敏感信息：识别 `***` 哨兵并跳过覆盖（保留当前已注入的环境值）。
+    /// 导入时合并敏感信息：识别 `***` 哨兵并从现有配置回填真实值（保留已注入的环境值）。
     ///
-    /// 规则（§4.3）：导入配置中 `token_exchange.client_secret == SECRET_SENTINEL` 时，
-    /// 从现有配置中按同 path 路由找回真实值并回填，避免导出-导入回环破坏密钥。
+    /// 规则（P0-3）：导出→导入回环不得破坏任何密钥，覆盖
+    /// `bff_secret.{secret,salt}`、`provider.redis_url`、TLS 私钥路径、
+    /// `admin.auth_token`、`oidc.providers[].client_secret`（按 id 对齐）、
+    /// `token_exchange.client_secret`（按 route.path 对齐）。
     pub fn merge_sensitive_secrets(&mut self, existing: &AppConfig) {
+        if self.bff_secret.secret == SECRET_SENTINEL {
+            self.bff_secret.secret = existing.bff_secret.secret.clone();
+        }
+        if self.bff_secret.salt == SECRET_SENTINEL {
+            self.bff_secret.salt = existing.bff_secret.salt.clone();
+        }
+        if self.provider.redis_url == SECRET_SENTINEL {
+            self.provider.redis_url = existing.provider.redis_url.clone();
+        }
+        if self.http_client.client_key_path.as_deref() == Some(SECRET_SENTINEL) {
+            self.http_client.client_key_path = existing.http_client.client_key_path.clone();
+        }
+        if self.admin.auth_token == SECRET_SENTINEL {
+            self.admin.auth_token = existing.admin.auth_token.clone();
+        }
+        for p in &mut self.oidc.providers {
+            if p.client_secret != SECRET_SENTINEL {
+                continue;
+            }
+            if let Some(ex) = existing.oidc.providers.iter().find(|e| e.id == p.id) {
+                p.client_secret = ex.client_secret.clone();
+            }
+        }
         for route in &mut self.routes {
             let Some(te) = &mut route.config.token_exchange else {
                 continue;
@@ -1330,5 +1458,126 @@ impl AppConfig {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_secrets() -> AppConfig {
+        serde_yaml::from_str(
+            r#"
+bff_secret:
+  secret: "real-master-secret-123"
+  salt: "real-master-salt-456"
+admin:
+  auth_token: "real-admin-token"
+provider:
+  redis_url: "redis://:redis-password@localhost:6379"
+http_client:
+  client_key_path: "/etc/bff/client.key"
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "cid"
+      client_secret: "real-oidc-secret"
+routes:
+  - path: "/api/exchange"
+    type: proxy
+    config:
+      upstream: "https://upstream.example.com"
+      token_exchange:
+        client_id: "te-client"
+        client_secret: "real-te-secret"
+"#,
+        )
+        .expect("测试配置解析失败")
+    }
+
+    /// P0-3：脱敏必须覆盖全部敏感字段，且序列化结果不含任何真实值。
+    #[test]
+    fn sanitized_hides_all_secrets() {
+        let cfg = config_with_secrets();
+        let s = cfg.sanitized();
+        assert_eq!(s.bff_secret.secret, SECRET_SENTINEL);
+        assert_eq!(s.bff_secret.salt, SECRET_SENTINEL);
+        assert_eq!(s.admin.auth_token, SECRET_SENTINEL);
+        assert_eq!(s.provider.redis_url, SECRET_SENTINEL);
+        assert_eq!(
+            s.http_client.client_key_path.as_deref(),
+            Some(SECRET_SENTINEL)
+        );
+        assert_eq!(s.oidc.providers[0].client_secret, SECRET_SENTINEL);
+        assert_eq!(
+            s.routes[0]
+                .config
+                .token_exchange
+                .as_ref()
+                .unwrap()
+                .client_secret,
+            SECRET_SENTINEL
+        );
+
+        let yaml = serde_yaml::to_string(&s).unwrap();
+        for secret in [
+            "real-master-secret-123",
+            "real-master-salt-456",
+            "real-admin-token",
+            "redis-password",
+            "real-oidc-secret",
+            "real-te-secret",
+            "/etc/bff/client.key",
+        ] {
+            assert!(!yaml.contains(secret), "导出结果泄露敏感值: {}", secret);
+        }
+    }
+
+    /// P0-3：导出→导入回环必须完整恢复所有密钥（不得覆盖为 `***`）。
+    #[test]
+    fn export_import_roundtrip_preserves_secrets() {
+        let original = config_with_secrets();
+        let mut imported = original.sanitized();
+        imported.merge_sensitive_secrets(&original);
+
+        assert_eq!(imported.bff_secret.secret, "real-master-secret-123");
+        assert_eq!(imported.bff_secret.salt, "real-master-salt-456");
+        assert_eq!(imported.admin.auth_token, "real-admin-token");
+        assert_eq!(
+            imported.provider.redis_url,
+            "redis://:redis-password@localhost:6379"
+        );
+        assert_eq!(
+            imported.http_client.client_key_path.as_deref(),
+            Some("/etc/bff/client.key")
+        );
+        assert_eq!(imported.oidc.providers[0].client_secret, "real-oidc-secret");
+        assert_eq!(
+            imported.routes[0]
+                .config
+                .token_exchange
+                .as_ref()
+                .unwrap()
+                .client_secret,
+            "real-te-secret"
+        );
+    }
+
+    /// 非哨兵值（真实新密钥）不得被回填覆盖——是否可用由 replace_config 决定。
+    #[test]
+    fn merge_leaves_non_sentinel_values_intact() {
+        let original = config_with_secrets();
+        let mut imported: AppConfig = serde_yaml::from_str(
+            r#"
+bff_secret:
+  secret: "brand-new-secret"
+  salt: "brand-new-salt-value"
+"#,
+        )
+        .unwrap();
+        imported.merge_sensitive_secrets(&original);
+        assert_eq!(imported.bff_secret.secret, "brand-new-secret");
+        assert_eq!(imported.bff_secret.salt, "brand-new-salt-value");
     }
 }

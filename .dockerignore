@@ -1,0 +1,21 @@
+# 构建产物
+target/
+**/node_modules/
+admin-ui/dist/
+frontend/dist/
+
+# VCS / 本地
+.git/
+.gitignore
+.github/
+
+# 文档与测试资产（运行镜像不需要）
+docs/
+benchmark/
+tests/
+
+# 其他
+*.md
+!README.md
+.dockerignore
+docker-compose.yml

@@ -1,0 +1,57 @@
+# BFF + Redis 一键启动（生产形态：Redis 外置状态 + 生产防呆校验）
+#
+# 用法：
+#   export BFF_ADMIN_TOKEN=$(openssl rand -hex 32)
+#   export BFF_SECRET=$(openssl rand -hex 32)
+#   export BFF_SECRET_SALT=$(openssl rand -hex 16)
+#   docker compose up --build
+#
+# 业务端口: http://localhost:8080
+# 管理端口: http://localhost:8443 （请求头 X-Admin-Token: $BFF_ADMIN_TOKEN）
+#
+# 说明：
+# - BFF_ENV=prod 会叠加 config/env/prod.yaml，并触发生产防呆校验
+#   （拒绝 memory provider / 弱口令 / auth_mode=none / 跳过验签 / test 端点）。
+# - Redis 服务名固定为 bff-redis，与 prod.yaml 的默认 redis_url 对齐。
+
+services:
+  bff-redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  bff:
+    build:
+      context: .
+    image: bff:local
+    depends_on:
+      bff-redis:
+        condition: service_healthy
+    environment:
+      BFF_ENV: prod
+      # 生产防呆要求 ≥32 字符随机口令；无默认值，缺失时 compose 直接报错
+      BFF_ADMIN__AUTH_TOKEN: ${BFF_ADMIN_TOKEN:?请设置 BFF_ADMIN_TOKEN（≥32 字符随机值）}
+      BFF_SECRET: ${BFF_SECRET:?请设置 BFF_SECRET（≥32 字节随机值）}
+      BFF_SECRET_SALT: ${BFF_SECRET_SALT:?请设置 BFF_SECRET_SALT（≥16 字节随机值）}
+      BFF_PROVIDER__REDIS_URL: redis://bff-redis:6379
+      # 生产防呆要求 public_base_url 或 trusted_hosts（P0-2）；本地形态按 localhost 固定
+      BFF_SERVER__PUBLIC_BASE_URL: http://localhost:8080
+      # Docker 端口映射来源 IP 属 172.16.0.0/12；真实生产请按入口 LB/跳板机收紧
+      BFF_ADMIN__IP_WHITELIST: '["127.0.0.1","172.16.0.0/12"]'
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    restart: unless-stopped
+    # 注：运行镜像无 shell/curl，容器级探针请用编排层（K8s HTTP 探针），
+    # 或 `curl http://localhost:8080/live` 从宿主机检查。
+
+volumes:
+  redis-data:

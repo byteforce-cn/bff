@@ -1,5 +1,5 @@
 //! 配置管理 API：导出 / 导入（热重载）、OIDC provider、pipeline、脚本。
-use crate::config::{AppConfig, OidcProviderConfig, PipelineDef};
+use crate::config::{AppConfig, OidcProviderConfig, PipelineDef, SECRET_SENTINEL};
 use crate::state::AppState;
 use crate::utils::AppError;
 use axum::body::Bytes;
@@ -97,6 +97,17 @@ pub async fn update_provider(
     Json(mut provider): Json<OidcProviderConfig>,
 ) -> Result<Response, AppError> {
     provider.id = id.clone();
+    // P0-3：`***` 为导出哨兵 → 保留现网密钥而非覆盖（Admin UI 编辑回写场景）
+    if provider.client_secret == SECRET_SENTINEL {
+        provider.client_secret = state
+            .cfg()
+            .oidc
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.client_secret.clone())
+            .unwrap_or_default();
+    }
     let mut cfg = state.cfg().as_ref().clone();
     match cfg.oidc.providers.iter_mut().find(|p| p.id == id) {
         Some(p) => *p = provider,
@@ -311,7 +322,7 @@ pub async fn list_routes(State(state): State<AppState>) -> Json<serde_json::Valu
 /// PUT /admin/api/routes — 全量替换统一路由定义
 pub async fn update_routes(
     State(state): State<AppState>,
-    Json(routes): Json<Vec<crate::config::RouteDef>>,
+    Json(mut routes): Json<Vec<crate::config::RouteDef>>,
 ) -> Result<Response, AppError> {
     // 基本校验
     for (i, r) in routes.iter().enumerate() {
@@ -320,6 +331,21 @@ pub async fn update_routes(
                 "routes[{}].path 不能为空",
                 i
             )));
+        }
+    }
+    // P0-3：`***` 哨兵 → 按 path 保留现网 token_exchange 密钥（Admin UI 回写导出内容场景）
+    let existing_routes = state.cfg().routes.clone();
+    for route in &mut routes {
+        if let Some(te) = &mut route.config.token_exchange {
+            if te.client_secret == SECRET_SENTINEL {
+                if let Some(ex) = existing_routes
+                    .iter()
+                    .find(|r| r.path == route.path)
+                    .and_then(|r| r.config.token_exchange.as_ref())
+                {
+                    te.client_secret = ex.client_secret.clone();
+                }
+            }
         }
     }
     let mut cfg = state.cfg().as_ref().clone();

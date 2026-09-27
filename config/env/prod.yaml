@@ -1,5 +1,5 @@
 # 生产环境覆盖（BFF_ENV=prod 时加载）
-# 注意：POC 仅实现 memory provider，redis 模式为后续扩展点
+# 多实例状态外置（P0-1：Redis provider 已实现）
 provider:
   session_store: redis
   cache: redis
@@ -7,6 +7,9 @@ provider:
   redis_url: "redis://bff-redis:6379"
 session:
   secure: true
+admin:
+  # 生产强制关闭 test/eval 端点（validate 也会在 BFF_ENV=prod 时强制校验）
+  enable_test_endpoints: false
 
 # 认证端点 per-IP 限流：生产启用（需按实际拓扑调整 trusted_proxies）
 auth_rate_limit:

@@ -31,7 +31,8 @@ pub fn init(secret: &str, salt: &str) -> Result<(), String> {
         .hash_password_into(secret.as_bytes(), salt.as_bytes(), &mut key_bytes)
         .map_err(|e| format!("Argon2 密钥派生失败: {}", e))?;
 
-    let _ = KEY_CACHE.set(Ok(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes))));
+    let key = Key::<Aes256Gcm>::from(key_bytes);
+    let _ = KEY_CACHE.set(Ok(Aes256Gcm::new(&key)));
 
     tracing::info!("AES-256-GCM 密钥已初始化");
     Ok(())
@@ -67,25 +68,16 @@ pub fn decrypt(encoded: &str) -> anyhow::Result<Vec<u8>> {
     let n = Aes256Gcm::generate_nonce(&mut OsRng).len();
     anyhow::ensure!(raw.len() > n, "密文长度非法");
     let (nonce, ct) = raw.split_at(n);
-    c.decrypt(Nonce::from_slice(nonce), ct)
+    let nonce_arr: [u8; 12] = nonce
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("nonce 长度非法"))?;
+    c.decrypt(&Nonce::from(nonce_arr), ct)
         .map_err(|e| anyhow::anyhow!("解密失败: {}", e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // OnceLock 不可重置，每个测试需独立初始化。
-    // 由于 init() 只能调用一次（OnceLock set 后不可再 set），
-    // 测试通过直接调用 init 前确保 OnceLock 为空（每个 test binary 独立进程）。
-    // 如果 OnceLock 已被占用，这里会静默忽略（符合测试隔离的预期）。
-
-    fn set_test_key(secret: &str, salt: &str) {
-        // 如果 OnceLock 已初始化，忽略（测试 binary 中首次调用生效）
-        let _ = KEY_CACHE.set(Err("placeholder".into()));
-        // 上面 set 只是为了检查是否已初始化，实际上 OnceLock set 后不可再改。
-        // 更安全的做法：如果未初始化则 init，已初始化则跳过。
-    }
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {

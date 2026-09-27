@@ -140,8 +140,6 @@ fn extract_inputs_from_parts(
     )
 }
 
-/// 从请求中按 InputMapping 提取参数。
-
 /// Proxy 执行：委托给现有 proxy_handler 逻辑。
 async fn execute_proxy(
     state: &AppState,

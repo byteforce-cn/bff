@@ -62,7 +62,13 @@ fn session_tokens(access: &str, refresh: Option<&str>) -> StoredTokens {
 
 /// 创建带令牌的会话并返回 (Session, Cookie 头值)。
 async fn make_session(state: &bff::state::AppState, tokens: &StoredTokens) -> (Session, String) {
-    let session = Session::new(None, Arc::new(state.session_store.clone()), None);
+    let session = Session::new(
+        None,
+        Arc::new(bff::provider::session::DynSessionStore::new(
+            state.session_store.clone(),
+        )),
+        None,
+    );
     session
         .insert(&bff::oidc::tokens::session_key(&tokens.provider), tokens)
         .await

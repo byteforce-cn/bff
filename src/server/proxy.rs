@@ -202,6 +202,7 @@ fn passthrough_headers(headers: &HeaderMap) -> HeaderMap {
 }
 
 /// 标准 HTTP 代理：一次性 reqwest 请求-响应。
+#[allow(clippy::too_many_arguments)]
 async fn proxy_http(
     state: &AppState,
     upstream: &str,

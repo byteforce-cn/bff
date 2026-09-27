@@ -158,11 +158,9 @@ fn serve_embedded(path: &str) -> Option<Response> {
         Some("png") => "image/png",
         _ => "application/octet-stream",
     };
-    Some(
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", mime)
-            .body(Body::from(content.data.into_owned()))
-            .ok()?,
-    )
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", mime)
+        .body(Body::from(content.data.into_owned()))
+        .ok()
 }

@@ -5,9 +5,12 @@
 [![Rust](https://img.shields.io/badge/Rust-1.93.0-orange)](https://www.rust-lang.org/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.5-green)](https://spring.io/projects/spring-boot)
 
-基于 **Axum** 的生产级 Backend-For-Frontend 聚合层（POC/alpha）
+基于 **Axum** 的 Backend-For-Frontend 聚合层 · **生产化进行中**（原 POC/alpha）
 
-> ⚠️ **状态**：早期开发版本（POC/alpha）。内置开发密钥仅用于本地，生产环境必须通过环境变量注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
+> ⚠️ **状态**：M0 工程止血、M1 核心（Redis 多实例状态、生产配置防呆、密钥治理、优雅停机、
+> OIDC 出网超时、回调地址固定）已落地并通过测试；**配置持久化/多副本热重载一致性等阻断项仍在推进**。
+> 完整实施记录与验证证据见 [docs/production-progress.md](docs/production-progress.md)。
+> 在全部 P0 关闭前，不建议直接承载生产流量。生产环境必须通过环境变量注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
 
 ## 🤖 AI 辅助开发
 
@@ -16,7 +19,7 @@
 - **Kimi K3**
 - **DeepSeek V4**
 
-当前项目主要用于个人学习、POC和验证模型能力 不可运行于生产环境
+当前项目已完成主要生产化改造（见上述进度文档）；剩余阻断项关闭前不可运行于生产环境
 
 > AI 生成内容均经过人工审查与测试验证。
 
@@ -28,7 +31,7 @@
 - 📜 **QuickJS 脚本扩展**（JavaScript）：沙箱 + `spawn_blocking` 隔离 + 内存/栈/时长上限
 - 🔁 **反向代理**：路由映射、Bearer 注入、熔断、限流、SSE / WebSocket 透传
 - 🛠️ **管理端口（`:8443`）**：配置导入/导出（脱敏 + 热重载）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
-- 🧩 **Provider 可插拔**：缓存 / 锁 / Session，POC 全内存零依赖，Redis 为后续扩展点
+- 🧩 **Provider 可插拔**：缓存 / 锁 / Session，支持 `memory | redis`（Redis 为多实例共享实现，含跨实例会话/锁验证）
 
 ## 🏗️ 项目结构
 

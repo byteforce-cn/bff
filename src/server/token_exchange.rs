@@ -387,11 +387,12 @@ async fn resolve_token_endpoint(
             ExchangeError::ClientConfig(format!("provider 不存在: {}", tokens.provider))
         })?;
     // openidconnect 的 CoreClient 不暴露 provider metadata，缺省路径做一次 discovery
+    // R13：使用带超时的共享客户端（避免默认实现每次新建连接池且无超时）
     let issuer = openidconnect::IssuerUrl::new(provider.issuer_url.clone())
         .map_err(|e| ExchangeError::ClientConfig(format!("issuer_url 非法: {}", e)))?;
     let metadata = openidconnect::core::CoreProviderMetadata::discover_async(
         issuer,
-        openidconnect::reqwest::async_http_client,
+        crate::oidc::http_client::client_fn(state.oidc_http.clone()),
     )
     .await
     .map_err(|e| ExchangeError::ClientConfig(format!("OIDC discovery 失败: {}", e)))?;

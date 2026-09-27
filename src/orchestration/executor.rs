@@ -1,5 +1,5 @@
 //! DAG 执行器：分层并行调度、硬超时、fail_fast、per-step timeout。
-use crate::config::{PipelineDef, StepConfig};
+use crate::config::PipelineDef;
 use crate::orchestration::dag;
 use crate::orchestration::step::{execute_step, StepContext, StepOutput};
 use crate::utils::AppError;
@@ -65,7 +65,6 @@ impl PipelineExecutor {
                     ctx.params = params.clone();
                     let results = results.clone();
                     let step_timeout = step.config.timeout.unwrap_or(self.default_step_timeout);
-                    let failed_steps = failed_steps.clone();
                     let step_id = step.id.clone();
 
                     set.spawn(async move {

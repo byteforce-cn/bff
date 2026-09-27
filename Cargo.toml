@@ -42,6 +42,8 @@ humantime = "1"
 percent-encoding = "2"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.21", features = ["connect"] }
+redis = { version = "1.7.1", features = ["tokio-comp", "connection-manager"] }
+time = "0.3"
 
 [dev-dependencies]
 wiremock = "0.6"

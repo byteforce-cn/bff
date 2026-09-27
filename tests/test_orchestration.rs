@@ -63,11 +63,13 @@ async fn orchestration_parallel_aggregation_with_script() {
         serde_yaml::from_str(&pipeline_yaml(&users.uri(), &orders.uri(), "10s")).unwrap(),
     );
     let state = common::make_state(cfg);
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
     let resp = client
         .get(format!("{}/pipeline/user-orders?userId=1", bff))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
@@ -81,6 +83,7 @@ async fn orchestration_parallel_aggregation_with_script() {
     // 第二次调用：fetch_user 命中缓存（仍 1 次），fetch_orders 再次调用（共 2 次）
     let resp = client
         .get(format!("{}/pipeline/user-orders?userId=1", bff))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
@@ -122,12 +125,14 @@ steps:
     cfg.pipelines
         .insert("slow".into(), serde_yaml::from_str(&yaml).unwrap());
     let state = common::make_state(cfg);
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
     let start = Instant::now();
     let resp = client
         .get(format!("{}/pipeline/slow", bff))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
@@ -161,6 +166,7 @@ steps:
     cfg.pipelines
         .insert("params-test".into(), serde_yaml::from_str(yaml).unwrap());
     let state = common::make_state(cfg);
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
@@ -170,6 +176,7 @@ steps:
             "{}/pipeline/params-test?user_id=user-123&stage=staging",
             bff
         ))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
@@ -223,6 +230,7 @@ steps:
     cfg.pipelines
         .insert("both-test".into(), serde_yaml::from_str(&yaml).unwrap());
     let state = common::make_state(cfg);
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
@@ -232,6 +240,7 @@ steps:
             "{}/pipeline/both-test?user_id=user-123&stage=staging",
             bff
         ))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
@@ -261,11 +270,13 @@ steps:
     cfg.pipelines
         .insert("no-params".into(), serde_yaml::from_str(yaml).unwrap());
     let state = common::make_state(cfg);
+    let cookie = common::login_cookie(&state).await;
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
     let resp = client
         .get(format!("{}/pipeline/no-params", bff))
+        .header("cookie", &cookie)
         .send()
         .await
         .unwrap();

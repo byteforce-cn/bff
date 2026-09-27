@@ -51,7 +51,11 @@ async fn test_auth_rate_limit_disabled_regression() {
 
     for _ in 0..15 {
         let status = request_with_client(&base, "1.2.3.4").await;
-        assert_ne!(status, 429, "默认关闭时不应触发 per-IP 限流");
+        // 未配置 OIDC provider → 确定返回 400；关键断言：不是 429（限流未启用）
+        assert_eq!(
+            status, 400,
+            "默认关闭时不应触发 per-IP 限流（应到达业务逻辑返回 400）"
+        );
     }
 }
 
@@ -108,10 +112,10 @@ async fn test_auth_rate_limit_other_paths_unaffected() {
             .send()
             .await
             .expect("请求失败");
-        assert_ne!(
+        assert_eq!(
             resp.status().as_u16(),
-            429,
-            "/live 未配置限流，不应触发 429"
+            200,
+            "/live 未配置限流，应正常放行返回 200"
         );
     }
 }
@@ -126,14 +130,14 @@ async fn test_auth_rate_limit_per_ip_independent() {
     // A 消耗 3 个令牌
     for _ in 0..3 {
         let status = request_with_client(&base, "1.1.1.1").await;
-        assert_ne!(status, 429);
+        assert_eq!(status, 400, "A 前 3 个请求应放行至业务逻辑");
     }
     // A 的第 4 个请求被拒
     assert_eq!(request_with_client(&base, "1.1.1.1").await, 429, "A 桶耗尽");
     // B 独立桶：仍可放行
     for _ in 0..3 {
         let status = request_with_client(&base, "2.2.2.2").await;
-        assert_ne!(status, 429, "B 桶应与 A 相互独立");
+        assert_eq!(status, 400, "B 桶应与 A 相互独立");
     }
     // B 的第 4 个请求也被拒
     assert_eq!(request_with_client(&base, "2.2.2.2").await, 429, "B 桶耗尽");
@@ -167,10 +171,14 @@ async fn test_auth_rate_limit_trusted_zero_ignores_xff() {
 }
 
 /// T6：补液语义 —— 等待一个补液周期后桶恢复可放行。
+///
+/// E3：必须使用「慢补液」参数（rate=1/s）使桶在 5 个请求内确定性耗尽：
+/// 单请求净消耗 = 1 − rate × d，只要单请求时延 d < ~0.17s，
+/// 第 6 个请求必然被拒（不依赖 27ms/60ms 等具体时延假设）。
 #[tokio::test]
 async fn test_auth_rate_limit_refill_after_wait() {
     let mut cfg = base_config();
-    cfg.auth_rate_limit = auth_rate_cfg(1, 10, 5); // 每秒补 10 个令牌
+    cfg.auth_rate_limit = auth_rate_cfg(1, 1, 5); // 每秒补 1 个令牌（避免快速补液掩盖桶耗尽）
     let base = spawn_business(make_state(cfg)).await;
 
     // 打满 5 个令牌
@@ -178,10 +186,10 @@ async fn test_auth_rate_limit_refill_after_wait() {
         let status = request_with_client(&base, "1.2.3.4").await;
         assert_ne!(status, 429);
     }
-    // 第 6 个被拒
+    // 第 6 个被拒（净消耗 1 − 1 × d > 0，5 个请求后桶必然见底）
     assert_eq!(request_with_client(&base, "1.2.3.4").await, 429);
 
-    // 等待 ~1s（rate=10/s → 补回 10 个令牌，超出容量 5）
+    // 等待 ~1.1s（rate=1/s → 补回 ≥1 个令牌）
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let status = request_with_client(&base, "1.2.3.4").await;
     assert_ne!(status, 429, "补液后应恢复放行");

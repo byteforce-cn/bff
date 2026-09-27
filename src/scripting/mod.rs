@@ -68,8 +68,7 @@ impl ScriptEngine {
             let context = Context::full(&runtime).context("创建 QuickJS 上下文失败")?;
             context.with(|ctx| {
                 // 注入 inputs（经 JSON 字符串桥接，避免递归构造 JS 值）
-                let inputs_json =
-                    serde_json::to_string(&inputs).context("inputs 序列化失败")?;
+                let inputs_json = serde_json::to_string(&inputs).context("inputs 序列化失败")?;
                 let inputs_val = ctx
                     .json_parse(inputs_json)
                     .map_err(|e| anyhow::anyhow!("inputs 转换为脚本值失败: {}", e))?;

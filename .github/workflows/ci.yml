@@ -13,7 +13,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # E13：注意——`-D warnings` 只允许出现在 clippy 步骤的显式参数中。
+  # 若作为全局 RUSTFLAGS 注入，会连 `cargo test` 的 rustc 编译一起打死（历史事故）。
 
 jobs:
   rust:
@@ -21,6 +22,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # E1：admin-ui/dist 是 RustEmbed 的编译期强依赖，必须先构建（否则 cargo test 无法编译）
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: admin-ui/pnpm-lock.yaml
+
+      - name: Build admin-ui (RustEmbed compile-time dependency)
+        working-directory: admin-ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +51,7 @@ jobs:
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "." 
+          workspaces: "."
 
       - name: Format check
         run: cargo fmt --all -- --check

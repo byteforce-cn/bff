@@ -69,16 +69,73 @@ pub fn validate_redirect(redirect: &str) -> bool {
     redirect.starts_with('/') && !redirect.starts_with("//")
 }
 
-/// 由请求 Host 推导本服务 base_url（回调地址拼接用）。
-fn base_url_from(headers: &HeaderMap, state: &AppState) -> String {
+/// 推导本服务对外 base_url（P0-2）。
+///
+/// 1. 配置了 `server.public_base_url` → **一律使用它，完全不信任 Host 头**；
+/// 2. 否则回退 `Host`（+ 可信 `X-Forwarded-Proto`），且：
+///    - `server.trusted_hosts` 非空时，Host 必须命中白名单；
+///    - 为空时仅允许 loopback Host（开发/测试），其余拒绝。
+///
+/// 拒绝而非静默回退：避免“回调地址与实际入口不符”在生产变成难排查的登录故障。
+fn base_url_from(headers: &HeaderMap, state: &AppState) -> Result<String, AppError> {
     let cfg = state.cfg();
-    match headers
+    if let Some(base) = &cfg.server.public_base_url {
+        return Ok(base.trim_end_matches('/').to_string());
+    }
+
+    if let Some(host) = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
     {
-        Some(host) => format!("http://{}", host),
-        None => format!("http://127.0.0.1:{}", cfg.server.business_port),
+        let trusted = if cfg.server.trusted_hosts.is_empty() {
+            is_loopback_host(host)
+        } else {
+            cfg.server
+                .trusted_hosts
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(host.trim()))
+        };
+        if trusted {
+            let proto = headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .map(str::trim)
+                .filter(|p| *p == "https")
+                .unwrap_or("http");
+            return Ok(format!("{}://{}", proto, host.trim()));
+        }
+        return Err(AppError::bad_request(
+            "Host 不受信任：请配置 server.public_base_url 或 server.trusted_hosts",
+        ));
     }
+
+    // 无 Host 头（非常规协议）：回退本机（仅开发/测试）
+    Ok(format!("http://127.0.0.1:{}", cfg.server.business_port))
+}
+
+/// 与请求无关的规范 base_url（后台刷新等非请求路径使用，P0-2）。
+///
+/// `public_base_url` 优先；否则回退本机地址（仅用于 client 缓存键与 discovery，
+/// 不参与 redirect_uri 下发）。
+pub fn canonical_base_url(state: &AppState) -> String {
+    let cfg = state.cfg();
+    cfg.server
+        .public_base_url
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.server.business_port))
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    let hostname = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else {
+        host.split(':').next().unwrap_or_default()
+    };
+    matches!(hostname, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// GET /login — 发起授权码 + PKCE 流程
@@ -89,7 +146,7 @@ pub async fn login(
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, AppError> {
     let provider = select_provider(&state, q.provider.as_deref())?;
-    let base_url = base_url_from(&headers, &state);
+    let base_url = base_url_from(&headers, &state)?;
     let client = state
         .oidc_clients
         .get(&provider, &base_url)
@@ -156,7 +213,7 @@ pub async fn callback(
         return Err(AppError::unauthorized("state 校验失败（CSRF 防护）"));
     }
 
-    let base_url = base_url_from(&headers, &state);
+    let base_url = base_url_from(&headers, &state)?;
     let client = state
         .oidc_clients
         .get(&provider, &base_url)
@@ -166,7 +223,7 @@ pub async fn callback(
     let token_response: CoreTokenResponse = client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(PkceCodeVerifier::new(flow.pkce_verifier))
-        .request_async(openidconnect::reqwest::async_http_client)
+        .request_async(crate::oidc::http_client::client_fn(state.oidc_http.clone()))
         .await
         .map_err(|e| AppError::unauthorized(format!("令牌交换失败: {}", e)))?;
 
@@ -245,7 +302,7 @@ pub async fn logout(
     // 构建 IdP end_session_endpoint URL（RP-Initiated Logout）
     match &provider {
         Some(p) => {
-            let base_url = base_url_from(&headers, &state);
+            let base_url = base_url_from(&headers, &state)?;
             let post_logout_redirect = format!("{}/", base_url.trim_end_matches('/'));
             let mut logout_url = format!(
                 "{}/connect/logout?post_logout_redirect_uri={}",
@@ -331,7 +388,7 @@ async fn verify_id_token(
 
     // 第一次尝试：使用当前缓存的 OIDC 客户端校验
     match try_verify_with_client(state, provider, base_url, id_token, expected_nonce).await {
-        Ok(sub) => return Ok(sub),
+        Ok(sub) => Ok(sub),
         Err(first_err) => {
             tracing::warn!(
                 provider = %provider.id,
@@ -512,12 +569,14 @@ async fn do_refresh(
     sub: &str,
     refresh_token: String,
 ) -> anyhow::Result<StoredTokens> {
-    let cfg = state.cfg();
-    let base_url = format!("http://127.0.0.1:{}", cfg.server.business_port);
+    // P0-2：refresh 路径不再硬编码 127.0.0.1，改用与 public_base_url 对齐的规范 base；
+    // 叠加 OidcClientManager 的 (provider_id, base_url) 缓存键，
+    // 彻底消除“后台刷新把整机 redirect_uri 钉死”的跨用户污染。
+    let base_url = canonical_base_url(state);
     let client = state.oidc_clients.get(provider, &base_url).await?;
     let resp: CoreTokenResponse = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token))
-        .request_async(openidconnect::reqwest::async_http_client)
+        .request_async(crate::oidc::http_client::client_fn(state.oidc_http.clone()))
         .await
         .map_err(|e| anyhow::anyhow!("refresh_token 交换失败: {}", e))?;
     let stored = StoredTokens::new(

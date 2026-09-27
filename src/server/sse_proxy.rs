@@ -60,7 +60,7 @@ pub async fn sse_stream(
     let byte_stream = resp.bytes_stream().map(|r| {
         r.map(|b| b.to_vec()).map_err(|e| {
             tracing::error!("SSE 流读取错误: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            std::io::Error::other(e.to_string())
         })
     });
 

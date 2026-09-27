@@ -79,7 +79,7 @@ pub async fn ws_tunnel(
     let t2 = tokio::spawn(async move {
         while let Some(msg) = upstream_stream.next().await {
             let client_msg = match msg {
-                Ok(tungstenite::Message::Text(t)) => Message::Text(t.into()),
+                Ok(tungstenite::Message::Text(t)) => Message::Text(t),
                 Ok(tungstenite::Message::Binary(b)) => Message::Binary(b),
                 Ok(tungstenite::Message::Ping(d)) => Message::Ping(d),
                 Ok(tungstenite::Message::Pong(d)) => Message::Pong(d),

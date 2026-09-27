@@ -17,6 +17,7 @@ pub fn base_config() -> AppConfig {
         server: ServerConfig {
             business_port: 0,
             admin_port: 0,
+            ..Default::default()
         },
         provider: ProviderConfig::default(),
         session: SessionConfig::default(),
@@ -74,8 +75,12 @@ async fn spawn(router: axum::Router) -> String {
 }
 
 /// 带 cookie jar、不自动跟随重定向的测试客户端。
+///
+/// E12：必须 `no_proxy()`——否则会继承环境 `HTTP_PROXY/HTTPS_PROXY`，
+/// 导致对 127.0.0.1 的测试请求被代理拦截（结果随环境翻转）。
 pub fn test_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .cookie_store(true)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -222,7 +227,13 @@ pub async fn create_session_with_tokens(
     tokens: &bff::oidc::StoredTokens,
 ) -> String {
     use tower_sessions::Session;
-    let session = Session::new(None, Arc::new(state.session_store.clone()), None);
+    let session = Session::new(
+        None,
+        Arc::new(bff::provider::session::DynSessionStore::new(
+            state.session_store.clone(),
+        )),
+        None,
+    );
     session
         .insert(&bff::oidc::tokens::session_key(&tokens.provider), tokens)
         .await
@@ -234,6 +245,22 @@ pub async fn create_session_with_tokens(
     session.save().await.unwrap();
     let id = session.id().expect("session 应有 id");
     format!("BFF_SESSION={}", id)
+}
+
+/// 便捷函数：为测试构造一个「已登录」会话，返回 Cookie 头值。
+///
+/// P0-5 之后 `/pipeline/:name` 强制要求认证，测试需携带该 Cookie。
+pub async fn login_cookie(state: &AppState) -> String {
+    let tokens = bff::oidc::StoredTokens::new(
+        "mock",
+        "test-user",
+        "test-access-token",
+        Some("test-refresh-token"),
+        None,
+        3600,
+    )
+    .expect("构造 StoredTokens 失败");
+    create_session_with_tokens(state, &tokens).await
 }
 
 /// 构造临时 SPA 目录，返回路径。

@@ -1,6 +1,5 @@
 //! 路由统一重构测试：RouteDef 序列化/反序列化
 use bff::config::{AppConfig, InputMapping, OutputMapping, RouteType, RouteTypeConfig};
-use serde_yaml;
 
 // ============================================================
 // RouteDef 反序列化测试
@@ -25,7 +24,7 @@ routes:
     assert_eq!(r.route_type, RouteType::Proxy);
     assert_eq!(r.description, "httpbin 测试代理");
     assert_eq!(r.config.upstream.as_deref(), Some("http://httpbin.org"));
-    assert_eq!(r.config.strip_prefix, true);
+    assert!(r.config.strip_prefix);
     assert_eq!(r.config.circuit_breaker_threshold, 5);
 }
 
@@ -48,7 +47,7 @@ routes:
     let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
     let r = &cfg.routes[0];
     assert_eq!(r.route_type, RouteType::Pipeline);
-    assert_eq!(r.auth_required, true);
+    assert!(r.auth_required);
     assert_eq!(r.config.pipeline.as_deref(), Some("dashboard"));
     assert!(r.config.pipeline_inline.is_none());
     assert_eq!(r.input_mapping.from_query.get("userId").unwrap(), "userId");
@@ -155,8 +154,8 @@ routes:
     let r = &cfg.routes[0];
     assert_eq!(r.methods, Vec::<String>::new());
     assert_eq!(r.description, "");
-    assert_eq!(r.auth_required, true); // default_true
-    assert_eq!(r.config.strip_prefix, false); // default
+    assert!(r.auth_required); // default_true
+    assert!(!r.config.strip_prefix); // default
     assert_eq!(r.config.circuit_breaker_threshold, 0); // default
 }
 

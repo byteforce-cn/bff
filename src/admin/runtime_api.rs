@@ -1,5 +1,4 @@
 //! 运行时 API：健康检查、指标、活跃会话、pipeline 试运行。
-use crate::config::PipelineDef;
 use crate::orchestration::dag;
 use crate::orchestration::step::{execute_step, StepContext, StepOutput};
 use crate::state::AppState;
@@ -14,7 +13,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinSet;
 use tower_sessions::session::Id;
-use tower_sessions::SessionStore;
 
 /// GET /admin/api/health
 pub async fn health() -> Json<serde_json::Value> {
