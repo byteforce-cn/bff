@@ -187,18 +187,25 @@ kubectl -n bff apply -k deploy/k8s/
 | 超时 | 代理默认总超时 **30s**（可按路由覆盖）；SSE 走独立无总超时客户端（connect 5s + TCP keepalive 60s）；WS 握手 5s、空闲 300s、心跳 30s、消息 ≤1MiB |
 | 体量 | 请求体默认 10MiB（代理/编排/脚本统一读 `body_limit.max_bytes`）；代理响应 ≤64MiB（`max_response_bytes`）；管理 API ≤8MiB |
 
-### SLO 基线模板（上线前按业务填写并反推限流参数）
+### SLO 基线与容量标定（2026-09-27 本地实测；详见 benchmark/README.md）
 
-| SLI | 建议目标 | 数据来源 |
-| --- | --- | --- |
-| 登录成功率（/auth/callback 2xx/3xx 占比） | ≥ 99.5% | `bff_http_requests_total{path="/auth/callback"}` |
-| API 可用性（非 5xx 占比） | ≥ 99.9% | `bff_http_requests_total` |
-| P95 延迟（业务路由） | ≤ 500ms | `bff_http_request_duration_seconds` |
-| 上游错误率 | ≤ 1% | `bff_upstream_request_duration_seconds` + `bff_proxy_error_total` |
-| 就绪抖动 | /ready 非 200 总时长 < 5min/月 | K8s 探针/告警 `BffReadyNotReady` |
+| SLI | 目标 | 数据来源 | 实测（单实例，与 k6/Redis 共享 8 vCPU） |
+| --- | --- | --- | --- |
+| 登录成功率（/auth/callback 2xx/3xx 占比） | ≥ 99.5% | `bff_http_requests_total{path="/auth/callback"}` | Mock/Keycloak E2E 全链路通过 |
+| API 可用性（非 5xx 占比） | ≥ 99.9% | `bff_http_requests_total` | 157 万请求 **0 错误**（10,464 QPS 峰值） |
+| P95 延迟（业务路由） | ≤ 500ms | `bff_http_request_duration_seconds` | **p95 39ms**（10.4k QPS）/ 2.9ms（2k QPS） |
+| 上游错误率 | ≤ 1% | `bff_upstream_request_duration_seconds` + `bff_proxy_error_total` | 0%（含代理/脚本/Pipeline 全路径） |
+| 就绪抖动 | /ready 非 200 总时长 < 5min/月 | K8s 探针/告警 `BffReadyNotReady` | 压测期间 /ready 稳定 200 |
 
-> 目标 QPS 决定 `rate_limit.per_second/burst_size`（按真实客户端 IP 建桶）、
-> `http_client` 连接池与 HPA 上下限。当前默认 50rps/500 burst 仅为占位。
+容量结论与参数反推（原始数据 `benchmark/results/`）：
+
+- 单实例 **≥ 10,464 QPS**（800 VU 峰值，0 错误、0 丢弃；测试机同时跑 k6/Redis/nginx，数值偏保守）；
+- 最重的代理路径（含 Redis 会话 + Bearer 注入）峰值 p95 ≈ 53–56ms，**对 500ms SLO 有 ~9× 余量**；
+- `rate_limit.per_second: 50 / burst_size: 500`（按真实客户端 IP）：防单客户端滥用的阈值，
+  与实测引擎能力相差两个数量级，无需按容量放大；
+- HPA 建议以 **50–60% 水位**设置扩容触发（如单副本 5k QPS 触发），并按副本数 ×10k QPS 估算集群上限；
+- ⚠️ 限流语义修复（本轮压测发现）：tower-governor 0.4.x 的 `per_second` 为周期语义，
+  旧实现会把 50/s 退化为每 50s 1 个；已在 `rate_limit_skip.rs` 显式换算并加回归测试，升级依赖时勿回退。
 
 ---
 

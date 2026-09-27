@@ -54,7 +54,11 @@
 2. 正常业务高峰：按 SLO 基线调 `auth_rate_limit.per_ip`（热生效）；
 3. 疑似撞库：保持限流并升级 IAM 侧账号锁定策略；核查 `X-Forwarded-For` 解析
    （`trusted_proxies` 是否与入口一致，避免全站误伤或伪造绕过）；
-4. 全局限流 429：确认 `rate_limit.skip_path_prefixes` 是否覆盖 SPA 静态资源。
+4. 全局限流 429：确认 `rate_limit.skip_path_prefixes` 是否覆盖 SPA 静态资源；
+   排查响应头 `x-ratelimit-after`（秒）估算恢复时间；
+5. 全局限流参数（`rate_limit.per_second/burst_size`）在**启动期固化**，调整后需滚动重启；
+   `per_second` 语义 = 每秒补液令牌数（容量与参数反推见 `docs/production-deployment.md` §SLO），
+   压测验证方法见 `benchmark/README.md`。
 
 ## Token Exchange
 

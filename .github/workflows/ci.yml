@@ -31,6 +31,12 @@ jobs:
   rust:
     name: Rust (fmt + clippy + test)
     runs-on: ubuntu-latest
+    # M1：Redis provider / 跨实例会话用例需要 Redis；提供后不再自动跳过
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +78,60 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+        env:
+          # tests/test_redis_providers.rs：跨实例会话/锁/cache（无此变量时自动跳过）
+          BFF_TEST_REDIS_URL: redis://127.0.0.1:6379
+
+  coverage:
+    name: Coverage (cargo-llvm-cov ≥68% lines)
+    runs-on: ubuntu-latest
+    # E5：行覆盖率门禁。当前基线 lines 70.71%（2026-09-27 实测，含 Redis 用例）；
+    # 阈值为下限护栏，新增测试后应逐步上调（棘轮策略）。
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      # RustEmbed 编译期强依赖 admin-ui/dist（同 rust job）
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: admin-ui/pnpm-lock.yaml
+
+      - name: Build admin-ui (RustEmbed compile-time dependency)
+        working-directory: admin-ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Coverage gate
+        run: cargo llvm-cov --all-features --summary-only --fail-under-lines 68
+        env:
+          BFF_TEST_REDIS_URL: redis://127.0.0.1:6379
 
   java:
     name: Java (iam + fakesvc Maven verify)

@@ -6,9 +6,18 @@
 //   k6 run --vus 50 --duration 60s k6-load-test.js
 //   k6 run --env BASE_URL=http://localhost:8080 k6-load-test.js
 //
+// 认证路径压测（代理/编排需要会话）：
+//   k6 run --env COOKIE="BFF_SESSION=<session-id>" --env SCENARIO=baseline k6-load-test.js
+//   COOKIE 获取方式见 benchmark/README.md「认证路径」一节。
+//
+// 无本机 k6 时用 Docker（宿主机网络，直连 127.0.0.1 与 --network host 一致）：
+//   docker run --rm -i --network host -v "$PWD":/bench -w /bench \
+//     grafana/k6 run --env SCENARIO=baseline k6-load-test.js
+//
 // 场景说明:
 //   smoke      — 冒烟测试：1 VU，验证所有端点可用
 //   baseline   — 基线测试：阶梯式加压，找到单实例 QPS 上限
+//   capacity   — 容量测试：200→800 VU，挤压单实例容量拐点（比 baseline 更重）
 //   stress     — 压力测试：保持高负载，观察降级行为
 //   endurance  — 耐久测试：长时间中等负载，检测内存泄漏
 // ============================================================
@@ -27,6 +36,10 @@ const errorRate = new Rate("bff_error_rate");
 const BASE_URL = __ENV.BASE_URL || "http://127.0.0.1:8080";
 const SCENARIO = __ENV.SCENARIO || "smoke"; // smoke | baseline | stress | endurance
 const RESULTS_DIR = __ENV.RESULTS_DIR || "./results";
+// 认证会话 Cookie（形如 "BFF_SESSION=xxx"）；提供后所有请求携带（代理/编排认证路径）
+const COOKIE = __ENV.COOKIE || "";
+// 思考时间：smoke/endurance 保持贴近真实用户（0.5s）；baseline/stress 最小化以逼近 QPS 上限
+const THINK_TIME = SCENARIO === "smoke" || SCENARIO === "endurance" ? 0.5 : 0.05;
 
 // ---- 场景配置 ----
 export const options = {
@@ -48,6 +61,18 @@ export const options = {
         { duration: "30s", target: 0 },
       ],
       gracefulRampDown: "10s",
+    },
+  } : SCENARIO === "capacity" ? {
+    capacity: {
+      executor: "ramping-vus",
+      startVUs: 100,
+      stages: [
+        { duration: "45s", target: 300 },
+        { duration: "45s", target: 500 },
+        { duration: "45s", target: 800 },
+        { duration: "15s", target: 800 },
+      ],
+      gracefulRampDown: "15s",
     },
   } : SCENARIO === "stress" ? {
     stress: {
@@ -76,6 +101,14 @@ export const options = {
   } : {
     http_req_duration: ["p(95) < 2000"], // p95 < 2s
     http_req_failed: ["rate < 0.01"], // 错误率 < 1%
+    // 按端点声明阈值 → k6 汇总数据中产出 `http_req_duration{endpoint:...}` 子指标，
+    // 基线报告需要分端点的 p95（详见 benchmark/README.md 基线数值表）。
+    "http_req_duration{endpoint:liveness}": ["p(95) < 1000"],
+    "http_req_duration{endpoint:readiness}": ["p(95) < 2000"],
+    "http_req_duration{endpoint:echo}": ["p(95) < 2000"],
+    "http_req_duration{endpoint:health}": ["p(95) < 1000"],
+    "http_req_duration{endpoint:users}": ["p(95) < 2000"],
+    "http_req_duration{endpoint:orders}": ["p(95) < 2000"],
   },
 
   summaryTrendStats: ["avg", "min", "med", "p(90)", "p(95)", "p(99)", "max"],
@@ -84,16 +117,22 @@ export const options = {
 // ---- 工具函数 ----
 function endpoint(name, method, path, body, params) {
   const url = `${BASE_URL}${path}`;
+  // 端点标签用于子指标拆分；COOKIE 提供时统一附加（认证路径）
+  const opts = Object.assign({}, params || {});
+  opts.tags = Object.assign({}, opts.tags || {}, { endpoint: name });
+  if (COOKIE) {
+    opts.headers = Object.assign({}, opts.headers || {}, { Cookie: COOKIE });
+  }
   const start = Date.now();
   let resp;
   if (method === "POST") {
-    resp = http.post(url, body, params);
+    resp = http.post(url, body, opts);
   } else if (method === "PUT") {
-    resp = http.put(url, body, params);
+    resp = http.put(url, body, opts);
   } else if (method === "DELETE") {
-    resp = http.del(url, null, params);
+    resp = http.del(url, null, opts);
   } else {
-    resp = http.get(url, params);
+    resp = http.get(url, opts);
   }
   const elapsed = Date.now() - start;
 
@@ -142,13 +181,13 @@ function testOrdersProxy() {
 export default function () {
   group("health check", function () {
     testLiveness();
-    sleep(0.5);
+    sleep(THINK_TIME);
   });
 
   group("pipeline echo", function () {
     testEchoPipeline();
     testHealthStatic();
-    sleep(0.5);
+    sleep(THINK_TIME);
   });
 
   // 代理端点需要认证 session，仅在非 smoke 场景测试
@@ -157,13 +196,13 @@ export default function () {
     group("proxy routes", function () {
       testUsersProxy();
       testOrdersProxy();
-      sleep(0.5);
+      sleep(THINK_TIME);
     });
   }
 
   group("readiness", function () {
     testReadiness();
-    sleep(0.5);
+    sleep(THINK_TIME);
   });
 }
 

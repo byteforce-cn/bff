@@ -72,7 +72,10 @@ http_client:
   # client_key_path: "/etc/bff/certs/client-key.pem"
   # ca_cert_path: "/etc/bff/certs/ca.pem"
 
-# 全局限流
+# 全局限流（按真实客户端 IP 建桶；令牌桶：burst_size = 桶容量，per_second = 每秒补液数）
+# ⚠️ 实现注意：tower-governor 0.4.x 的 per_second 是「每 N 秒 1 个」的周期语义，
+# 与这里的「每秒 N 个」相反；middleware/rate_limit_skip.rs 已显式换算（新增配置勿直接透传）。
+# per_second 决定持续速率上限（如 50 = 每 IP 50rps），burst_size 决定突发容量（500 = 瞬间可打满 500 次）。
 rate_limit:
   per_second: 50
   burst_size: 500

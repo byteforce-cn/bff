@@ -5,10 +5,10 @@
 
 | 项目 | 内容 |
 | ---- | ---- |
-| 记录日期 | 2026-09-27（第三轮：Keycloak 真实 IdP 契约验证 + 3 个真实缺陷修复） |
-| 实施阶段 | **P0 全部关闭**；M2 安全主体完成；M3 观测/运营资产完成；真实 IdP 兼容性已验证；M4 灰度待环境 |
-| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**157 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored） |
-| 新增测试 | 第三轮：scope 去重单测（handlers）+ 会话索引回归断言（test_oidc_flow）；累计含既有全量回归 |
+| 记录日期 | 2026-09-27（第四轮：SLO 负载基线标定 + 压测发现并修复全局限流语义缺陷） |
+| 实施阶段 | **P0 全部关闭**；M2 安全主体完成；M3 观测/运营资产完成；真实 IdP 兼容性已验证；**SLO/容量基线已标定（单实例 ≥10.4k QPS，0 错误）**；M4 灰度待环境 |
+| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**160 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 70.71%**（CI 门禁 ≥68%，E5） |
+| 新增测试 | 第四轮：限流周期换算单测 ×2 + 补液语义集成回归 ×1（旧语义下确定失败）；累计含既有全量回归 |
 
 ---
 
@@ -315,6 +315,65 @@ $ curl ... /config/export | grep -c healthz-check
 
 ---
 
+## 1.7 第四轮：SLO 负载基线标定 + 全局限流语义缺陷修复（2026-09-27）
+
+> 对应审计 §6 路线图「SLO/负载基线」与 P2「性能专项（k6 基线数值化）」。
+> 本轮以真实压测完成**单实例容量基线**，并**发现/修复 1 个生产级可用性缺陷（LA1，P1）**。
+
+### A. 压测资产与可复现环境
+
+| 文件 | 作用 |
+| --- | --- |
+| `benchmark/upstream-nginx.conf` | 最小上游（全路径 200 JSON，隔离上游抖动） |
+| `benchmark/k6-load-test.js` | 新增 `capacity` 场景；新增 `COOKIE`（认证路径）与按端点子指标；思考时间参数化；Docker 运行说明 |
+| `benchmark/README.md` | 一键复现步骤（上游/Redis/Mock IdP/BFF/Cookie）+ 实测基线数值 |
+
+环境：8 vCPU（i7-1165G7）/ 31GB；BFF release 本地进程（Redis 会话/缓存/锁 + Mock IdP
+真实登录）+ nginx 上游 + k6 均为 Docker host 网络；全局限流在压测中放宽（100000/s）以测引擎容量。
+
+### B. 实测基线（全场景 0 错误）
+
+| 场景 | 请求数 | QPS | 错误率 | avg | p95 | p99 |
+| --- | ---: | ---: | :--: | --: | --: | --: |
+| smoke（1 VU） | 80 | 2.7 | 0.00% | 1.14ms | 2.00ms | 2.36ms |
+| baseline（→200 VU） | 311,886 | 2,078 | 0.00% | 0.93ms | 2.89ms | 6.09ms |
+| capacity（→800 VU） | 1,572,720 | **10,464** | 0.00% | 9.45ms | 39.41ms | 63.80ms |
+
+分端点 p95（capacity 峰值）：/live 6.6ms、/ready 15.8ms、/api/health 30.5ms、
+/api/echo（QuickJS 脚本）32.0ms、/api/users 56.5ms、/api/orders 52.9ms；`dropped_iterations=0`。
+结论：**单实例 ≥10.4k QPS**，对 500ms P95 SLO 有 ~9× 余量（k6/Redis 与 BFF 同机，数值偏保守）；
+原始数据 `benchmark/results/benchmark-{smoke,baseline,capacity}-*.json`。
+SLO 表与限流/HPA 参数反推已填入 `docs/production-deployment.md` §SLO。
+
+### C. 发现并修复的真实缺陷（LA1：全局限流周期语义，P1 可用性）
+
+| # | 缺陷 | 根因 | 修复 | 验证 |
+| --- | --- | --- | --- | --- |
+| LA1 | 首次 baseline **68.11% 请求 429**（313,320 请求仅 ~10 万通过 ≈ burst 100000，之后全部拒绝） | tower-governor 0.4.3 的 `GovernorConfigBuilder::per_second(n)` 语义是「每 n 秒补 1 个令牌」（周期），实现按「每秒 n 个」直传 → 生产默认 50/s 实为**每 50 秒 1 个**（收紧 2500×） | `src/middleware/rate_limit_skip.rs` 新增 `governor_period()` 显式换算 `1s/N`（含上下界钳制），不再直接透传；自定义错误处理为 429 补 **`Retry-After`**（RFC 6585，与认证限流一致）；`config/base.yaml` 增加语义警示注释 | 单测 ×2（周期换算/零周期边界）；集成回归 `test_spa_serving.rs::global_rate_limit_refill_uses_per_second_rate`（旧语义下确定失败 429 → 修复后 700ms 复放行）+ 429 `Retry-After` 头断言；修复后同场景 0 错误 |
+
+> 长期未被发现的原因：既有测试仅用 `per_second: 1`（周期 1s 与「每秒 1 个」巧合等价），
+> 无测试覆盖 N>1 的补液速率；认证端点限流为自研令牌桶（语义正确），不受影响。
+> 影响面：若不修复，生产默认下任一 IP 在 burst（500）耗尽后将被限至 1 req/50s；
+> 升级 tower-governor 时需注意返回值语义（勿回退为直接透传）。
+
+### D. E5 覆盖率门禁（cargo-llvm-cov）
+
+- 实测（含 Redis 用例全量）：**lines 70.71% / regions 68.64% / functions 67.29%**（9,472 regions）。
+- CI 新增 `coverage` job：`cargo llvm-cov --all-features --summary-only --fail-under-lines 68`（含 Redis service；
+  棘轮策略——新增测试后逐步上调）；Makefile 新增 `make coverage`。
+- 已知低覆盖热点（后续补测优先级）：`server/tunnel.rs` **0%**（WS 隧道无自动化用例，对应 §2「WS 补测」）、
+  `server/route_dispatcher.rs` 17%（路由分发大量分支仅走部分路径）、`provider/redis.rs` 64%、`server/business.rs` 58%。
+
+### E. 本轮变更文件
+
+- 修改：`src/middleware/rate_limit_skip.rs`、`tests/test_spa_serving.rs`、`config/base.yaml`、
+  `benchmark/{README.md,k6-load-test.js}`、`docs/production-deployment.md`、`docs/runbook.md`、
+  `.github/workflows/ci.yml`、`Makefile`、`README.md`、`CHANGELOG.md`、本文件；
+- 新增：`benchmark/upstream-nginx.conf`；
+- 压测产物（不入库）：`benchmark/results/*.json`。
+
+---
+
 ## 2. 剩余事项（上线前 Should / 灰度期迭代）
 
 > P0 阻断项已全部关闭（含 P0-4；P0-2 的“https + LB 全链路”已提供本地 E2E 与 K8s 清单，
@@ -323,13 +382,13 @@ $ curl ... /config/export | grep -c healthz-check
 | 优先级 | 项 | 说明与建议 |
 | --- | --- | --- |
 | ✅ 已完成 | **真实 IdP 兼容性验证** | 2026-09-27 用 Keycloak 26（非 Spring AS）完成契约验证（见 §1.6）：登录/回调/刷新/登出/Bearer 注入/Redis 会话全链路；期间修复 3 个真实缺陷（K1–K3） |
+| ✅ 已完成 | **SLO/负载基线（本地标定）** | 2026-09-27 实测单实例 ≥10.4k QPS、0 错误、p95 39ms（见 §1.7）；生产/预发环境复测仍建议（同名压测脚本可直接复用：`benchmark/README.md`） |
 | 上线前 | **外部渗透测试** | 重点：OIDC 回调、`/pipeline`、代理注入、管理面（审计 §M2 DoD） |
-| 上线前 | **SLO/负载基线** | 按 `docs/production-deployment.md` §SLO 模板填入目标 QPS/并发并反推限流与 HPA |
 | 上线前 | 生产域名 HTTPS 终验 | 用 `deploy/https/` 同构流程在预发执行并留档 |
-| P1 迭代 | E5 覆盖率门禁 + 真实验签契约测试；WS/Redis/停机路径补测 | 现有 156 用例（+2 ignored）已覆盖主链路 |
+| P1 迭代 | E5 覆盖率门禁 ✅（lines 70.71% → CI `--fail-under-lines 68`）；剩余：真实验签契约测试；WS/停机路径补测（`tunnel.rs` 当前 0%） | 现有 160 用例（+2 ignored）已覆盖主链路 |
 | P1 迭代 | OTel（OTLP）导出 | traceparent 已就绪；引入 exporter 即可衔接上游 span |
 | P2 | E14 `serde_yaml` 整改 | 跟踪 figment 上游；或自研合并 + serde_norway |
-| P2 | 性能专项 | QuickJS Runtime 复用/池化、ServeDir 缓存、k6 基线数值化 |
+| P2 | 性能专项 | k6 基线已数值化（§1.7）；QuickJS 池化经实测**无需**（脚本路径 p95 32ms @10k QPS，SLO 余量 ~15×）；ServeDir 缓存按需评估 |
 | P2 | 灰度（M4） | 1%→10%→50%→100% + 回滚演练 |
 
 

@@ -139,6 +139,10 @@ async fn rate_limit_skip_paths_bypass_global() {
             .unwrap();
         if resp.status().as_u16() == 429 {
             saw_429 = true;
+            assert!(
+                resp.headers().get("retry-after").is_some(),
+                "429 应携带 Retry-After 头（RFC 6585）"
+            );
             let body = resp.text().await.unwrap();
             assert!(
                 body.contains("Too Many Requests"),
@@ -149,4 +153,49 @@ async fn rate_limit_skip_paths_bypass_global() {
         }
     }
     assert!(saw_429, "非 skip 路径应触发全局限流 429");
+}
+
+/// 全局限流补液速率回归：`rate_limit.per_second` 必须表示「每秒 N 个令牌」，
+/// 而非「每 N 秒 1 个」（tower-governor 0.4.x 的 `per_second` 是周期语义，
+/// 一旦直接透传会把限流收紧 N 倍——压测实测发现，见 docs/production-progress.md）。
+#[tokio::test]
+async fn global_rate_limit_refill_uses_per_second_rate() {
+    let mut cfg = common::base_config();
+    cfg.spa.dir = common::make_spa_dir("spa");
+    cfg.rate_limit.per_second = 2; // 每秒补 2 个令牌 → 周期 500ms
+    cfg.rate_limit.burst_size = 1;
+    cfg.rate_limit.skip_path_prefixes = vec![];
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state).await;
+    let client = common::test_client();
+
+    // 1. 消耗唯一令牌
+    let r1 = client
+        .get(format!("{}/api/nonexistent", bff))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(r1.status().as_u16(), 429, "burst=1 时首个请求应放行");
+
+    // 2. 桶空 → 立即 429
+    let r2 = client
+        .get(format!("{}/api/nonexistent", bff))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status().as_u16(), 429, "令牌耗尽后应立即 429");
+
+    // 3. 等待 > 1 个周期（500ms）→ 应补充令牌恢复放行；
+    //    若被误读为「每 2 秒 1 个」，此处仍将 429（回归防线）
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let r3 = client
+        .get(format!("{}/api/nonexistent", bff))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        r3.status().as_u16(),
+        429,
+        "per_second=2 时 700ms 后应恢复放行（周期 500ms）"
+    );
 }

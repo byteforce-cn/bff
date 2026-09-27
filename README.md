@@ -10,9 +10,10 @@
 > ⚠️ **状态**：M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、M3 可观测性与运营资产
 > 已落地并通过测试（详见 [docs/production-progress.md](docs/production-progress.md)）；
 > **P0 阻断项已全部关闭**；**真实 IdP 兼容性已用 Keycloak 26 完成契约验证**
-> （登录/回调/刷新/登出/Bearer/Redis 会话全链路，见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）。
-> 上线前仍需：外部渗透测试、目标负载/SLO 基线标定
-> （见 [docs/production-deployment.md](docs/production-deployment.md) §SLO）。
+> （登录/回调/刷新/登出/Bearer/Redis 会话全链路，见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）；
+> **SLO/容量基线已实测标定**（单实例 ≥10.4k QPS、0 错误、p95 39ms，见
+> [benchmark/README.md](benchmark/README.md) 与 [docs/production-deployment.md](docs/production-deployment.md) §SLO）。
+> 上线前仍需：外部渗透测试、生产域名 HTTPS 终验。
 > 生产环境必须通过环境变量/密钥管理注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
 > 部署与运维：[production-deployment.md](docs/production-deployment.md) · [runbook.md](docs/runbook.md)。
 
@@ -25,7 +26,8 @@
 
 当前项目已完成主要生产化改造（P0 阻断全部关闭，见上述进度文档）；
 真实 IdP 兼容性已用 Keycloak 26 完成契约验证（`deploy/keycloak/`），
-渗透测试与 SLO 基线标定仍属上线前 Should 项
+SLO/容量基线已实测标定（单实例 ≥10.4k QPS、0 错误，`benchmark/README.md`），
+渗透测试与生产域名 HTTPS 终验仍属上线前 Should 项
 
 > AI 生成内容均经过人工审查与测试验证。
 

@@ -1,4 +1,4 @@
-.PHONY: clean fmt lint test check bff-build ui-build build iam-build iam-run iam-clean audit https-e2e mock-idp
+.PHONY: clean fmt lint test check bff-build ui-build build iam-build iam-run iam-clean audit bench coverage https-e2e mock-idp
 
 clean:
 	cargo clean
@@ -22,6 +22,16 @@ check:
 # E4：依赖审计（需 cargo-audit；例外清单见 .cargo/audit.toml）
 audit:
 	cargo audit
+
+# 基准压测（需 Docker 与运行中的 BFF；场景：smoke|baseline|capacity|stress|endurance）
+# 认证路径需传 COOKIE（获取方式见 benchmark/README.md）
+bench:
+	cd benchmark && docker run --rm -i --network host -v "$$PWD":/bench -w /bench \
+		grafana/k6 run --env SCENARIO=$${SCENARIO:-smoke} $${COOKIE:+--env COOKIE=$$COOKIE} k6-load-test.js
+
+# E5：覆盖率测量（需 cargo-llvm-cov；CI 门禁见 .github/workflows/ci.yml）
+coverage:
+	BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo llvm-cov --all-features --summary-only
 
 # HTTPS + LB 全链路 E2E（需 Docker；Mock IdP 见 mock-idp）
 https-e2e:
