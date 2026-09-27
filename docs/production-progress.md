@@ -5,10 +5,10 @@
 
 | 项目 | 内容 |
 | ---- | ---- |
-| 记录日期 | 2026-09-27（第四轮：SLO 负载基线标定 + 压测发现并修复全局限流语义缺陷） |
-| 实施阶段 | **P0 全部关闭**；M2 安全主体完成；M3 观测/运营资产完成；真实 IdP 兼容性已验证；**SLO/容量基线已标定（单实例 ≥10.4k QPS，0 错误）**；M4 灰度待环境 |
-| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**160 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 70.71%**（CI 门禁 ≥68%，E5） |
-| 新增测试 | 第四轮：限流周期换算单测 ×2 + 补液语义集成回归 ×1（旧语义下确定失败）；累计含既有全量回归 |
+| 记录日期 | 2026-09-27（第五轮：P1 遗留收口——WS 隧道补测、真实验签契约、OTel OTLP 导出、供应链审计修复） |
+| 实施阶段 | **P0 全部关闭**；M2/M3 完成；真实 IdP 兼容性已验证；SLO 基线已标定；**OTel OTLP 导出就绪**；上线前仅剩**环境类动作**（外部渗透测试、生产域名 HTTPS 终验） |
+| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**183 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 72.82%**（CI 门禁已上调至 ≥70，E5）/ `cargo audit` ✅（例外清单含风险界定与升级计划，见 §1.8-D） |
+| 新增测试 | 第五轮：WS 隧道 ×9 + OTel 契约 ×7 + 真实验签 ×5（+ telemetry 单测 ×2；并修复 1 处短 trace-id 校验缺口） |
 
 ---
 
@@ -374,6 +374,102 @@ SLO 表与限流/HPA 参数反推已填入 `docs/production-deployment.md` §SLO
 
 ---
 
+## 1.8 第五轮：P1 遗留收口——WS 补测 / 真实验签 / OTel 导出 / 供应链修复（2026-09-27）
+
+> 对应审计 v2 与 §2 剩余事项中的 P1 迭代项：E5 覆盖率热点（`tunnel.rs` 0%）、
+> 「真实验签契约测试」、「OTel（OTLP）导出」；并针对第五轮引入/发现的供应链告警做修复与界定。
+
+### A. WebSocket 隧道自动化测试（E5 热点：`tunnel.rs` 0% → **84.01%**）
+
+新增 `tests/test_ws_tunnel.rs`（9 用例，进程内 WS 回显上游 + 黑洞上游，全部无需外部依赖）：
+
+| # | 用例 | 断言要点 |
+| --- | --- | --- |
+| 1 | `ws_echo_relay_and_clean_close` | 文本/二进制双向 relay；客户端 Close 透传上游（关闭帧记录）；匿名路由不注入 Authorization |
+| 2 | `ws_auth_required_rejects_anonymous_and_injects_bearer` | S6：无会话升级 → 401 且不触及上游；有会话 → 上游握手收到 `Bearer test-access-token` |
+| 3 | `ws_route_constraints` | 非 `websocket|auto` 模式 → 400；无匹配路由 → 404 |
+| 4 | `ws_upstream_connect_failure_closes_1011` | 上游拒连 → 客户端收到 1011 Close |
+| 5 | `ws_upstream_handshake_timeout_closes_1011` | R16：黑洞上游 + `connect_timeout=500ms` → 1011，且控制在 ~1s 内返回 |
+| 6 | `ws_oversized_client_message_closed_with_1009` | 客户端超限消息 → 上游收到 1009 |
+| 7 | `ws_oversized_upstream_message_closes_client_1009` | 上游超限消息 → 客户端收到 1009 |
+| 8 | `ws_heartbeat_keeps_tunnel_alive_past_idle_timeout` | 心跳保活：空闲窗口（2×idle）内无业务消息隧道不关，之后仍可收发 |
+| 9 | `ws_idle_timeout_closes_tunnel_when_no_heartbeat` | 禁用心跳时空闲超时必触发关闭 |
+
+### B. 真实验签契约测试（P1「真实验签契约测试」）
+
+既有 mock IdP 以 `alg:none` + `insecure_skip_id_token_verification=true` 运行，Keycloak E2E 又依赖 Docker；
+新增 `tests/test_oidc_signature.rs`（5 用例，**cargo test 门禁内**回归完整验签）：
+
+| # | 用例 | 断言要点 |
+| --- | --- | --- |
+| 1 | `rs256_jwks_valid_login_succeeds` | 进程内 RS256 签名 IdP + JWKS，**不跳过验签** → 登录成功、会话登记 |
+| 2 | `rs256_wrong_key_rejected` | 签名密钥与 JWKS 不匹配（伪造/轮换攻击）→ 401、不建会话 |
+| 3 | `rs256_alg_none_rejected` | `alg:none` 无签名令牌（JWT 混淆攻击）→ 401、不建会话 |
+| 4 | `rs256_wrong_nonce_rejected` | 签名合法但 nonce 不一致（重放/串会话）→ 401、不建会话 |
+| 5 | `idp_jwks_contract_is_served_and_parseable` | JWKS 结构（kty/alg/kid/n/e）与 discovery 仅公布 RS256 |
+
+实现说明：内嵌固定 RSA 测试密钥（`openssl genpkey` 生成、仅测试用途，非秘密），避免 debug 构建下
+RSA 生成耗时（~10s → 0.4s）；`rsa` 作为 dev-dependency（与 openidconnect 传递依赖同版本，无新增供应链面）。
+
+### C. OTel（OTLP/gRPC）追踪导出（M3 旗舰遗留项）
+
+| 项 | 实施 | 证据 |
+| --- | --- | --- |
+| 配置与出口 | `telemetry.{otlp_endpoint,service_name,sample_ratio}`；OTLP/gRPC（tonic）；TLS 走 **rustls**（tls-roots 读系统证书库，不引入 openssl）；endpoint 为空完全禁用（默认） | `src/telemetry.rs`、`config/{base,env/prod}.yaml`、`src/config.rs::validate` |
+| span 语义 | `BffMakeSpan`：`http.request` + `http.method/target/status_code` + `otel.kind=server`；`RecordStatusOnResponse` 于响应阶段补 `http.status_code`（保留默认完成日志） | `src/middleware/trace_context.rs`、`src/server/business.rs` |
+| 跨服务衔接 | 入站 `traceparent` → OTel 远程父上下文（`context_from_traceparent`，含严格长度/字符校验）；出站/响应 `traceparent` 优先取本跳 span 的 OTel 上下文（`current_span_traceparent`）→ **collector 中的 span 树与上游收到的 parent 严格一致**；未启用导出时自动回退既有手动上下文（行为不变） | 同上；`tests/test_telemetry.rs` |
+| 采样 | `ParentBased(TraceIdRatioBased(sample_ratio))`：有上游上下文跟随上游采样位（W3C 语义），根请求按比例采样 | 同上 |
+| 关停 | `TelemetryHandle::shutdown_async`（spawn_blocking）：处置 SDK `BatchSpanProcessor::shutdown()` 的 `futures_executor::block_on` 在 **current_thread 运行时死锁** 的坑（含 provider drop 路径）；main 在退出前 flush | `src/telemetry.rs`、`src/main.rs` |
+| 层序陷阱 | trace 中间件必须位于 TraceLayer 之内、**任何创建子 span 的层之外**（实测 tower-sessions 会创建 `call` span，导致 traceparent 的 span-id 与导出 span 不一致）；已用端到端用例锁定 | `src/server/business.rs` 注释 + `http_request_span_exported_and_linked` |
+
+新增 `tests/test_telemetry.rs`（7 用例，进程内 **tonic OTLP collector** 真收导出）：
+
+1. 默认禁用（`None`，无出站）；2. 非法 endpoint fail-fast；3. 配置校验（scheme/采样率边界）；
+4. OTLP 端到端导出：`service.name`、span 名/属性、**trace_id 延续 + parent_span_id == 入站**；
+5. 传播语义：同 trace、新 span_id、采样位如实（01/00）；6. `BffMakeSpan` 头→父链衔接；
+7. **生产接线端到端**：真实 HTTP 请求的响应 `traceparent` span-id == collector 中导出 span 的 span_id，
+   `http.status_code=200` 等属性齐全。
+
+### D. 供应链（E4）：审计告警修复与例外界定
+
+第五轮加入 OTel（tonic 栈）后 `cargo audit` 暴露 7 项；按「能修必修、不能修必须界定」处理：
+
+| 项 | 处置 | 结果 |
+| --- | --- | --- |
+| h2 0.4.15（RUSTSEC-2026-0258） | `cargo update` → **0.4.19** | 已修复 |
+| rustls 0.23.43（RUSTSEC-2026-0285） | `cargo update` → **0.23.45** | 已修复 |
+| h2 0.3.27（旧栈，0.3 线 EOL 无修复） | 共享出网客户端统一 **`.http1_only()`**（`state.rs::build_http_client`）→ h2 0.3 在生产**不可达**；审计例外（含界定） | 收敛 + 例外 |
+| rustls-webpki 0.101.7 ×3（名称约束/CRL，来自 reqwest 0.11 → rustls 0.21） | 审计例外：仅出网证书校验、0.101 栈不启用 CRL、名称约束绕过需受信 CA 链（内网 IdP/上游场景）；P1 迁移计划见 §2 | 例外 |
+| rsa 0.9.10 Marvin（RUSTSEC-2023-0071，上游无修复） | 审计例外：Marvin 针对 RSA 私钥操作；生产仅公钥验签（openidconnect），不执行私钥运算；测试签发用内嵌测试密钥 | 例外 |
+
+供应链约束保持：`cargo tree -e normal -i openssl-sys` / `native-tls` 零命中（E9）；例外清单
+（`.cargo/audit.toml`）均含「引入链 + 影响界定 + 整改计划」，CI `audit` job 读取后通过。
+
+### E. 覆盖率门禁与实测记录
+
+```text
+# 门禁（第五轮全绿）
+cargo fmt --all -- --check                                   → OK
+cargo clippy --all-targets --all-features -- -D warnings     → OK
+BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
+  → 183 passed / 0 failed（另有 2 ignored：依赖 fakesvc）
+cargo audit                                                  → 通过（2 条 allowed 级 unmaintained 告警）
+cargo tree -e normal -i openssl-sys / native-tls             → 无匹配（rustls 全栈）
+cargo llvm-cov --all-features --summary-only                 → lines 72.82% / regions 70.75% / functions 75.12%
+  热点：server/tunnel.rs 0% → 84.01%；telemetry.rs 94.37%；server/proxy.rs 81.46%
+  （仍低：server/route_dispatcher.rs 11.87%，P1 后续补测）
+CI 覆盖率门禁：--fail-under-lines 68 → **70**（棘轮策略）
+```
+
+### F. 本轮变更文件
+
+- 新增：`src/telemetry.rs`、`tests/test_ws_tunnel.rs`、`tests/test_oidc_signature.rs`、`tests/test_telemetry.rs`；
+- 修改：`src/{main.rs,lib.rs,state.rs,config.rs}`、`src/middleware/trace_context.rs`、`src/server/business.rs`、
+  `config/env/prod.yaml`、`Cargo.toml`/`Cargo.lock`、`.cargo/audit.toml`、`.github/workflows/ci.yml`、
+  `CHANGELOG.md`、`README.md`、`docs/production-deployment.md`、本文件。
+
+---
+
 ## 2. 剩余事项（上线前 Should / 灰度期迭代）
 
 > P0 阻断项已全部关闭（含 P0-4；P0-2 的“https + LB 全链路”已提供本地 E2E 与 K8s 清单，
@@ -383,10 +479,13 @@ SLO 表与限流/HPA 参数反推已填入 `docs/production-deployment.md` §SLO
 | --- | --- | --- |
 | ✅ 已完成 | **真实 IdP 兼容性验证** | 2026-09-27 用 Keycloak 26（非 Spring AS）完成契约验证（见 §1.6）：登录/回调/刷新/登出/Bearer 注入/Redis 会话全链路；期间修复 3 个真实缺陷（K1–K3） |
 | ✅ 已完成 | **SLO/负载基线（本地标定）** | 2026-09-27 实测单实例 ≥10.4k QPS、0 错误、p95 39ms（见 §1.7）；生产/预发环境复测仍建议（同名压测脚本可直接复用：`benchmark/README.md`） |
-| 上线前 | **外部渗透测试** | 重点：OIDC 回调、`/pipeline`、代理注入、管理面（审计 §M2 DoD） |
+| 上线前 | **外部渗透测试** | 重点：OIDC 回调、`/pipeline`、代理注入、管理面（审计 §M2 DoD）。第五轮已入库内测回归：伪造密钥/`alg:none`/nonce 攻击拒绝、开放重定向单测、IP 伪造限流用例 |
 | 上线前 | 生产域名 HTTPS 终验 | 用 `deploy/https/` 同构流程在预发执行并留档 |
-| P1 迭代 | E5 覆盖率门禁 ✅（lines 70.71% → CI `--fail-under-lines 68`）；剩余：真实验签契约测试；WS/停机路径补测（`tunnel.rs` 当前 0%） | 现有 160 用例（+2 ignored）已覆盖主链路 |
-| P1 迭代 | OTel（OTLP）导出 | traceparent 已就绪；引入 exporter 即可衔接上游 span |
+| ✅ 已完成 | E5 覆盖率（第五轮收口） | lines **72.82%**；CI 门禁上调至 **≥70**；`tunnel.rs` 0% → **84.01%**、`telemetry.rs` 94.37%；仍低：`route_dispatcher.rs` 11.87%（P1 后续） |
+| ✅ 已完成 | 真实验签契约测试（第五轮） | 进程内 RS256/JWKS，不跳过验签 + 三类攻击拒绝（`tests/test_oidc_signature.rs`） |
+| ✅ 已完成 | OTel（OTLP）导出（第五轮） | OTLP/gRPC + traceparent 衔接（span 树一致）+ ParentBased 采样 + 关停 flush + 端到端契约测试（`tests/test_telemetry.rs`） |
+| P1 迭代 | **openidconnect 3.5 → 4.0 迁移**（连带 oauth2 4.4 → 5、reqwest 0.11 → 0.12） | 整体移除旧栈（h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14），清零审计例外中的 4 条；当前缓释：出网 `.http1_only()` + 例外界定（`.cargo/audit.toml`） |
+| P1 迭代 | `route_dispatcher.rs`/`business.rs` 覆盖率补测（11.87% / 69.82%） | 路由分发大量分支未覆盖；建议按分支矩阵补测 |
 | P2 | E14 `serde_yaml` 整改 | 跟踪 figment 上游；或自研合并 + serde_norway |
 | P2 | 性能专项 | k6 基线已数值化（§1.7）；QuickJS 池化经实测**无需**（脚本路径 p95 32ms @10k QPS，SLO 余量 ~15×）；ServeDir 缓存按需评估 |
 | P2 | 灰度（M4） | 1%→10%→50%→100% + 回滚演练 |
@@ -403,6 +502,10 @@ SLO 表与限流/HPA 参数反推已填入 `docs/production-deployment.md` §SLO
 
 **第三轮修改**：`src/oidc/handlers.rs`（scope 去重 `authorize_scopes`、cycle_id 后显式 save 再登记、登记跳过告警）、`src/config.rs`（会话 Cookie 默认 SameSite Lax）、`config/base.yaml`（同上）、`tests/test_oidc_flow.rs`（会话索引回归断言）、`README.md`、`docs/production-deployment.md`、`CHANGELOG.md`、本文件。
 
+**第四/五轮新增**：`benchmark/upstream-nginx.conf`、`src/telemetry.rs`、`tests/{test_ws_tunnel,test_oidc_signature,test_telemetry}.rs`。
+
+**第四/五轮修改**：`src/middleware/{rate_limit_skip,trace_context}.rs`、`src/server/business.rs`（OTel span 与层序）、`src/state.rs`（出网 `.http1_only()`）、`src/main.rs`（OTel 接线/关停 flush）、`src/config.rs`（telemetry）、`src/lib.rs`、`config/env/prod.yaml`、`.cargo/audit.toml`、`.github/workflows/ci.yml`（覆盖率门禁 → 70）、`Cargo.toml`/`Cargo.lock`、`benchmark/{README.md,k6-load-test.js}`、`docs/production-deployment.md`、`README.md`、`CHANGELOG.md`、本文件；逐项证据见 §1.7-E / §1.8-F。
+
 ---
 
 ## 4. 复现验证（本地）
@@ -411,10 +514,12 @@ SLO 表与限流/HPA 参数反推已填入 `docs/production-deployment.md` §SLO
 # 1) Redis（Docker）
 docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine
 
-# 2) 门禁（156 用例）
+# 2) 门禁（183 用例；CI 另含 audit + 覆盖率门禁 ≥70）
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 env -u HTTP_PROXY -u HTTPS_PROXY BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
+cargo audit                       # 读取 .cargo/audit.toml（例外均含界定）
+env -u HTTP_PROXY -u HTTPS_PROXY BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo llvm-cov --all-features --summary-only
 
 # 3) 生产防呆拒绝演示
 BFF_ENV=prod ./target/debug/bff            # → Error: admin.auth_token 必须为 ≥32 字符...

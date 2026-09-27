@@ -20,13 +20,28 @@
 - **SLO/容量基线标定**：压测资产（`benchmark/upstream-nginx.conf`、k6 `capacity` 场景、
   认证路径 COOKIE 与按端点子指标）；实测单实例 ≥10.4k QPS、0 错误、p95 39ms，
   数值与参数反推见 `benchmark/README.md` 与 `docs/production-deployment.md` §SLO
+- **OTel（OTLP/gRPC）追踪导出（O3）**：`telemetry.otlp_endpoint` 配置后启用（默认禁用）；
+  span 遵循 OTel HTTP semconv（`http.request`/`http.*`/`otel.kind=server`），入站
+  `traceparent` 作为远程父上下文（cross-service 链路在 collector 中可衔接），
+  `ParentBased(TraceIdRatioBased)` 采样、TLS 走 rustls、关停时 flush；含进程内 OTLP/gRPC
+  collector 端到端契约测试（`tests/test_telemetry.rs`）
+- **WebSocket 隧道自动化测试**（补齐 E5 覆盖率 P1 缺口，`tunnel.rs` 由 0% 覆盖）：
+  双向 relay/干净关闭、鉴权与上游 Bearer 注入、路由约束、上游连接失败/握手超时 1011、
+  消息大小上限 1009（双向）、心跳保活与空闲超时（`tests/test_ws_tunnel.rs`，9 用例）
+- **真实验签契约测试**：进程内 RS256 签名 IdP + JWKS，登录链路在**不跳过验签**下回归；
+  覆盖伪造密钥 / `alg:none` 混淆 / nonce 不一致三类攻击拒绝（`tests/test_oidc_signature.rs`）
 
 ### Changed
 
 - 首次开源：补充 LICENSE、CONTRIBUTING、SECURITY、CI 等公开仓库基础设施
+- CI 覆盖率门禁按棘轮策略上调：`--fail-under-lines 68` → **70**（第五轮实测 lines 72.82%）
+- 出网 HTTP 客户端统一强制 HTTP/1.1（`.http1_only()`）：供应链收敛（旧栈 h2 0.3 生产不可达）
 
 ### Fixed
 
+- **供应链修复（第五轮审计）**：`h2` → 0.4.19、`rustls` → 0.23.45（修复 RUSTSEC-2026-0258 /
+  RUSTSEC-2026-0285）；其余不可修复项（reqwest 0.11 旧栈 TLS / rsa 验签）已在 `.cargo/audit.toml`
+  例外界定（含引入链、影响范围与 openidconnect 4 迁移计划）
 - **全局限流补液速率（压测发现的可用性缺陷）**：`tower-governor` 0.4.x 的 `per_second(n)` 为
   「每 n 秒补 1 个令牌」周期语义，原实现按「每秒 n 个」直传 → 生产默认 50/s 退化为每 50s 1 个
   （IP 在 burst 耗尽后长时间 429）。现显式换算周期 `1s / per_second`（`src/middleware/rate_limit_skip.rs`），

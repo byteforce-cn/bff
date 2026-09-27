@@ -2,20 +2,33 @@ use bff::config::AppConfig;
 use bff::state::AppState;
 use std::path::PathBuf;
 use tokio::signal;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // JSON 结构化日志，可用 RUST_LOG 控制级别
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .json()
-        .init();
-
     let config_dir = std::env::var("BFF_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("config"));
     let config = AppConfig::load(&config_dir)?;
+
+    // O3：OTel 追踪导出（telemetry.otlp_endpoint 为空则完全禁用）
+    let telemetry = bff::telemetry::init(&config.telemetry)?;
+
+    // JSON 结构化日志（RUST_LOG 控制级别）；启用遥测时叠加 OTel span 导出层
+    let fmt_layer = tracing_subscriber::fmt::layer().json();
+    let registry = tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(fmt_layer);
+    match &telemetry {
+        Some(handle) => {
+            let otel_layer = tracing_opentelemetry::layer().with_tracer(handle.tracer());
+            registry.with(otel_layer).init();
+        }
+        None => registry.init(),
+    }
+
     let business_port = config.server.business_port;
     let admin_port = config.server.admin_port;
 
@@ -88,6 +101,13 @@ async fn main() -> anyhow::Result<()> {
     let drain = async { while servers.join_next().await.is_some() {} };
     if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
         tracing::warn!("等待在途请求排空超时（30s），强制退出");
+    }
+
+    // O3：flush + 关停 OTel（导出队列中的尾部落 span），再记录最终日志。
+    // shutdown_async：SDK 的阻塞式关停在 current_thread 运行时会死锁，
+    // 统一放入阻塞线程池执行（详见 telemetry::TelemetryHandle::shutdown_async）。
+    if let Some(handle) = telemetry {
+        handle.shutdown_async().await;
     }
     tracing::info!("BFF 已关闭");
     Ok(())

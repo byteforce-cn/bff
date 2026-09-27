@@ -5,15 +5,18 @@
 [![Rust](https://img.shields.io/badge/Rust-1.93.0-orange)](https://www.rust-lang.org/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.5-green)](https://spring.io/projects/spring-boot)
 
-基于 **Axum** 的 Backend-For-Frontend 聚合层 · **生产化进行中**（原 POC/alpha）
+基于 **Axum** 的 Backend-For-Frontend 聚合层 · **生产就绪**（P0 阻断全关；上线前仅剩环境类终验）
 
-> ⚠️ **状态**：M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、M3 可观测性与运营资产
-> 已落地并通过测试（详见 [docs/production-progress.md](docs/production-progress.md)）；
-> **P0 阻断项已全部关闭**；**真实 IdP 兼容性已用 Keycloak 26 完成契约验证**
-> （登录/回调/刷新/登出/Bearer/Redis 会话全链路，见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）；
-> **SLO/容量基线已实测标定**（单实例 ≥10.4k QPS、0 错误、p95 39ms，见
-> [benchmark/README.md](benchmark/README.md) 与 [docs/production-deployment.md](docs/production-deployment.md) §SLO）。
-> 上线前仍需：外部渗透测试、生产域名 HTTPS 终验。
+> ✅ **状态**：五轮生产化改造完成——M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、
+> M3 可观测性与运营、P0-4 配置持久化全部落地；**P0 阻断项已全部关闭**；
+> **真实 IdP 契约验证**（Keycloak 26：登录/回调/RS256 验签/刷新/登出/Bearer/Redis 会话，
+> 见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）与**真实验签回归**
+> （进程内 RS256/JWKS + 伪造密钥/`alg:none`/nonce 攻击拒绝）均已入库；
+> **SLO/容量基线已实测标定**（单实例 ≥10.4k QPS、0 错误、p95 39ms，
+> [benchmark/README.md](benchmark/README.md)）；**OTel（OTLP）追踪导出**已就绪
+> （含端到端契约测试）；HTTPS+LB 全链路 E2E 与 K8s 清单齐备。
+> 上线前仅剩**环境类动作**：外部渗透测试、生产域名 HTTPS 终验（本地同构流程见
+> [deploy/https/](deploy/https/)，逐步证据见 [docs/production-progress.md](docs/production-progress.md)）。
 > 生产环境必须通过环境变量/密钥管理注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
 > 部署与运维：[production-deployment.md](docs/production-deployment.md) · [runbook.md](docs/runbook.md)。
 
@@ -24,10 +27,12 @@
 - **Kimi K3**
 - **DeepSeek V4**
 
-当前项目已完成主要生产化改造（P0 阻断全部关闭，见上述进度文档）；
+当前项目已完成五轮生产化改造（P0 阻断全部关闭，见上述进度文档）；
 真实 IdP 兼容性已用 Keycloak 26 完成契约验证（`deploy/keycloak/`），
+真实验签已入库回归（`tests/test_oidc_signature.rs`），
 SLO/容量基线已实测标定（单实例 ≥10.4k QPS、0 错误，`benchmark/README.md`），
-渗透测试与生产域名 HTTPS 终验仍属上线前 Should 项
+OTel（OTLP）导出与端到端契约测试已就绪（`tests/test_telemetry.rs`），
+渗透测试与生产域名 HTTPS 终验仍属上线前环境类动作
 
 > AI 生成内容均经过人工审查与测试验证。
 
@@ -40,7 +45,7 @@ SLO/容量基线已实测标定（单实例 ≥10.4k QPS、0 错误，`benchmark
 - 🔁 **反向代理**：路由映射、Bearer 注入、熔断（滚动窗口 + 半开单探针）、限流、SSE / WebSocket 透传（WS 鉴权/心跳/上限）
 - 🛠️ **管理端口（`:8443`）**：配置导入/导出（脱敏 + 热重载 + **落盘持久化**）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
 - 🧩 **Provider 可插拔**：缓存 / 锁 / Session，支持 `memory | redis`（Redis 为多实例共享实现，含跨实例会话/锁验证）
-- 📈 **可观测性**：请求/上游延迟直方图（低基数标签）、W3C `traceparent` 传播、Grafana 面板与告警规则（`deploy/`）
+- 📈 **可观测性**：请求/上游延迟直方图（低基数标签）、W3C `traceparent` 传播、**OTel（OTLP）追踪导出**（跨服务链路衔接、ParentBased 采样、关停 flush）、Grafana 面板与告警规则（`deploy/`）
 - 📦 **交付物**：多阶段 Dockerfile、docker-compose（含本地 HTTPS E2E）、K8s 清单（Deployment/Service/Ingress/PDB/HPA/NetworkPolicy/PVC）
 
 ## 🏗️ 项目结构
@@ -94,19 +99,25 @@ cargo run            # 启动 bff
 
 ## ⚙️ 配置
 
-`config/base.yaml` 为入口 合并其他的配置 §5。环境变量 `BFF_` 前缀可覆盖任意配置（`__` 分层），`BFF_ENV=prod` 时叠加 `config/env/prod.yaml`。
+`config/base.yaml` 为入口（合并 `providers/pipelines/routes` 等声明式配置）；环境变量 `BFF_` 前缀可覆盖任意配置（`__` 分层），`BFF_ENV=prod` 时叠加 `config/env/prod.yaml`。
 
 令牌加密密钥通过 `BFF_SECRET` 注入。**POC 内置开发密钥，生产必须覆盖**（详见 [SECURITY.md](SECURITY.md)）。
+
+分布式追踪（可选）：配置 `telemetry.otlp_endpoint` 启用 OTLP/gRPC 导出（默认禁用；采样、属性与 collector 对接见 [docs/production-deployment.md](docs/production-deployment.md)）。
 
 ## 🧪 测试
 
 ```bash
-cargo test           # 单元 + 全部集成测试（内存 provider，无外部依赖）
+cargo test           # 单元 + 全部集成测试（无外部依赖）
 # Redis provider / 跨实例会话测试（需本地 Redis，可用 Docker）：
 docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine
-BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --test test_redis_providers
+BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
+cargo audit          # 供应链审计（例外清单 .cargo/audit.toml，均含风险界定）
 make check           # fmt + clippy + test 全量检查
 ```
+
+关键契约测试：WS 隧道（`tests/test_ws_tunnel.rs`）、RS256 真实验签（`tests/test_oidc_signature.rs`）、
+OTel OTLP 导出（`tests/test_telemetry.rs`）；生产级 E2E 见 [deploy/https/](deploy/https/) 与 [deploy/keycloak/](deploy/keycloak/)。
 
 ## 📚 文档
 

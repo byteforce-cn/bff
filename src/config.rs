@@ -125,6 +125,9 @@ pub struct AppConfig {
     /// WebSocket 隧道配置（超时/心跳/消息上限，S6/R7/R16）
     #[serde(default)]
     pub websocket: WebSocketTunnelConfig,
+    /// O3：OpenTelemetry 追踪导出（默认禁用，仅保留 W3C traceparent 传播）
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
     /// P0-4：配置持久化（管理端变更落盘 + 外部变更热重载）
     #[serde(default)]
     pub persistence: PersistenceConfig,
@@ -551,6 +554,43 @@ fn default_ws_heartbeat() -> Duration {
 }
 fn default_ws_max_message() -> usize {
     1024 * 1024 // 1 MiB
+}
+
+// ── OTel（OTLP）遥测配置（O3） ──
+
+/// OpenTelemetry 追踪导出配置。
+///
+/// `otlp_endpoint` 为空（默认）时**完全禁用导出**：不注册导出层、无网络出站，
+/// 仅保留 W3C `traceparent` 注入/传播（行为与 O3 引入时一致）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// OTLP/gRPC 出口（如 `http://otel-collector:4317`；`https` 走 rustls）。留空禁用。
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
+    /// 资源属性 `service.name`
+    #[serde(default = "default_telemetry_service_name")]
+    pub service_name: String,
+    /// 根采样率 0.0–1.0（ParentBased：有上游上下文时跟随上游采样位，W3C 语义）
+    #[serde(default = "default_telemetry_sample_ratio")]
+    pub sample_ratio: f64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: None,
+            service_name: default_telemetry_service_name(),
+            sample_ratio: default_telemetry_sample_ratio(),
+        }
+    }
+}
+
+fn default_telemetry_service_name() -> String {
+    "bff".into()
+}
+
+fn default_telemetry_sample_ratio() -> f64 {
+    1.0
 }
 
 // ── 配置持久化（P0-4） ──
@@ -1386,6 +1426,28 @@ impl AppConfig {
         anyhow::ensure!(
             self.rate_limit.per_second > 0,
             "rate_limit.per_second 必须 > 0"
+        );
+
+        // OTel 遥测配置（O3）：endpoint 非空时必须为合法 http(s) URL
+        if let Some(endpoint) = &self.telemetry.otlp_endpoint {
+            let parsed = url::Url::parse(endpoint)
+                .map_err(|e| anyhow::anyhow!("telemetry.otlp_endpoint 非法: {}", e))?;
+            anyhow::ensure!(
+                parsed.scheme() == "http" || parsed.scheme() == "https",
+                "telemetry.otlp_endpoint 必须为 http(s) URL: {}",
+                endpoint
+            );
+            anyhow::ensure!(
+                parsed.host_str().is_some(),
+                "telemetry.otlp_endpoint 缺少主机名: {}",
+                endpoint
+            );
+        }
+        anyhow::ensure!(
+            !self.telemetry.sample_ratio.is_nan()
+                && (0.0..=1.0).contains(&self.telemetry.sample_ratio),
+            "telemetry.sample_ratio 必须在 0.0..=1.0 之间: {}",
+            self.telemetry.sample_ratio
         );
 
         // 认证端点 per-IP 限流校验

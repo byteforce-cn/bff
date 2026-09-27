@@ -110,16 +110,25 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
             state.clone(),
             token_refresh_middleware,
         ))
-        // O3：W3C traceparent 注入/传播（入口生成或续接，注入请求头供代理透传上游）
+        .layer(session_layer)
+        // O3：W3C traceparent 注入/传播。
+        // ⚠️ 层序敏感：必须位于 TraceLayer（外层，创建 http.request span）之内、
+        // 且在任何会创建子 span 的层（如 tower-sessions 的 `call` span）之外——
+        // 否则 Span::current() 不是请求 span，traceparent 的 span-id 会与导出 span 不一致。
         .layer(axum::middleware::from_fn(
             crate::middleware::trace_context::trace_context_middleware,
         ))
-        .layer(session_layer)
         .layer(request_id_layer)
         .layer(PropagateRequestIdLayer::new(
             axum::http::HeaderName::from_static("x-request-id"),
         ))
-        .layer(TraceLayer::new_for_http())
+        // O3：span 遵循 OTel HTTP semconv，入站 traceparent 作为 OTel 父上下文
+        // （导出层未注册时 set_parent 无副作用，行为与默认 TraceLayer 一致）
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(crate::middleware::trace_context::BffMakeSpan)
+                .on_response(crate::middleware::trace_context::RecordStatusOnResponse),
+        )
         .layer(cors_layer)
         // E6：gzip（SSE 已由谓词排除）
         .layer(compression_layer)

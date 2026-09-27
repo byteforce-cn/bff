@@ -31,3 +31,11 @@ auth_rate_limit:
     - "/login"
     - "/connect/logout"
   log_over_limit: true
+
+# O3：OTel 追踪导出（默认禁用）。接入 collector 后取消注释并调整端点/采样率：
+# - 采样建议：ParentBased 语义下有上游上下文的请求跟随上游采样位；根请求按 sample_ratio 采样
+# - endpoint 支持 https（rustls，读系统证书库），可配 BFF_TELEMETRY__OTLP_ENDPOINT 环境变量覆盖
+# telemetry:
+#   otlp_endpoint: "http://otel-collector.observability.svc:4317"
+#   service_name: "bff"
+#   sample_ratio: 0.1

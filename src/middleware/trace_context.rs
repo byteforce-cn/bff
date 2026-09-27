@@ -9,11 +9,19 @@
 //!   再交给上游的 OTel/链路系统实现端到端衔接。
 //!
 //! 格式：`00-<32hex trace-id>-<16hex parent-id>-<2hex flags>`
+//!
+//! O3 延伸（OTel 导出）：启用 `telemetry.otlp_endpoint` 后：
+//! - 请求 span 由 [`BffMakeSpan`] 构造，并把入站 `traceparent` 设为 OTel 远程父上下文；
+//! - 注入的 `traceparent` 优先取自本跳 span 的 OTel 上下文（[`crate::telemetry::current_span_traceparent`]），
+//!   使 collector 中的 span 树与上游收到的 parent 严格一致；
+//! - 未启用导出时自动回退到本模块的手动上下文（行为不变，既有测试不受影响）。
 
 use axum::body::Body;
 use axum::http::{HeaderName, Request};
 use axum::middleware::Next;
 use axum::response::Response;
+use std::time::Duration;
+use tower_http::trace::{DefaultOnResponse, MakeSpan, OnResponse};
 
 /// 头部名称（静态）。
 pub const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
@@ -97,8 +105,13 @@ fn new_span_id() -> String {
 }
 
 /// 中间件：入口解析/生成 traceparent，并把本跳上下文写入请求头（供代理透传上游）。
+///
+/// ⚠️ 层序敏感：调用方（`server::business`）必须把它放在 TraceLayer **之内**、
+/// 任何会创建子 span 的层（如 tower-sessions 的 `call` span）**之外**，
+/// 以保证 `Span::current()` 即请求 span（否则 traceparent 的 span-id 与导出 span 不一致）。
 pub async fn trace_context_middleware(mut req: Request<Body>, next: Next) -> Response {
-    let ctx = req
+    // 1. 手动上下文（无 OTel 导出层时的回退路径；含"入站非法则新建根"语义）
+    let manual = req
         .headers()
         .get(TRACEPARENT)
         .and_then(|v| v.to_str().ok())
@@ -107,15 +120,61 @@ pub async fn trace_context_middleware(mut req: Request<Body>, next: Next) -> Res
         .map(|parent| parent.child())
         .unwrap_or_else(TraceContext::new_root);
 
-    if let Ok(value) = ctx.to_header().parse() {
-        req.headers_mut().insert(TRACEPARENT, value);
+    // 2. 优先与导出的 OTel span 对齐（导出层未注册时返回 None → 回退手动上下文）：
+    //    上游收到的 parent-id 即 collector 中本跳 span 的 span_id，跨服务链路可衔接。
+    let value = crate::telemetry::current_span_traceparent().unwrap_or_else(|| manual.to_header());
+
+    if let Ok(v) = value.parse() {
+        req.headers_mut().insert(TRACEPARENT, v);
     }
 
     let mut resp = next.run(req).await;
-    if let Ok(value) = ctx.to_header().parse() {
-        resp.headers_mut().insert(TRACEPARENT, value);
+    if let Ok(v) = value.parse() {
+        resp.headers_mut().insert(TRACEPARENT, v);
     }
     resp
+}
+
+/// `TraceLayer` 的 span 构造器（替换默认实现）：
+///
+/// - span 名与字段遵循 OTel HTTP semconv（`http.request`/`http.method`/`http.target`/
+///   `http.status_code`/`otel.kind=server`）；
+/// - 入站 `traceparent` 经 [`crate::telemetry::context_from_traceparent`] 转为远程父上下文，
+///   在 span 创建时 `set_parent`（导出层未注册时仅存于扩展，无副作用）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BffMakeSpan;
+
+impl<B> MakeSpan<B> for BffMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> tracing::Span {
+        let span = tracing::info_span!(
+            "http.request",
+            "otel.kind" = "server",
+            "http.method" = %request.method(),
+            "http.target" = %request.uri().path(),
+            "http.status_code" = tracing::field::Empty,
+        );
+        if let Some(parent) = request
+            .headers()
+            .get(TRACEPARENT)
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::telemetry::context_from_traceparent)
+        {
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            span.set_parent(parent);
+        }
+        span
+    }
+}
+
+/// 响应阶段补充记录 `http.status_code`（保留默认的完成日志）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RecordStatusOnResponse;
+
+impl<B> OnResponse<B> for RecordStatusOnResponse {
+    fn on_response(self, response: &Response<B>, latency: Duration, span: &tracing::Span) {
+        span.record("http.status_code", response.status().as_u16());
+        DefaultOnResponse::new().on_response(response, latency, span);
+    }
 }
 
 #[cfg(test)]

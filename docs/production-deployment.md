@@ -152,6 +152,7 @@ kubectl -n bff apply -k deploy/k8s/
 | `oidc.providers[].callback_path` 的**新增值** | 回调路由在启动时按当时的路径集合注册；新增路径须重启后生效 |
 | `persistence.enabled` 及启动时对 runtime.yaml 的覆盖 | 加载期行为 |
 | `spa.dir` | ServeDir 每次构建（目录变更需部署新内容） |
+| `telemetry.*`（OTLP 导出开关/端点/采样率） | exporter 与 tracing 导出层在启动时构建 |
 | 日志级别 `RUST_LOG` | 订阅器启动初始化 |
 
 > 运维口径：管理端改完配置后，**热生效项立即验证**（curl 探针/目标路由）；
@@ -209,6 +210,28 @@ kubectl -n bff apply -k deploy/k8s/
 
 ---
 
+### 分布式追踪（OTel / OTLP）
+
+- **启用**：配置 `telemetry.otlp_endpoint`（OTLP/**gRPC**，如 `http://otel-collector.observability.svc:4317`；
+  `https` 走 rustls，读系统证书库）。未配置时**完全禁用**（无出站、无额外开销，仅为 traceparent 传播保留极小开销）。
+- **采样**：`telemetry.sample_ratio`（0–1，默认 1.0）为**根请求**采样率；带 `traceparent` 的请求按
+  W3C ParentBased 语义**跟随上游采样位**（上游已决定不采样时不额外采样）。
+- **span 语义**：每请求一个 `http.request`（`http.method` / `http.target` / `http.status_code` /
+  `otel.kind=server`）；入站 `traceparent` 作为**远程父上下文**，响应/出站 `traceparent` 的 span-id
+  与导出 span **严格一致** → collector/Jaeger/Tempo 中 BFF → 上游可串成同一 trace（已由契约测试锁定）。
+- **资源属性**：`service.name`（可配，默认 `bff`）、`service.version`、`deployment.environment`（取 `BFF_ENV`）。
+- **关停**：SIGTERM 排空后 flush 导出队列再退出；异常退出最多丢失批量窗口（默认 5s）内的 span。
+- **出网方向**：BFF 自身出网统一 **HTTP/1.1**（`.http1_only()`，供应链收敛）；OTLP 走独立 tonic 栈（HTTP/2）。
+- collector 最小接收示例（验证用）：
+
+  ```yaml
+  receivers: { otlp: { protocols: { grpc: { endpoint: 0.0.0.0:4317 } } } }
+  exporters: { debug: {} }
+  service: { pipelines: { traces: { receivers: [otlp], exporters: [debug] } } }
+  ```
+
+---
+
 ## 6. 安全清单（上线前逐项核对）
 
 - [ ] `server.public_base_url` 已配置为 https 对外域名（IdP 注册的 redirect_uri 一致）；
@@ -222,3 +245,4 @@ kubectl -n bff apply -k deploy/k8s/
 - [ ] 依赖审计（CI `audit` job + `.cargo/audit.toml` 例外清单）无新增未处置项。- [ ] **生产上游一律 https**（`routes[].config.upstream`、OIDC issuer/token endpoint）：
   内网自签配 `http_client.ca_cert_path`；双向 TLS 配 `client_cert_path/key_path`；
   示例配置中的 `http://localhost` 仅为本地联调，照抄上线属不安全默认值（审计附录 C）。
+- [ ] `telemetry.otlp_endpoint` 指向内网 collector（勿暴露公网；跨网段用 https 端点）。

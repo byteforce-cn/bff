@@ -45,11 +45,26 @@ tokio-tungstenite = { version = "0.21", features = ["connect"] }
 redis = { version = "1.7.1", features = ["tokio-comp", "connection-manager"] }
 time = "0.3"
 
+# O3：OTel 分布式追踪（OTLP/gRPC 导出）。
+# 版本锁定 0.27/0.28 线（与 tracing-subscriber 0.3 兼容的稳定 API；升级需回归 test_telemetry）。
+# tls 走 rustls（tls-roots 读取系统证书库），不引入 openssl（保持 E9 依赖图约束）。
+opentelemetry = { version = "0.27", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "grpc-tonic", "tls", "tls-roots"] }
+tracing-opentelemetry = { version = "0.28", default-features = false }
+
 [dev-dependencies]
 wiremock = "0.6"
 # E9：dev-deps 也统一 rustls（原默认特性引入 native-tls/openssl-sys，
 # 导致 `cargo test` 依赖系统 libssl-dev/pkg-config）
 reqwest = { version = "0.11", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+# 真实验签契约测试：进程内生成 RSA 密钥并以 RS256 签发 id_token（tests/test_oidc_signature.rs）。
+# 版本与 openidconnect 3.5 传递依赖一致（已在 Cargo.lock / registry 缓存中，无新增供应链面）。
+rsa = { version = "0.9", features = ["sha2"] }
+# OTel 契约测试：进程内 OTLP/gRPC collector（版本与 opentelemetry-otlp 0.27 对齐）
+opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 # E6：release 构建优化（体积/性能）
 [profile.release]

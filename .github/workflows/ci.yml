@@ -83,10 +83,11 @@ jobs:
           BFF_TEST_REDIS_URL: redis://127.0.0.1:6379
 
   coverage:
-    name: Coverage (cargo-llvm-cov ≥68% lines)
+    name: Coverage (cargo-llvm-cov ≥70% lines)
     runs-on: ubuntu-latest
-    # E5：行覆盖率门禁。当前基线 lines 70.71%（2026-09-27 实测，含 Redis 用例）；
-    # 阈值为下限护栏，新增测试后应逐步上调（棘轮策略）。
+    # E5：行覆盖率门禁。当前基线 lines 72.82%（2026-09-27 第五轮实测，含 Redis 用例；
+    # 补齐 WS 隧道/OTel/验签契约测试后自 70.71% 上调）；阈值为下限护栏，
+    # 新增测试后应逐步上调（棘轮策略）。
     services:
       redis:
         image: redis:7-alpine
@@ -129,7 +130,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Coverage gate
-        run: cargo llvm-cov --all-features --summary-only --fail-under-lines 68
+        run: cargo llvm-cov --all-features --summary-only --fail-under-lines 70
         env:
           BFF_TEST_REDIS_URL: redis://127.0.0.1:6379
 
