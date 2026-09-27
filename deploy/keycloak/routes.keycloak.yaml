@@ -1,0 +1,11 @@
+# Keycloak E2E 专用路由表（挂载替换默认 /app/config/routes/routes.yaml）。
+#
+# 仅保留一条需认证的代理路由，指向栈内 nginx 回显上游：
+# 验证「真实 IdP 令牌 → BFF 会话 → Bearer 注入 → 上游实际收到」全链路。
+routes:
+  - path: "/api/echo"
+    methods: ["GET"]
+    auth_required: true
+    type: proxy
+    config:
+      upstream: "http://upstream-echo:8081"

@@ -170,6 +170,25 @@ fn is_loopback_host(host: &str) -> bool {
     matches!(hostname, "localhost" | "127.0.0.1" | "::1")
 }
 
+/// 计算授权请求的附加 scope 列表。
+///
+/// `openidconnect` 的 `authorize_url` 已隐式注入 `openid`（crate 源码 lib.rs），
+/// 若配置再写一次 `openid` 会生成 `scope=openid+openid+...`；
+/// 部分严格实现的 IdP 会以 `invalid_scope` 拒绝（Keycloak 契约验证实测确认）。
+/// 此处按大小写不敏感去重（视为已含 openid），并保留其余 scope 的配置顺序。
+fn authorize_scopes(config_scopes: &[String]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert("openid".to_string());
+    let mut out = Vec::new();
+    for scope in config_scopes {
+        let s = scope.trim();
+        if !s.is_empty() && seen.insert(s.to_ascii_lowercase()) {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
 /// GET /login — 发起授权码 + PKCE 流程
 pub async fn login(
     State(state): State<AppState>,
@@ -195,8 +214,8 @@ pub async fn login(
         CsrfToken::new_random,
         Nonce::new_random,
     );
-    for scope in &provider.scopes {
-        req = req.add_scope(Scope::new(scope.clone()));
+    for scope in authorize_scopes(&provider.scopes) {
+        req = req.add_scope(Scope::new(scope));
     }
     let (auth_url, csrf, nonce) = req.set_pkce_challenge(pkce_challenge).url();
 
@@ -303,6 +322,12 @@ pub async fn callback(
         .await
         .context("写入 session 失败")?;
     session.remove_value(&flow_key(&provider.id)).await.ok();
+
+    // tower-sessions 的 `cycle_id()` 会把内部 session id 置空（crate 语义：
+    // 保存时由 store.create 重新分配），必须显式 save 后才能读到新 id；
+    // 否则 `register_session` 的 `session.id()` 为 None → 管理端会话列表永远为空
+    // （Keycloak 真实 IdP 契约验证实测发现，S2 会话轮换的回归）。
+    session.save().await.context("保存会话失败")?;
 
     register_session(&state, &session, &provider.id, &sub).await;
     metrics::counter!("bff_oidc_login_total", "provider" => provider.id.clone()).increment(1);
@@ -668,19 +693,27 @@ async fn do_refresh(
 }
 
 pub async fn register_session(state: &AppState, session: &Session, provider: &str, sub: &str) {
-    if let Some(id) = session.id() {
-        let now = now_unix();
-        state.sessions.write().await.insert(
-            id.to_string(),
-            SessionInfo {
-                id: id.to_string(),
-                provider: provider.into(),
-                sub: sub.into(),
-                created_at: now,
-                last_seen: now,
-            },
+    let Some(id) = session.id() else {
+        // 防御未来回归：cycle_id 后未 save（或 crate 语义变化）时 id 为 None，
+        // 静默跳过会导致管理端会话列表失真且难以定位。
+        tracing::warn!(
+            provider,
+            sub,
+            "会话索引登记跳过：tower-sessions 尚未分配 session id（cycle_id 后缺 save？）"
         );
-    }
+        return;
+    };
+    let now = now_unix();
+    state.sessions.write().await.insert(
+        id.to_string(),
+        SessionInfo {
+            id: id.to_string(),
+            provider: provider.into(),
+            sub: sub.into(),
+            created_at: now,
+            last_seen: now,
+        },
+    );
 }
 
 pub async fn unregister_session(state: &AppState, session: &Session) {
@@ -703,7 +736,7 @@ pub async fn current_tokens(session: &Session) -> Option<StoredTokens> {
 
 #[cfg(test)]
 mod redirect_tests {
-    use super::validate_redirect;
+    use super::{authorize_scopes, validate_redirect};
 
     #[test]
     fn allows_same_origin_paths() {
@@ -729,5 +762,23 @@ mod redirect_tests {
         assert!(!validate_redirect(""));
         // 百分号编码的反斜杠（浏览器不会二次解码，保守拒绝）
         assert!(!validate_redirect("/%5Cevil.com"));
+    }
+
+    #[test]
+    fn scopes_dedup_openid_and_duplicates() {
+        let cfg = vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "EMAIL".to_string(),
+            "email".to_string(),
+            " openid ".to_string(),
+            "".to_string(),
+        ];
+        // openid 由 crate 隐式注入 → 配置中的全部变体被跳过；
+        // 其余 scope 大小写不敏感去重且保持顺序。
+        assert_eq!(authorize_scopes(&cfg), vec!["profile", "EMAIL"]);
+        // 配置本身不含 openid 时不会额外注入（由 crate 负责）
+        assert_eq!(authorize_scopes(&["profile".into()]), vec!["profile"]);
+        assert!(authorize_scopes(&[]).is_empty());
     }
 }

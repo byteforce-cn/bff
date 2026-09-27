@@ -23,7 +23,11 @@ session:
   cookie_name: "BFF_SESSION"
   secure: true                  # P1-3: 默认安全，LB 做 TLS 终止
   http_only: true
-  same_site: "Strict"             # P1-1: CSRF 保护
+  # 跨站点 IdP（Okta/Entra/独立域 Keycloak 等）的回调是跨站顶层导航：
+  # SameSite=Strict 会使浏览器不带会话 Cookie 请求回调 → 登录必败
+  # （Keycloak 真实 IdP 契约验证实测）。CSRF 主防护为授权流程的 state + PKCE；
+  # Lax 仍阻断跨站 POST。同站 IdP（同一注册域子域）部署可显式改回 Strict。
+  same_site: "Lax"
 
 admin:
   ip_whitelist:

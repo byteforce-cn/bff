@@ -38,6 +38,7 @@ async fn oidc_full_login_flow() {
         output_mapping: OutputMapping::default(),
     });
     let state = common::make_state(cfg);
+    let state_check = state.clone();
     let bff = common::spawn_business(state).await;
     let client = common::test_client();
 
@@ -67,6 +68,24 @@ async fn oidc_full_login_flow() {
         .await
         .unwrap();
     assert!(resp.status().is_redirection(), "回调应重定向: {:?}", resp);
+
+    // 回归：S2 会话轮换（cycle_id）后，回调必须先 session.save() 再登记会话索引，
+    // 否则 register_session 读到的 session.id() 为 None → 管理端会话列表永远为空
+    // （Keycloak 真实 IdP 契约验证实测发现）。
+    let sessions: Vec<_> = state_check
+        .sessions
+        .read()
+        .await
+        .values()
+        .cloned()
+        .collect();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "登录后会话索引应登记 1 条: {:?}",
+        sessions
+    );
+    assert_eq!(sessions[0].provider, "mock");
 
     // 3. 带会话访问受保护代理资源
     let resp = client

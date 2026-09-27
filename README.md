@@ -9,8 +9,10 @@
 
 > ⚠️ **状态**：M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、M3 可观测性与运营资产
 > 已落地并通过测试（详见 [docs/production-progress.md](docs/production-progress.md)）；
-> **P0 阻断项已全部关闭**。上线前仍需：真实 IdP 兼容性验证（非 Spring AS）、外部渗透测试、
-> 目标负载/SLO 基线标定（见 [docs/production-deployment.md](docs/production-deployment.md) §SLO）。
+> **P0 阻断项已全部关闭**；**真实 IdP 兼容性已用 Keycloak 26 完成契约验证**
+> （登录/回调/刷新/登出/Bearer/Redis 会话全链路，见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）。
+> 上线前仍需：外部渗透测试、目标负载/SLO 基线标定
+> （见 [docs/production-deployment.md](docs/production-deployment.md) §SLO）。
 > 生产环境必须通过环境变量/密钥管理注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
 > 部署与运维：[production-deployment.md](docs/production-deployment.md) · [runbook.md](docs/runbook.md)。
 
@@ -22,7 +24,8 @@
 - **DeepSeek V4**
 
 当前项目已完成主要生产化改造（P0 阻断全部关闭，见上述进度文档）；
-真实 IdP 兼容性、渗透测试与 SLO 基线标定仍属上线前 Should 项
+真实 IdP 兼容性已用 Keycloak 26 完成契约验证（`deploy/keycloak/`），
+渗透测试与 SLO 基线标定仍属上线前 Should 项
 
 > AI 生成内容均经过人工审查与测试验证。
 
@@ -112,6 +115,7 @@ make check           # fmt + clippy + test 全量检查
 | [docs/production-progress.md](docs/production-progress.md) | 实施进度与验证证据 |
 | [docs/runbook.md](docs/runbook.md) | 告警处置手册（Runbook） |
 | [docs/token-exchange-rfc8693.md](docs/token-exchange-rfc8693.md) | RFC 8693 Token Exchange 设计与运维 |
+| [deploy/keycloak/README.md](deploy/keycloak/README.md) | Keycloak 真实 IdP 契约验证（一键 E2E） |
 | [benchmark/README.md](benchmark/README.md) | k6 压测说明 |
 
 ## 🤝 贡献

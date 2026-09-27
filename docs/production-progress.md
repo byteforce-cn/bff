@@ -5,10 +5,10 @@
 
 | 项目 | 内容 |
 | ---- | ---- |
-| 记录日期 | 2026-09-27（第二轮：M1 收尾 + M2 安全主体 + M3 观测 + P0-4 持久化） |
-| 实施阶段 | **P0 全部关闭**；M2 安全主体完成；M3 观测/运营资产完成；M4 灰度待环境 |
-| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**156 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored） |
-| 新增测试 | 本轮新增 12 个用例（持久化×3、provider 端点×1、映射/限流/趋势/重定向单测等）；含既有全量回归 |
+| 记录日期 | 2026-09-27（第三轮：Keycloak 真实 IdP 契约验证 + 3 个真实缺陷修复） |
+| 实施阶段 | **P0 全部关闭**；M2 安全主体完成；M3 观测/运营资产完成；真实 IdP 兼容性已验证；M4 灰度待环境 |
+| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**157 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored） |
+| 新增测试 | 第三轮：scope 去重单测（handlers）+ 会话索引回归断言（test_oidc_flow）；累计含既有全量回归 |
 
 ---
 
@@ -267,6 +267,54 @@ $ curl ... /config/export | grep -c healthz-check
 
 
 
+## 1.6 第三轮：Keycloak 真实 IdP 契约验证（2026-09-27）
+
+> 对应审计 v2 §1.1「未审计副作用」与 §2「上线前 Should 项」之首：
+> **生产 IdP 兼容性未验证（此前仅 Spring Authorization Server / Mock IdP 测过）**。
+> 本轮以 Docker 运行 **Keycloak 26**（非 Spring AS 的真实 OIDC 实现）完成契约验证，
+> 期间发现并修复 **3 个真实缺陷**（2 个既有实现缺陷 + 1 个 S2 修复引入的回归）。
+
+### A. 新增交付资产（`deploy/keycloak/`）
+
+| 文件 | 作用 |
+| --- | --- |
+| `realm-bff.json` | Keycloak realm 导入：机密客户端（secret + 强制 PKCE S256）、真实登录用户、`accessTokenLifespan=90s`（刷新断言）、realm 事件记录、已注册的回调/登出回跳 URI |
+| `providers.keycloak.yaml` | BFF provider 配置（issuer 与 Keycloak `--hostname` 严格一致；**不跳过验签**——真实 RS256/JWKS） |
+| `routes.keycloak.yaml` | 最小路由：`/api/echo` → 回显上游（Bearer 注入断言） |
+| `echo-nginx.conf` | 回显 `Authorization` 的最小上游（nginx:1.27-alpine） |
+| `docker-compose.keycloak.yml` | 叠加层：Keycloak + 回显上游 + BFF（`BFF_ENV=prod` + Redis + nginx TLS 全量形态） |
+| `e2e-keycloak.sh` | 一键验收：起栈→就绪→8 组断言→清理（`KEEP_STACK=1` 保留现场） |
+| `README.md` | 使用说明、断言清单与已知本地特性 |
+
+### B. 验收结果（8/8 全绿，2026-09-27 实测）
+
+```text
+== 1) Keycloak discovery 契约  ✅ issuer/end_session_endpoint/S256/client_secret_post + BFF 容器内经 host-gateway 真实 discovery
+== 2) 登录重定向             ✅ redirect_uri 恒为 public_base_url 推导值（伪造 Host ×2 未污染）
+== 3) 真实登录               ✅ Cookie HttpOnly+Secure+SameSite=Lax；授权码+PKCE+RS256/JWKS 验签；管理端会话索引已登记
+== 4) Bearer 注入            ✅ 上游收到真实 Keycloak 签发的 access token（iss/azp/typ 校验）
+== 5) Redis 会话             ✅ bff 容器重启后登录态不丢（会话不落进程内存）
+== 6) 令牌刷新               ✅ SWR 后台刷新（旧≠新 token）+ Keycloak REFRESH_TOKEN 事件
+== 7) RP-Initiated Logout    ✅ discovery end_session_endpoint 回跳 + 本地会话清除 + Keycloak LOGOUT 事件
+== 8) 汇总                   ✅ 全链路通过
+```
+
+### C. 发现并修复的真实缺陷（3 项）
+
+| # | 缺陷 | 根因 | 修复 | 验证 |
+| --- | --- | --- | --- | --- |
+| K1 | 授权请求 `scope=openid+openid+profile+email` **重复注入**（严格 IdP 可回 `invalid_scope`） | `openidconnect` 的 `authorize_url` 隐式注入 `openid`（crate lib.rs:1065），配置再写一次即重复 | `authorize_scopes()` 大小写不敏感去重（视 `openid` 已存在）+ 空/重复过滤；单测 3 例 | E2E §2 断言 `scope=openid+profile+email` |
+| K2 | **管理端会话列表永远为空**（登录后不登记）——S2 会话轮换的回归 | `tower-sessions` 的 `cycle_id()` 会把内部 session id 置 `None`（core 0.12.3 session.rs:848），而 `register_session` 在其后读 `session.id()` → 恒 `None` 静默跳过 | 回调 `cycle_id` 后显式 `session.save()`（store 分配新 id）再登记；`register_session` 对 `None` 增加显式告警；集成回归断言 | E2E §3 列表出现 `"provider":"keycloak"`；`test_oidc_flow::oidc_full_login_flow` |
+| K3 | `SameSite=Strict` 使**跨站点 IdP 登录必败**（回调丢会话 Cookie → 401「授权流程不存在」） | 跨站点 IdP 回调是跨站顶层导航，浏览器不携带 Strict Cookie；curl 不强制 SameSite，既有 E2E 无法暴露 | 默认改 `Lax`（`base.yaml` + `SessionConfig::default()`），同站 IdP 可显式回退 Strict；CSRF 主防护为 state+PKCE | E2E 属性断言（HttpOnly+Secure+SameSite=Lax）；Keycloak 登录/回调 Set-Cookie 实测 |
+
+### D. 环境注意（本地验收限定）
+
+- Keycloak 以 `start-dev` + 明文 HTTP + bootstrap/测试凭据运行，**仅限隔离的开发/验收环境**（生产部署应启用 TLS、真实凭据与 `start` 模式）；
+- `host.docker.internal` 为「浏览器与 BFF 容器共用同一 issuer 字面量」的本地手段（BFF 经 `extra_hosts`、脚本经 `--resolve`）；真实部署使用统一 DNS 名；
+- 沙箱无浏览器，K3 以「Set-Cookie 属性断言 + SameSite 规范」验证；浏览器级跨站实测属部署环境动作。
+
+---
+
 ## 2. 剩余事项（上线前 Should / 灰度期迭代）
 
 > P0 阻断项已全部关闭（含 P0-4；P0-2 的“https + LB 全链路”已提供本地 E2E 与 K8s 清单，
@@ -274,7 +322,7 @@ $ curl ... /config/export | grep -c healthz-check
 
 | 优先级 | 项 | 说明与建议 |
 | --- | --- | --- |
-| 上线前 | **真实 IdP 兼容性验证** | 非 Spring AS（Keycloak/Okta/Entra）走一遍登录/回调/刷新/登出（F12 已按 discovery 实现，仍需契约实测） |
+| ✅ 已完成 | **真实 IdP 兼容性验证** | 2026-09-27 用 Keycloak 26（非 Spring AS）完成契约验证（见 §1.6）：登录/回调/刷新/登出/Bearer 注入/Redis 会话全链路；期间修复 3 个真实缺陷（K1–K3） |
 | 上线前 | **外部渗透测试** | 重点：OIDC 回调、`/pipeline`、代理注入、管理面（审计 §M2 DoD） |
 | 上线前 | **SLO/负载基线** | 按 `docs/production-deployment.md` §SLO 模板填入目标 QPS/并发并反推限流与 HPA |
 | 上线前 | 生产域名 HTTPS 终验 | 用 `deploy/https/` 同构流程在预发执行并留档 |
@@ -286,11 +334,15 @@ $ curl ... /config/export | grep -c healthz-check
 
 
 
-## 3. 变更文件清单（第二轮增量）
+## 3. 变更文件清单（历轮增量）
 
 **新增**：`src/middleware/client_ip.rs`、`src/middleware/trace_context.rs`、`tests/test_config_persistence.rs`、`examples/mock_idp.rs`、`deploy/k8s/*`、`deploy/https/*`、`deploy/grafana/bff-dashboard.json`、`deploy/prometheus/bff-alerts.yaml`、`.cargo/audit.toml`、`docs/{production-deployment,runbook,token-exchange-rfc8693}.md`。
 
 **修改**：`src/config.rs`（persistence/websocket/response limit/熔断窗口/admin 加固字段/会话 TTL/路由级超时/回调路径校验/F8 注释）、`src/state.rs`（持久化/GC/watcher/http_stream/哈希）、`src/provider/{cache,lock,session,redis}.rs`、`src/middleware/{circuit_breaker,ip_rate_limit,rate_limit_skip,token_refresh,mod}.rs`、`src/server/{business,proxy,sse_proxy,tunnel,route_dispatcher,mapping,token_exchange}.rs`、`src/oidc/{handlers,client}.rs`、`src/admin/{mod,config_api,runtime_api}.rs`、`src/orchestration/step.rs`、`src/main.rs`、`config/{base.yaml,env/prod.yaml}`、`docker-compose.yml`、`Cargo.toml`（profile/dev-deps）、`.github/workflows/{ci,release}.yml`、`admin-ui/src/{lib/api.ts,hooks/useAuth.tsx,pages/Providers.tsx}`、`frontend/src/lib/api.ts`、`README.md`、本文件。
+
+**第三轮新增**：`deploy/keycloak/{realm-bff.json,providers.keycloak.yaml,routes.keycloak.yaml,echo-nginx.conf,docker-compose.keycloak.yml,e2e-keycloak.sh,README.md}`。
+
+**第三轮修改**：`src/oidc/handlers.rs`（scope 去重 `authorize_scopes`、cycle_id 后显式 save 再登记、登记跳过告警）、`src/config.rs`（会话 Cookie 默认 SameSite Lax）、`config/base.yaml`（同上）、`tests/test_oidc_flow.rs`（会话索引回归断言）、`README.md`、`docs/production-deployment.md`、`CHANGELOG.md`、本文件。
 
 ---
 
@@ -325,6 +377,9 @@ bash deploy/https/e2e.sh
 
 # 7) K8s 清单静态校验（可选）
 kubectl apply -k deploy/k8s --dry-run=client
+
+# 8) Keycloak 真实 IdP 契约验证（Docker；首次拉取镜像，约 3–5 分钟）
+bash deploy/keycloak/e2e-keycloak.sh            # 结束自动清理；KEEP_STACK=1 保留现场
 ```
 
 ---
@@ -341,3 +396,10 @@ kubectl apply -k deploy/k8s --dry-run=client
   （允许 Mock IdP 跳过验签），**不可用于生产**。
 - CI `audit` 例外清单（`.cargo/audit.toml`）为已知缺口，新增例外需评审并记录整改计划。
 - `deploy/https/e2e.sh` 依赖宿主机 Mock IdP 进程（`examples/mock_idp.rs`），仅用于本地/验收演示。
+- `deploy/keycloak/` 为真实 IdP 契约验证资产：Keycloak 以 `start-dev`/明文/测试凭据运行，
+  **仅限隔离环境**；生产应使用 `start` 模式 + TLS + 真实凭据与密钥管理。
+- **会话 Cookie 默认 `SameSite=Lax`（第三轮 K3）**：跨站点 IdP（不同注册域）回调/登出回跳
+  是跨站顶层导航，Strict 会丢 Cookie 导致登录失败；同站 IdP（同一注册域子域）部署可显式改
+  `session.same_site: Strict` 收紧（CSRF 主防护为授权流程 state+PKCE，Lax 仍阻断跨站 POST）。
+- K2（会话索引登记回归）已修复；若后续升级 `tower-sessions`，需复核 `cycle_id()`/
+  `session.id()` 语义（已在 `register_session` 增加 None 告警兜底）。

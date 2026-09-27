@@ -1,0 +1,74 @@
+{
+  "realm": "bff",
+  "displayName": "BFF 真实 IdP 契约验证",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "accessTokenLifespan": 90,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "eventsEnabled": true,
+  "eventsExpiration": 7200,
+  "enabledEventTypes": [
+    "LOGIN",
+    "LOGIN_ERROR",
+    "LOGOUT",
+    "LOGOUT_ERROR",
+    "CODE_TO_TOKEN",
+    "CODE_TO_TOKEN_ERROR",
+    "REFRESH_TOKEN",
+    "REFRESH_TOKEN_ERROR",
+    "TOKEN_EXCHANGE",
+    "TOKEN_EXCHANGE_ERROR"
+  ],
+  "clients": [
+    {
+      "clientId": "bff",
+      "name": "BFF 中间件（Keycloak 契约验证）",
+      "description": "Backend-For-Frontend OIDC 客户端；授权码 + PKCE(S256)，机密客户端",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "bff-keycloak-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "https://localhost:9443/auth/callback",
+        "http://localhost:8080/auth/callback"
+      ],
+      "webOrigins": [
+        "https://localhost:9443",
+        "http://localhost:8080"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "https://localhost:9443/*##http://localhost:8080/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "bff-user",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bff-user@example.com",
+      "firstName": "BFF",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bff-pass",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

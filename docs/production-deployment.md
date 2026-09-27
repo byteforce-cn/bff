@@ -2,7 +2,8 @@
 
 > 配套文档：[production-readiness.md](production-readiness.md)（审计与路线图）、
 > [production-progress.md](production-progress.md)（实施与验证记录）、
-> [runbook.md](runbook.md)（告警处置手册）。
+> [runbook.md](runbook.md)（告警处置手册）、
+> [../deploy/keycloak/README.md](../deploy/keycloak/README.md)（Keycloak 真实 IdP 契约验证）。
 
 ---
 
@@ -38,6 +39,9 @@ flowchart LR
 - 经 LB 的 XFF 语义按 **nginx `proxy_add_x_forwarded_for`**（每跳追加其对端地址）
   标定 `auth_rate_limit.trusted_proxies` 与 `admin.trusted_proxies`：
   `浏览器 → LB → BFF` 单层 LB 填 `1`；直连填 `0`（不信任 XFF）。
+- **会话 Cookie 默认 `SameSite=Lax`**：跨站点 IdP（不同注册域，如 Okta/Entra/独立域 Keycloak）
+  的回调与登出回跳是跨站顶层导航，`Strict` 会丢 Cookie 导致登录失败（Keycloak 契约验证实测）；
+  同站 IdP（同一注册域子域）部署可显式改 `session.same_site: Strict`（CSRF 主防护为 state+PKCE）。
 
 ---
 

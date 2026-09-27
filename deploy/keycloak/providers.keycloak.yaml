@@ -1,0 +1,25 @@
+# Keycloak 真实 IdP 契约验证专用 provider 配置。
+# 由 deploy/keycloak/docker-compose.keycloak.yml 挂载到容器
+# /app/config/oidc/providers.yaml（替换默认示例 provider）。
+#
+# 重要约束：
+# - issuer_url 必须与 Keycloak 启动参数 `--hostname` 完全一致
+#   （本栈为 http://host.docker.internal:8180）：
+#   openidconnect 客户端会在 discovery 时校验 issuer 字面量相等；
+# - BFF 容器经 compose `extra_hosts: host.docker.internal:host-gateway`
+#   （deploy/https 叠加层已配置）访问宿主机发布端口；
+# - 不设置 insecure_skip_id_token_verification：走真实 RS256 + JWKS 验签
+#   （BFF_ENV=prod 防呆也会拒绝跳过验签）。
+oidc:
+  providers:
+    - id: keycloak
+      display_name: "Keycloak 26（真实 IdP 契约验证）"
+      issuer_url: "http://host.docker.internal:8180/realms/bff"
+      client_id: "bff"
+      # 本地一次性 Keycloak 的测试凭据（与 realm-bff.json 一致，仅验收用）
+      client_secret: "bff-keycloak-secret"
+      callback_path: "/auth/callback"
+      scopes: ["openid", "profile", "email"]
+      # 与 realm 的 accessTokenLifespan=90s 配合：
+      # 登录后 ~30s 进入刷新窗口，E2E 据此验证 SWR 后台刷新
+      refresh_skew_secs: 60

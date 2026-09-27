@@ -1,0 +1,71 @@
+# Keycloak 真实 IdP 契约验证叠加层（必须叠加在根 compose + https 层之上）：
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f deploy/https/docker-compose.https.yml \
+#     -f deploy/keycloak/docker-compose.keycloak.yml up -d
+#
+# 拓扑：
+#   curl/浏览器（宿主，--resolve host.docker.internal→127.0.0.1）
+#     ──https:9443──▶ nginx(TLS 终止) ──▶ bff:8080（BFF_ENV=prod + Redis provider，
+#                                          public_base_url=https://localhost:9443）
+#         ├─ OIDC ──▶ http://host.docker.internal:8180（Keycloak 26，宿主发布端口）
+#         └─ /api/echo ──▶ upstream-echo:8081（回显 Authorization，验收 Bearer 注入）
+#
+# 说明：
+# - Keycloak `--hostname=http://host.docker.internal:8180` 必须与
+#   providers.keycloak.yaml 的 issuer_url 完全一致（discovery 校验 issuer 字面量相等）；
+# - 8180 需对 BFF 容器可达（容器经 extra_hosts host-gateway 访问宿主发布端口），
+#   因此不能只绑定 127.0.0.1；
+# - BFF_ENV=prod：全量生产防呆（拒绝 memory provider / 跳过验签 / 弱口令等），
+#   密钥由 e2e-keycloak.sh 生成注入（BFF_ADMIN_TOKEN / BFF_SECRET / BFF_SECRET_SALT）；
+# - 本层把 https 叠加层的 dev 演示 provider（providers.demo.yaml）替换为
+#   providers.keycloak.yaml（真实 RS256 验签，无任何跳过）。
+#
+# 一键验收：`bash deploy/keycloak/e2e-keycloak.sh`（自行完成 up/wait/断言，见脚本头部）。
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command:
+      - start-dev
+      - --import-realm
+      - --hostname=http://host.docker.internal:8180
+      - --http-port=8180
+      - --health-enabled=true
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      # 供宿主脚本与浏览器(--resolve)访问；BFF 容器经 host-gateway 走同一端口
+      - "8180:8180"
+    volumes:
+      - ./deploy/keycloak/realm-bff.json:/opt/keycloak/data/import/realm-bff.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "{ printf 'GET /health/ready HTTP/1.0\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q UP <&3; } 3<>/dev/tcp/127.0.0.1/9000",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  # 回显上游：把收到的 Authorization 原样写回（Bearer 注入断言用）
+  upstream-echo:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/keycloak/echo-nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+
+  bff:
+    environment:
+      # 覆盖 https 叠加层的 dev：以生产形态验证（Redis provider + 全量防呆）
+      BFF_ENV: prod
+      BFF_PERSISTENCE__ENABLED: "false" # 本验收不落盘（持久化闭环见根 compose / K8s 形态）
+    volumes:
+      # provider / 路由替换：Keycloak 为唯一 IdP；/api/echo 用于 Bearer 注入验收
+      - ./deploy/keycloak/providers.keycloak.yaml:/app/config/oidc/providers.yaml:ro
+      - ./deploy/keycloak/routes.keycloak.yaml:/app/config/routes/routes.yaml:ro

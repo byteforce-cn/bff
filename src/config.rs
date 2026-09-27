@@ -709,7 +709,10 @@ fn default_true() -> bool {
     true
 }
 fn default_same_site() -> String {
-    "Strict".into()
+    // 跨站点 IdP 回调是跨站顶层导航：Strict 会丢会话 Cookie 导致登录失败
+    // （Keycloak 真实 IdP 契约验证实测）；Lax 为 OIDC RP 的通行默认，
+    // CSRF 由授权流程的 state + PKCE 把关。同站 IdP 部署可显式改 Strict。
+    "Lax".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

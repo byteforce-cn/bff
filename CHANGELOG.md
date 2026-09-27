@@ -14,6 +14,9 @@
 - 管理端口（`:8443`）：配置导入/导出（脱敏 + 热重载）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
 - 可插拔 Provider（缓存 / 锁 / Session，POC 为内存实现）
 - 静态 SPA 发布（含前端路由 fallback）
+- **Keycloak 真实 IdP 契约验证资产（`deploy/keycloak/`）**：realm 导入、compose 叠加层、
+  一键 E2E（授权码+PKCE / RS256+JWKS 验签 / SWR 令牌刷新 / RP-Initiated Logout /
+  Bearer 注入 / Redis 会话跨容器重启）
 
 ### Changed
 
@@ -21,4 +24,7 @@
 
 ### Fixed
 
-- 无（首个公开版本）
+- 授权请求 scope 去重：修复 `openid` 重复注入可能触发严格 IdP `invalid_scope`（Keycloak 契约验证发现）
+- 修复会话轮换（`cycle_id`）后的登记回归：管理端会话列表在登录后不再为空
+- 会话 Cookie 默认 `SameSite` 由 `Strict` 调整为 `Lax`：跨站点 IdP 回调不再丢会话 Cookie
+  （同站 IdP 部署可显式改回 `Strict`）
