@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-27
+
 ### Added
 
 - 项目初始化：Rust BFF 核心（Axum）+ 管理端 UI（React）+ 测试组件（IAM / fakesvc）
@@ -49,6 +51,10 @@
 
 ### Fixed
 
+- **CI frontend 作业 pnpm 顺序缺陷**：`setup-node` 的 `cache: pnpm` 要求 pnpm 已在 PATH，
+  原顺序（Set up Node 22 → Install pnpm）导致该 job 在
+  `Unable to locate executable file: pnpm` 上必挂；现调整为先安装 pnpm 再配置 Node
+  （与 rust/coverage 作业同序），CI 首度具备全绿条件
 - **映射引擎静默失效（第六轮补测发现，`tests/test_route_dispatch.rs`）**：
   `InputMapping.from_path` 从未生效（提取阶段以**目标键**产出，合并层却用模板串
   `path./api/{id}` 当 JSON 路径查询 → 恒 Null，F9 实际未接线）；`from_env` 文档推荐写法

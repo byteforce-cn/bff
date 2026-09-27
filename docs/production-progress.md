@@ -6,8 +6,8 @@
 | 项目 | 内容 |
 | ---- | ---- |
 | 记录日期 | 2026-09-27（第六轮：OIDC 依赖栈迁移 openidconnect 4.0 + 路由分发器覆盖补测，修复 2 个映射静默失效缺陷） |
-| 实施阶段 | **P0 全部关闭**；M2/M3 完成；真实 IdP 兼容性已验证（Keycloak 26）；SLO 基线已标定；OTel OTLP 导出就绪；**审计例外清零（仅余停维类告警）**；上线前仅剩**环境类动作**（外部渗透测试、生产域名 HTTPS 终验） |
-| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**206 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 79.03%**（CI 门禁上调至 ≥75，见 §1.9-C）/ `cargo audit --no-fetch` ✅（无漏洞类告警；仅 1 条停维类，含界定） |
+| 实施阶段 | **P0 全部关闭**；M2/M3 完成；真实 IdP 兼容性已验证（Keycloak 26）；SLO 基线已标定；OTel OTLP 导出就绪；**审计例外全部界定（2 条停维 + 1 条不可达漏洞类）**；上线前仅剩**环境类动作**（外部渗透测试、生产域名 HTTPS 终验） |
+| 门禁状态 | `cargo fmt` ✅ / `cargo clippy -D warnings` ✅ / `cargo test` ✅（**206 passed / 0 failed**，另有 2 个依赖 fakesvc 的用例 ignored）/ 覆盖率 **lines 79.03%**（CI 门禁上调至 ≥75，见 §1.9-C）/ `cargo audit --no-fetch` ✅（无未界定告警；3 条例外均含界定：serde_yaml 停维、rustls-pemfile 停维、rsa Marvin 私钥运算不可达） |
 | 新增测试 | 第六轮：路由分发 ×13 + 映射回归 ×4 + 分发器单测 ×6（并修复 `from_path`/`from_env` 两个静默失效缺陷） |
 
 ---
@@ -187,7 +187,7 @@ BFF_ENV=prod BFF_PROVIDER__REDIS_URL=redis://127.0.0.1:6379 \
 
 | 项 | 实施 |
 | --- | --- |
-| **E4/E14** 供应链 | CI 新增 RustSec `audit` job；`.cargo/audit.toml` 例外清单（serde_yaml 停维=figment 锁定、影响界定与整改计划；idna 0.3=仅测试构建） |
+| **E4/E14** 供应链 | CI 新增 RustSec `audit` job；`.cargo/audit.toml` 例外清单（serde_yaml 停维=figment 锁定、影响界定与整改计划；idna 0.3=仅测试构建，后随第六轮 OIDC 栈迁移已移除） |
 | **E9** 构建依赖 | dev-deps reqwest 改 `default-features=false + rustls-tls` → **整个依赖图移除 openssl-sys**（`cargo tree -e normal` 零命中） |
 | **E6** 性能 | 业务/管理路由启用 gzip（谓词排除 `text/event-stream`）；`[profile.release]` lto=thin + codegen-units=1 + strip |
 | **E1/E13** CI | （上轮）admin-ui 构建前置 + `-D warnings` 收敛到 clippy 步骤 |
@@ -482,7 +482,7 @@ CI 覆盖率门禁：--fail-under-lines 68 → **70**（棘轮策略）
 | 依赖升级 | `openidconnect 3.5 → 4.0.1`、`oauth2 4.4 → 5.0.0`、`reqwest 0.11 → 0.12.28`（含 dev-deps） | 整体移除 h2 0.3 / rustls 0.21 / hyper 0.14 / rustls-webpki 0.101 / idna 0.3 旧栈（`cargo tree` 零命中） |
 | 出网客户端 | 删除 `src/oidc/http_client.rs` 闭包适配层 | oauth2 5 起 `reqwest::Client` 直接实现 `AsyncHttpClient`：`request_async`/`discover_async` 直传 `&state.oidc_http`（R13 语义不变：15s 总超时、禁重定向、连接池复用） |
 | typestate | `CoreClient` 4.0 起为 typestate 泛型：新增 `BffCoreClient` 别名；`build_client` 以 discovery 元数据的 `token_endpoint` 经 `set_token_uri` 升级 | provider 缺 `token_endpoint` 由「换码时失败」提前为**构建期 fail-fast** |
-| 审计例外 | 删除 RUSTSEC-2026-0258（h2 0.3）、RUSTSEC-2026-0098/0099/0104（rustls-webpki 0.101）、RUSTSEC-2024-0421（idna 0.3） | `cargo audit` 现无漏洞类告警；新增 1 条**停维类**（rustls-pemfile ← tonic，已界定） |
+| 审计例外 | 删除 RUSTSEC-2026-0258（h2 0.3）、RUSTSEC-2026-0098/0099/0104（rustls-webpki 0.101）、RUSTSEC-2024-0421（idna 0.3） | `cargo audit` 无未界定告警；例外清单现存 **3 条**（均含界定）：serde_yaml 停维 ← figment、rustls-pemfile 停维 ← tonic、rsa Marvin（生产仅公钥验签，私钥运算不可达） |
 
 验证：`cargo tree` 旧栈零命中；`cargo audit --no-fetch` 通过；全量测试全绿；
 **Keycloak 26 真实 IdP E2E 8/8 全绿**（见 §1.9-D）。
@@ -556,7 +556,7 @@ $ FORCE_BUILD=1 bash deploy/keycloak/e2e-keycloak.sh   # 镜像构建（受限�
 | ✅ 已完成 | E5 覆盖率（第六轮再上调） | lines 第五轮 72.82% → 第六轮 **79.03%**（regions 77.72%）；CI 门禁 68 → 70 → **75**；`route_dispatcher.rs` 11.87% → **96.47%**、`mapping.rs` → 96.55%；仍低：`admin/config_api.rs` 34%（P2 可再补） |
 | ✅ 已完成 | 真实验签契约测试（第五轮） | 进程内 RS256/JWKS，不跳过验签 + 三类攻击拒绝（`tests/test_oidc_signature.rs`） |
 | ✅ 已完成 | OTel（OTLP）导出（第五轮） | OTLP/gRPC + traceparent 衔接（span 树一致）+ ParentBased 采样 + 关停 flush + 端到端契约测试（`tests/test_telemetry.rs`） |
-| ✅ 已完成 | **openidconnect 3.5 → 4.0 迁移**（第六轮，连带 oauth2 5、reqwest 0.12） | 整体移除旧栈（h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14 / idna 0.3）；审计例外清零（仅余 1 条停维类）；Keycloak E2E 契约回归 8/8（见 §1.9） |
+| ✅ 已完成 | **openidconnect 3.5 → 4.0 迁移**（第六轮，连带 oauth2 5、reqwest 0.12） | 整体移除旧栈（h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14 / idna 0.3）；审计例外仅存已界定项（2 条停维 + rsa Marvin 不可达，共 3 条）；Keycloak E2E 契约回归 8/8（见 §1.9） |
 | ✅ 已完成 | `route_dispatcher.rs` 覆盖率补测（第六轮） | 11.87% → **96.47%**（13 集成 + 6 单测）；**连带发现并修复 2 个映射静默失效缺陷（M1 from_path / M2 from_env）**；`business.rs` 69.82% → 71.28%（剩余分支属灰度期 P2） |
 | P2 | E14 `serde_yaml` 整改 | 跟踪 figment 上游；或自研合并 + serde_norway |
 | P2 | 性能专项 | k6 基线已数值化（§1.7）；QuickJS 池化经实测**无需**（脚本路径 p95 32ms @10k QPS，SLO 余量 ~15×）；ServeDir 缓存按需评估 |
