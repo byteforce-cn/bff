@@ -242,6 +242,29 @@ INFO mock_idp: RP-Initiated Logout 回跳 target=https://localhost:9443/
 > 生产域名与真实 IdP 的终验仍属上线前 Should 项（见 §2）。
 > 构建备注：受限网络环境可用 `CARGO_MIRROR` 构建参数指定 cargo 镜像加速镜像构建。
 
+#### G.3 生产形态 Compose + P0-4 容器闭环实测（2026-09-27）
+
+```text
+$ docker compose up -d          # BFF_ENV=prod + Redis + /data/bff 持久化卷
+business /live: 200
+admin /admin/api/v1/health: 200（X-Admin-Token + IP 白名单）
+日志：配置持久化已启用（管理端变更将落盘并支持多副本收敛） path=/data/bff/runtime.yaml
+
+$ curl -X POST ... /admin/api/v1/config/import   # 修改 probe_path 后导入
+import: 200 {"status":"applied"}
+$ docker exec bff-bff-1 ls -la /data/bff
+-rw-r--r-- 1 10001 10001 8700 runtime.yaml     # 非 root（UID 10001）可写
+
+$ docker compose restart bff     # 重启
+$ curl ... /config/export | grep -c healthz-check
+1                                # 重启后配置不丢（P0-4 闭环）
+```
+
+> 实测发现并修复：具名卷初始属主 root → 非 root 容器不可写。
+> 修复 = 镜像内预建 `/data/bff` 并 chown 10001（具名卷继承属主）
+> + `verify_dependencies` 增加**可写性探针**（不可写即 fail-fast，含处置提示）。
+> K8s 侧对应 `fsGroup: 10001`（清单已配）。
+
 
 
 ## 2. 剩余事项（上线前 Should / 灰度期迭代）

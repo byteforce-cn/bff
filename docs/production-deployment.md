@@ -159,6 +159,9 @@ kubectl -n bff apply -k deploy/k8s/
 
 - 单一事实源：`persistence.path`（默认 `config/state/runtime.yaml`；prod 模板为
   `/data/bff/runtime.yaml`）保存**脱敏后的完整配置**（密钥以 `***` 哨兵写入）；
+- **卷属主**：容器以数值 UID **10001** 运行——K8s PVC 需 `fsGroup: 10001`（清单已配），
+  compose 具名卷由镜像中 `/data/bff` 目录属主初始化；手工挂载宿主机目录时需
+  `chown 10001:10001`。启动自检会对持久化路径做**可写性探针**，不可写时直接拒绝启动；
 - 写入路径：任一管理写操作（import/providers/pipelines/routes/scripts）→
   **先原子落盘（临时文件 + rename）→ 再应用内存**；落盘失败则拒绝变更（避免内存/磁盘分裂）；
 - 启动加载优先级：`base/分文件 < runtime.yaml < BFF_* 环境变量`；

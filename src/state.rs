@@ -228,6 +228,20 @@ impl AppState {
                         })?;
                     }
                 }
+                // 可写性探针：目录属主/挂载权限错误时在启动阶段就暴露
+                let probe = path.with_extension("probe");
+                match std::fs::write(&probe, b"ok") {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&probe);
+                    }
+                    Err(e) => {
+                        anyhow::bail!(
+                            "持久化路径不可写（{}: {}）：请检查卷挂载属主/权限（容器以数值 UID 10001 运行；K8s 可配 fsGroup）",
+                            probe.display(),
+                            e
+                        );
+                    }
+                }
                 tracing::info!(path = %path.display(), "配置持久化已启用（管理端变更将落盘并支持多副本收敛）");
             }
         }
