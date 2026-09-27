@@ -146,40 +146,10 @@ pub async fn ip_rate_limit_middleware(
     next.run(req).await
 }
 
-/// 解析客户端 IP：
-/// - `trusted_proxies == 0`：不信任 `X-Forwarded-For`，直接使用对端 IP（防止伪造绕过）；
-/// - `trusted_proxies > 0`：XFF 最右侧 N 个条目为可信代理，取左侧第 `len - N - 1` 项作为
-///   客户端 IP；若 XFF 缺失或条目不足则回退对端 IP。
+/// 解析客户端 IP（S13：统一入口，修正原实现 `len - trusted - 1` 的 off-by-one，
+/// 与 nginx `proxy_add_x_forwarded_for` 语义对齐）。
 fn client_ip(req: &Request<Body>, peer: Option<IpAddr>, trusted_proxies: usize) -> Option<IpAddr> {
-    if trusted_proxies == 0 {
-        return peer;
-    }
-    if let Some(ips) = parse_xff(req) {
-        if ips.len() > trusted_proxies {
-            return ips.get(ips.len() - trusted_proxies - 1).copied();
-        }
-    }
-    peer
-}
-
-/// 解析 `X-Forwarded-For`：取最后一个头值，按逗号拆分并过滤非法项。
-fn parse_xff(req: &Request<Body>) -> Option<Vec<IpAddr>> {
-    let v = req
-        .headers()
-        .get_all("x-forwarded-for")
-        .iter()
-        .next_back()?
-        .to_str()
-        .ok()?;
-    let ips: Vec<IpAddr> = v
-        .split(',')
-        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
-        .collect();
-    if ips.is_empty() {
-        None
-    } else {
-        Some(ips)
-    }
+    crate::middleware::client_ip::resolve_client_ip(req.headers(), peer, trusted_proxies)
 }
 
 #[cfg(test)]
@@ -217,11 +187,20 @@ mod tests {
     }
 
     #[test]
-    fn trusted_one_uses_left_of_rightmost() {
-        // LB 后：XFF = [client, lb]，trusted=1 → 取 client
+    fn trusted_one_uses_real_client() {
+        // LB 后（nginx 语义）：XFF = [client]，trusted=1 → 取 client
         assert_eq!(
             client_ip(
-                &req_with_xff("1.2.3.4, 10.0.0.5"),
+                &req_with_xff("1.2.3.4"),
+                Some(IpAddr::from([127, 0, 0, 1])),
+                1
+            ),
+            Some(IpAddr::from([1, 2, 3, 4]))
+        );
+        // 客户端自带伪造条目：XFF = [spoofed, client]，trusted=1 → 仍取 client
+        assert_eq!(
+            client_ip(
+                &req_with_xff("6.6.6.6, 1.2.3.4"),
                 Some(IpAddr::from([127, 0, 0, 1])),
                 1
             ),
@@ -230,28 +209,37 @@ mod tests {
     }
 
     #[test]
-    fn trusted_one_insufficient_entries_falls_back() {
-        // XFF 只有 1 条但 trusted=1 → 条目不足，回退对端 IP
+    fn insufficient_entries_falls_back() {
+        // XFF 条目数 < trusted（无法确认客户端）→ 回退对端 IP
+        assert_eq!(
+            client_ip(
+                &req_with_xff("1.2.3.4"),
+                Some(IpAddr::from([127, 0, 0, 1])),
+                2
+            ),
+            Some(IpAddr::from([127, 0, 0, 1]))
+        );
+        // 条目数恰好等于 trusted → 取最左（最外层代理看到的客户端）
         assert_eq!(
             client_ip(
                 &req_with_xff("1.2.3.4"),
                 Some(IpAddr::from([127, 0, 0, 1])),
                 1
             ),
-            Some(IpAddr::from([127, 0, 0, 1]))
+            Some(IpAddr::from([1, 2, 3, 4]))
         );
     }
 
     #[test]
-    fn trusted_one_multiple_hops() {
-        // XFF = [client, proxy1, lb]，trusted=1 → 取 proxy1 左侧的 client
+    fn two_trusted_hops() {
+        // XFF=[client, cdn]，trusted=2 → client
         assert_eq!(
             client_ip(
-                &req_with_xff("1.2.3.4, 10.0.0.6, 10.0.0.5"),
+                &req_with_xff("1.2.3.4, 10.0.0.2"),
                 Some(IpAddr::from([127, 0, 0, 1])),
-                1
+                2
             ),
-            Some(IpAddr::from([10, 0, 0, 6]))
+            Some(IpAddr::from([1, 2, 3, 4]))
         );
     }
 

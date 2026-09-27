@@ -9,6 +9,38 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
+/// P0-4：管理写操作的变更摘要（谁改了哪些维度，供审计追溯）。
+fn summarize_change(old: &AppConfig, new: &AppConfig) -> String {
+    use std::collections::HashSet;
+    let old_routes: HashSet<&str> = old.routes.iter().map(|r| r.path.as_str()).collect();
+    let new_routes: HashSet<&str> = new.routes.iter().map(|r| r.path.as_str()).collect();
+    let routes_added = new_routes.difference(&old_routes).count();
+    let routes_removed = old_routes.difference(&new_routes).count();
+
+    let old_pipes: HashSet<&str> = old.pipelines.keys().map(|s| s.as_str()).collect();
+    let new_pipes: HashSet<&str> = new.pipelines.keys().map(|s| s.as_str()).collect();
+    let pipes_added = new_pipes.difference(&old_pipes).count();
+    let pipes_removed = old_pipes.difference(&new_pipes).count();
+
+    let old_providers: HashSet<&str> = old.oidc.providers.iter().map(|p| p.id.as_str()).collect();
+    let new_providers: HashSet<&str> = new.oidc.providers.iter().map(|p| p.id.as_str()).collect();
+    let prov_added = new_providers.difference(&old_providers).count();
+    let prov_removed = old_providers.difference(&new_providers).count();
+
+    format!(
+        "routes +{}/-{}; pipelines +{}/-{}; oidc_providers +{}/-{}; provider_cache={}; session_secure={}; admin_token_changed={}",
+        routes_added,
+        routes_removed,
+        pipes_added,
+        pipes_removed,
+        prov_added,
+        prov_removed,
+        new.provider.cache,
+        new.session.secure,
+        new.admin.auth_token != old.admin.auth_token,
+    )
+}
+
 /// GET /admin/api/config/export — 导出脱敏配置（YAML）
 pub async fn export_config(State(state): State<AppState>) -> Result<Response, AppError> {
     let cfg = state.cfg().sanitized();
@@ -27,6 +59,7 @@ pub async fn import_config(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
+    let before = state.cfg().clone();
     let yaml = extract_yaml(&headers, body).await?;
     let mut cfg: AppConfig = serde_yaml::from_str(&yaml)
         .map_err(|e| AppError::unprocessable(format!("配置解析失败: {}", e)))?;
@@ -41,7 +74,13 @@ pub async fn import_config(
     for p in &state.cfg().oidc.providers {
         state.oidc_clients.invalidate(&p.id).await;
     }
-    tracing::info!("配置已热重载");
+    let after = state.cfg().clone();
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "import_config",
+        summary = %summarize_change(&before, &after),
+        "配置热重载"
+    );
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"status": "applied"})),
@@ -113,10 +152,18 @@ pub async fn update_provider(
         Some(p) => *p = provider,
         None => cfg.oidc.providers.push(provider),
     }
+    let before = state.cfg().clone();
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
     state.oidc_clients.invalidate(&id).await;
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "update_provider",
+        provider_id = %id,
+        summary = %summarize_change(&before, &state.cfg()),
+        "OIDC provider 已更新"
+    );
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response())
 }
 
@@ -142,9 +189,17 @@ pub async fn create_pipeline(
         .map_err(|e| AppError::unprocessable(e.to_string()))?;
     let mut cfg = state.cfg().as_ref().clone();
     cfg.pipelines.insert(name.clone(), def);
+    let before = state.cfg().clone();
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "create_pipeline",
+        pipeline = %name,
+        summary = %summarize_change(&before, &state.cfg()),
+        "pipeline 已创建/覆盖"
+    );
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({"status": "created", "name": name})),
@@ -161,9 +216,17 @@ pub async fn delete_pipeline(
     if cfg.pipelines.remove(&name).is_none() {
         return Err(AppError::not_found(format!("pipeline 不存在: {}", name)));
     }
+    let before = state.cfg().clone();
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "delete_pipeline",
+        pipeline = %name,
+        summary = %summarize_change(&before, &state.cfg()),
+        "pipeline 已删除"
+    );
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"status": "deleted"})),
@@ -196,7 +259,25 @@ pub async fn update_script(
 ) -> Result<Response, AppError> {
     let script = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::bad_request("脚本必须为 UTF-8 文本"))?;
+    // P0-4：持久化开启时同步写入 config/scripts/<name>（列表接口已从该目录读取）
+    if state.cfg().persistence.enabled {
+        let dir = std::path::PathBuf::from("config/scripts");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| AppError::internal(format!("创建脚本目录失败: {}", e)))?;
+        let tmp = dir.join(format!(".{}.tmp", name));
+        let final_path = dir.join(&name);
+        std::fs::write(&tmp, script.as_bytes())
+            .map_err(|e| AppError::internal(format!("写入脚本失败: {}", e)))?;
+        std::fs::rename(&tmp, &final_path)
+            .map_err(|e| AppError::internal(format!("提交脚本失败: {}", e)))?;
+    }
     state.scripts.write().await.insert(name.clone(), script);
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "update_script",
+        script = %name,
+        "脚本已更新"
+    );
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"status": "ok", "name": name})),
@@ -350,9 +431,16 @@ pub async fn update_routes(
     }
     let mut cfg = state.cfg().as_ref().clone();
     cfg.routes = routes;
+    let before = state.cfg().as_ref().clone();
     state
         .replace_config(cfg)
         .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    tracing::info!(
+        event = "admin.config.changed",
+        kind = "update_routes",
+        summary = %summarize_change(&before, &state.cfg()),
+        "路由定义已更新"
+    );
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"status": "updated"})),

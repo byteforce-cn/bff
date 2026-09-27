@@ -1,9 +1,11 @@
 use crate::config::SessionConfig;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_sessions::cookie::SameSite;
 use tower_sessions::session::{Id, Record};
 use tower_sessions::session_store::{self, SessionStore};
+use tower_sessions::Expiry;
 use tower_sessions::SessionManagerLayer;
 
 /// `SessionStore` 的类型擦除包装。
@@ -50,6 +52,10 @@ impl SessionStore for DynSessionStore {
 }
 
 /// 基于共享 store 构造 Session 层（store 同时存入 AppState 供测试/管理端访问）。
+///
+/// R5：`session.ttl` 配置后，Cookie 与服务端存储使用同一空闲过期（`Expiry::OnInactivity`）：
+/// - Cookie 获得 `Max-Age`，不再“关浏览器即失效”而服务端留存 2 周；
+/// - 服务端 record 带 `expiry_date`，Redis 后端由此推导真实 TTL（MemoryStore 惰性过滤）。
 pub fn build_layer(
     store: Arc<dyn SessionStore>,
     session: &SessionConfig,
@@ -65,5 +71,11 @@ pub fn build_layer(
         .with_secure(session.secure)
         .with_http_only(session.http_only)
         .with_same_site(same_site);
+    let layer = match session.ttl {
+        Some(ttl) if ttl > Duration::ZERO => layer.with_expiry(Expiry::OnInactivity(
+            time::Duration::seconds(ttl.as_secs() as i64),
+        )),
+        _ => layer,
+    };
     Ok(layer)
 }

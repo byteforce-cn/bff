@@ -64,9 +64,41 @@ pub fn select_provider(state: &AppState, id: Option<&str>) -> Result<OidcProvide
     }
 }
 
-/// 校验 redirect 参数：只允许同源绝对路径，拒绝 //evil.com 和 http:// 等。
+/// 校验 redirect 参数：只允许**同源绝对路径**。
+///
+/// S1：原实现 `starts_with('/') && !starts_with("//")` 可被 `\/\evil.com` 绕过
+/// （浏览器将 `\` 归一为 `/` → 实际跳转到外站）。改为用 URL 解析器按同源校验：
+/// - 拒绝控制字符；
+/// - 以校验基准（dummy origin）解析后，结果 origin 必须仍为基准本身，
+///   因此 `//evil.com`、`/\evil.com`、`https://evil.com` 等一律拒绝。
 pub fn validate_redirect(redirect: &str) -> bool {
-    redirect.starts_with('/') && !redirect.starts_with("//")
+    if redirect.is_empty() || redirect.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    // S1：路径中不允许出现裸反斜杠（浏览器会将其归一为 `/`，形成 `//evil.com` 类外链）
+    if redirect.contains('\\') {
+        return false;
+    }
+    // 保守拒绝百分号编码的反斜杠：即使浏览器不会二次解码，也避免任何归一化歧义
+    if redirect.to_ascii_lowercase().contains("%5c") {
+        return false;
+    }
+    // 必须是站内绝对路径（相对路径会按当前页面深度解析，语义不可控）
+    if !redirect.starts_with('/') {
+        return false;
+    }
+    let base = match url::Url::parse("http://bff-redirect-check.invalid/") {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    match base.join(redirect) {
+        Ok(u) => {
+            u.scheme() == "http"
+                && u.host_str() == Some("bff-redirect-check.invalid")
+                && u.path().starts_with('/')
+        }
+        Err(_) => false,
+    }
 }
 
 /// 推导本服务对外 base_url（P0-2）。
@@ -229,6 +261,11 @@ pub async fn callback(
 
     let sub = verify_id_token(&state, &provider, &base_url, &token_response, &flow.nonce).await?;
 
+    // S2：登录成功（权限提升）后轮换 session id，防会话固定攻击。
+    // tower-sessions 的 cycle_id 会生成新 ID 并删除旧记录；
+    // 之后的令牌写入/会话登记均基于新 ID。
+    session.cycle_id().await.context("轮换 session id 失败")?;
+
     let stored = StoredTokens::new(
         &provider.id,
         &sub,
@@ -293,31 +330,55 @@ pub async fn logout(
     };
 
     // 清除 BFF 本地会话
+    let sid = session.id().map(|id| id.to_string());
     if let Some(p) = &provider {
         session.remove_value(&session_key(&p.id)).await.ok();
     }
     unregister_session(&state, &session).await;
     session.flush().await.ok();
 
-    // 构建 IdP end_session_endpoint URL（RP-Initiated Logout）
+    // R17：登出必须同时吊销该会话的 token exchange 缓存，
+    // 否则已登出会话换来的上游令牌在 TTL 内仍可被复用（containment 缺口）。
+    if let Some(sid) = &sid {
+        let cleared = crate::server::token_exchange::clear_session_cache(&state, sid).await;
+        if cleared > 0 {
+            tracing::info!(session_id = %sid, cleared, "登出清理 token exchange 缓存");
+        }
+    }
+
+    // F12：登出端点以 discovery 的 `end_session_endpoint` 为准
+    // （原实现硬编码 Spring AS 的 `/connect/logout`，换 IdP 即失效）。
     match &provider {
         Some(p) => {
             let base_url = base_url_from(&headers, &state)?;
             let post_logout_redirect = format!("{}/", base_url.trim_end_matches('/'));
-            let mut logout_url = format!(
-                "{}/connect/logout?post_logout_redirect_uri={}",
-                p.issuer_url.trim_end_matches('/'),
-                urlencoding(&post_logout_redirect)
-            );
-            if let Some(hint) = &id_token_hint {
-                logout_url.push_str(&format!("&id_token_hint={}", urlencoding(hint)));
+            match state.oidc_clients.end_session_endpoint(p).await {
+                Some(endpoint) => {
+                    let mut logout_url = format!(
+                        "{}?post_logout_redirect_uri={}",
+                        endpoint,
+                        urlencoding(&post_logout_redirect)
+                    );
+                    if let Some(hint) = &id_token_hint {
+                        logout_url.push_str(&format!("&id_token_hint={}", urlencoding(hint)));
+                    }
+                    logout_url.push_str(&format!("&client_id={}", urlencoding(&p.client_id)));
+                    tracing::info!(
+                        provider = %p.id,
+                        end_session_endpoint = %endpoint,
+                        has_id_token_hint = id_token_hint.is_some(),
+                        "RP-Initiated Logout: 重定向到 IdP"
+                    );
+                    Ok(Redirect::to(&logout_url).into_response())
+                }
+                None => {
+                    tracing::warn!(
+                        provider = %p.id,
+                        "IdP discovery 未提供 end_session_endpoint，仅清除本地会话"
+                    );
+                    Ok(Redirect::to("/").into_response())
+                }
             }
-            tracing::info!(
-                provider = %p.id,
-                has_id_token_hint = id_token_hint.is_some(),
-                "RP-Initiated Logout: 重定向到 IdP"
-            );
-            Ok(Redirect::to(&logout_url).into_response())
         }
         None => {
             tracing::info!("无 provider，仅清除本地 session");
@@ -627,4 +688,35 @@ pub async fn current_access_token(session: &Session) -> Option<String> {
 pub async fn current_tokens(session: &Session) -> Option<StoredTokens> {
     let provider: String = session.get("oidc:current_provider").await.ok().flatten()?;
     session.get(&session_key(&provider)).await.ok().flatten()
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::validate_redirect;
+
+    #[test]
+    fn allows_same_origin_paths() {
+        assert!(validate_redirect("/"));
+        assert!(validate_redirect("/dashboard"));
+        assert!(validate_redirect("/a/b?x=1&y=2"));
+        assert!(validate_redirect("/path#frag"));
+    }
+
+    #[test]
+    fn rejects_open_redirect_shapes() {
+        // S1：浏览器把 `\` 归一为 `/`，`/\evil.com` 实为协议相对外链
+        assert!(!validate_redirect("/\\evil.com"));
+        assert!(!validate_redirect("\\evil.com"));
+        assert!(!validate_redirect("\\\\evil.com"));
+        // 协议相对 / 绝对外链
+        assert!(!validate_redirect("//evil.com"));
+        assert!(!validate_redirect("https://evil.com"));
+        assert!(!validate_redirect("http://evil.com/x"));
+        assert!(!validate_redirect("javascript:alert(1)"));
+        // 控制字符
+        assert!(!validate_redirect("/ok\r\nLocation: https://evil.com"));
+        assert!(!validate_redirect(""));
+        // 百分号编码的反斜杠（浏览器不会二次解码，保守拒绝）
+        assert!(!validate_redirect("/%5Cevil.com"));
+    }
 }

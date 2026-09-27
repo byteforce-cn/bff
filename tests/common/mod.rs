@@ -27,6 +27,7 @@ pub fn base_config() -> AppConfig {
             auth_token: "test-admin-token".into(),
             enable_test_endpoints: true,
             test_endpoint_rate_limit: 10,
+            ..Default::default()
         },
         spa: SpaConfig {
             dir: "frontend/dist".into(),

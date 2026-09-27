@@ -31,9 +31,12 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         MakeRequestUuid,
     );
 
-    // CORS：根据配置选择 permissive 或白名单模式
-    let cors_layer = if cfg.cors.permissive || cfg.cors.allowed_origins.is_empty() {
+    // CORS：S8 默认收紧——仅显式 `permissive: true` 才全开；
+    // `allowed_origins` 为空且未开 permissive = 不允许任何跨域来源（原实现回落 permissive）。
+    let cors_layer = if cfg.cors.permissive {
         CorsLayer::permissive()
+    } else if cfg.cors.allowed_origins.is_empty() {
+        CorsLayer::new()
     } else {
         let mut cors = CorsLayer::new();
         for origin in &cfg.cors.allowed_origins {
@@ -60,11 +63,30 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
     // 安全响应头中间件
     let sec_headers = cfg.security_headers.clone();
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/login", get(oidc::login))
-        .route("/auth/callback", get(oidc::callback))
         .route("/logout", get(oidc::logout))
-        .route("/live", get(liveness))
+        .route("/live", get(liveness));
+
+    // F11：按 provider 配置的 `callback_path` 动态注册回调路由（去重），
+    // 原实现硬编码 `/auth/callback`——配置改成其它路径时 IdP 回调会落到 SPA fallback，
+    // 登录静默失败且无启动期告警。默认入口 `/auth/callback` 始终保留（兼容热添加 provider）。
+    {
+        let mut callback_paths: Vec<String> = cfg
+            .oidc
+            .providers
+            .iter()
+            .map(|p| p.callback_path.clone())
+            .collect();
+        callback_paths.push("/auth/callback".into());
+        callback_paths.sort();
+        callback_paths.dedup();
+        for path in callback_paths {
+            app = app.route(&path, get(oidc::callback));
+        }
+    }
+
+    let app = app
         .route("/ready", get(readiness))
         .route("/api/session", get(session_info))
         // 兼容旧 /pipeline/:name 路由（内部转为统一 Route 分发）
@@ -73,10 +95,17 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .route("/ws", get(ws_upgrade_handler))
         .route("/ws/*rest", get(ws_upgrade_handler))
         .fallback(fallback_handler)
-        .layer(axum::middleware::from_fn(metrics_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             token_refresh_middleware,
+        ))
+        // O3：W3C traceparent 注入/传播（入口生成或续接，注入请求头供代理透传上游）
+        .layer(axum::middleware::from_fn(
+            crate::middleware::trace_context::trace_context_middleware,
         ))
         .layer(session_layer)
         .layer(request_id_layer)
@@ -92,6 +121,8 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
                 cfg.rate_limit.per_second,
                 cfg.rate_limit.burst_size,
                 cfg.rate_limit.skip_path_prefixes.clone(),
+                // S13：全局限流同样按真实客户端 IP 建桶（信任的代理跳数复用认证限流配置）
+                cfg.auth_rate_limit.trusted_proxies,
             ),
             crate::middleware::rate_limit_skip::rate_limit_skip_middleware,
         ))
@@ -176,10 +207,28 @@ async fn liveness() -> Json<serde_json::Value> {
 
 /// GET /ready — K8s readiness probe：并行探测所有配置的上游可达性。
 ///
-/// 上游列表优先取自 `health.upstreams`；若为空则从 routes 中自动提取 proxy 类 upstream 去重。
+/// R10：
+/// - 探测结果缓存 `health.cache_ttl`（默认 1s），避免探针风暴与上游抖动放大；
+/// - 响应体裁剪为状态摘要（不再匿名返回上游 URL/错误串，防内部拓扑泄露）。
 async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    const CACHE_KEY: &str = "bff:ready:result";
     let cfg = state.cfg();
     let hc = &cfg.health;
+    let cache_ttl = hc.cache_ttl;
+
+    // 0. 缓存命中
+    if cache_ttl > std::time::Duration::ZERO {
+        if let Some(bytes) = state.cache.get(CACHE_KEY).await {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                let code = v.get("_status").and_then(|s| s.as_u64()).unwrap_or(200) as u16;
+                let body = v.get("body").cloned().unwrap_or(serde_json::Value::Null);
+                return (
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::OK),
+                    Json(body),
+                );
+            }
+        }
+    }
 
     // 确定上游列表：显式配置优先，否则从 routes 自动推导
     let upstreams: Vec<String> = if !hc.upstreams.is_empty() {
@@ -201,50 +250,33 @@ async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
     // 并行探测
     let probe_path = &hc.probe_path;
     let probe_timeout = hc.probe_timeout;
-    let mut results = serde_json::Map::new();
 
     let mut handles = Vec::with_capacity(upstreams.len());
     for upstream in &upstreams {
         let url = format!("{}{}", upstream.trim_end_matches('/'), probe_path);
         let client = state.http.clone();
-        let u = upstream.clone();
         handles.push(tokio::spawn(async move {
-            let start = std::time::Instant::now();
             let result = tokio::time::timeout(probe_timeout, client.get(&url).send()).await;
-            let latency_ms = start.elapsed().as_millis() as u64;
             match result {
                 Ok(Ok(resp)) => {
-                    let reachable = resp.status().is_success() || resp.status().as_u16() == 404; // 404 也算可达
-                    (u, reachable, latency_ms, None::<String>)
+                    resp.status().is_success() || resp.status().as_u16() == 404 // 404 也算可达
                 }
-                Ok(Err(e)) => (u, false, latency_ms, Some(format!("{}", e))),
-                Err(_) => (u, false, latency_ms, Some("timeout".to_string())),
+                _ => false,
             }
         }));
     }
 
-    let mut all_reachable = true;
+    let total = upstreams.len();
+    let mut unreachable = 0usize;
     for h in handles {
-        if let Ok((name, reachable, latency_ms, error)) = h.await {
-            let mut entry = serde_json::Map::new();
-            entry.insert("reachable".into(), serde_json::Value::Bool(reachable));
-            entry.insert(
-                "latency_ms".into(),
-                serde_json::Value::Number(serde_json::Number::from(latency_ms)),
-            );
-            if let Some(err) = error {
-                entry.insert("error".into(), serde_json::Value::String(err));
-            }
-            results.insert(name, serde_json::Value::Object(entry));
-            if !reachable {
-                all_reachable = false;
-            }
+        if !matches!(h.await, Ok(true)) {
+            unreachable += 1;
         }
     }
 
-    let (status, summary) = if upstreams.is_empty() {
+    let (status, summary) = if total == 0 {
         (StatusCode::OK, "no_upstreams_configured")
-    } else if all_reachable {
+    } else if unreachable == 0 {
         (StatusCode::OK, "ready")
     } else if hc.allow_degraded {
         (StatusCode::OK, "degraded")
@@ -254,8 +286,20 @@ async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
 
     let body = serde_json::json!({
         "status": summary,
-        "upstreams": results,
+        "upstreams_total": total,
+        "upstreams_unreachable": unreachable,
     });
+
+    // 写缓存（含状态码）
+    if cache_ttl > std::time::Duration::ZERO {
+        let payload = serde_json::json!({
+            "_status": status.as_u16(),
+            "body": body,
+        });
+        if let Ok(bytes) = serde_json::to_vec(&payload) {
+            state.cache.set(CACHE_KEY, bytes, cache_ttl).await;
+        }
+    }
 
     (status, Json(body))
 }
@@ -328,8 +372,10 @@ async fn fallback_handler(
             .unwrap_or_else(|e| e.into_response());
     }
 
-    // 2. /api 前缀 → 404
-    if path.starts_with("/api/") {
+    // 2. /api 与 /admin/api 前缀 → 404（F13：业务端口不存在管理面 API，
+    // 原行为把 /admin/api/* 当 SPA 路由返回 200 + HTML，客户端无法区分路径错误与成功；
+    // 其余 /admin/* 前端路由仍走 SPA fallback）
+    if path.starts_with("/api/") || path.starts_with("/admin/api/") {
         return AppError::not_found("无匹配 API 路由").into_response();
     }
 
@@ -337,9 +383,15 @@ async fn fallback_handler(
     serve_spa(&state, req).await
 }
 
-/// WebSocket 升级处理器：匹配路由 → 建立双向隧道。
+/// WebSocket 升级处理器：匹配路由 → 鉴权 → 建立双向隧道。
+///
+/// S6：
+/// - 仅 `type: proxy` 且 `proxy_mode: websocket|auto` 的路由允许升级
+///   （原实现任何路径前缀命中的路由都能建 WS 隧道）；
+/// - 按 `auth_required` 强制会话鉴权；需要认证时向**上游握手**注入 Bearer。
 async fn ws_upgrade_handler(
     State(state): State<AppState>,
+    session: Session,
     ws: WebSocketUpgrade,
     req: Request<Body>,
 ) -> Response {
@@ -355,9 +407,28 @@ async fn ws_upgrade_handler(
         None => return AppError::not_found("无匹配 WebSocket 路由").into_response(),
     };
 
+    if route.route_type != crate::config::RouteType::Proxy {
+        return AppError::not_found("无匹配 WebSocket 路由").into_response();
+    }
+    if !matches!(route.config.proxy_mode.as_str(), "websocket" | "auto") {
+        return AppError::bad_request("该路由未启用 WebSocket 代理模式").into_response();
+    }
+
     let upstream = match route.config.upstream.as_deref() {
         Some(u) => u.trim_end_matches('/').to_string(),
         None => return AppError::bad_request("WebSocket 路由缺少 upstream").into_response(),
+    };
+
+    // S6：鉴权（与统一分发器同一语义）
+    let auth_token = if route.auth_required {
+        match oidc::current_access_token(&session).await {
+            Some(t) => Some(t),
+            None => {
+                return AppError::unauthorized("未登录或会话已过期").into_response();
+            }
+        }
+    } else {
+        None
     };
 
     // 尊重 strip_prefix 配置（与 forward_request 保持一致）
@@ -371,9 +442,19 @@ async fn ws_upgrade_handler(
         .replace("https://", "wss://");
     let url = format!("{}{}", upstream_ws, suffix);
 
-    tracing::info!(%path, %url, strip_prefix=route.config.strip_prefix, "WebSocket 升级请求");
+    tracing::info!(%path, %url, strip_prefix=route.config.strip_prefix, auth=route.auth_required, "WebSocket 升级请求");
 
-    ws.on_upgrade(move |client_ws| tunnel::ws_tunnel(client_ws, url, None))
+    let tunnel_cfg = {
+        let cfg = state.cfg();
+        tunnel::TunnelConfig {
+            connect_timeout: cfg.websocket.connect_timeout,
+            idle_timeout: cfg.websocket.idle_timeout,
+            heartbeat_interval: cfg.websocket.heartbeat_interval,
+            max_message_bytes: cfg.websocket.max_message_bytes,
+        }
+    };
+
+    ws.on_upgrade(move |client_ws| tunnel::ws_tunnel(client_ws, url, auth_token, tunnel_cfg))
 }
 
 /// SPA 静态资源 + 前端路由 fallback 到 index.html。
@@ -394,17 +475,65 @@ async fn serve_spa(state: &AppState, req: Request<Body>) -> Response {
     }
 }
 
-/// 请求计数指标。
-async fn metrics_middleware(req: Request<Body>, next: axum::middleware::Next) -> Response {
+/// 请求计数指标（O1：路径标签低基数化）。
+///
+/// 原实现直接用原始 URL path 作为标签：任何扫描器路径（`/.env`、`/wp-login.php` …）
+/// 都会经 SPA fallback 返回并被计数 → 攻击者可用任意 URL 无界撑大标签基数。
+/// 现在归一化为：命中路由模板（有序集合）→ 模板；已知固定路径 → 自身；
+/// `/assets/*` → 常量；其余 → `other`。
+async fn metrics_middleware(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+    let path = metrics_path_label(&state, req.uri().path());
+    let start = std::time::Instant::now();
     let resp = next.run(req).await;
+    let status = resp.status().as_u16().to_string();
+    // O2：全局请求延迟直方图（Prometheus 侧可算 P50/P95/P99）
+    metrics::histogram!(
+        "bff_http_request_duration_seconds",
+        "method" => method.clone(),
+        "path" => path.clone(),
+    )
+    .record(start.elapsed().as_secs_f64());
     metrics::counter!(
         "bff_http_requests_total",
         "method" => method,
         "path" => path,
-        "status" => resp.status().as_u16().to_string(),
+        "status" => status,
     )
     .increment(1);
     resp
+}
+
+/// 将请求路径归一化为有限标签集（含路由模板与固定路径），防止基数爆炸。
+fn metrics_path_label(state: &AppState, path: &str) -> String {
+    // 1) 命中配置路由 → 用路由模板（路由数量由配置固定）
+    if let Some(route) = route_dispatcher::match_route(&state.cfg().routes, "GET", path) {
+        return route.path.clone();
+    }
+    // 2) 固定路径
+    const FIXED: &[&str] = &[
+        "/login",
+        "/auth/callback",
+        "/logout",
+        "/live",
+        "/ready",
+        "/api/session",
+    ];
+    if FIXED.contains(&path) {
+        return path.to_string();
+    }
+    if path.starts_with("/assets/") {
+        return "/assets/*".to_string();
+    }
+    if path.starts_with("/pipeline/") {
+        return "/pipeline/:name".to_string();
+    }
+    if path.starts_with("/ws") {
+        return "/ws/*".to_string();
+    }
+    "other".to_string()
 }

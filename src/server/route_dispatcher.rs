@@ -12,14 +12,23 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tower_sessions::Session;
 
-/// 在 routes 中匹配请求（最长 path 前缀 + method 过滤）。
+/// 在 routes 中匹配请求（最长 path 前缀 + 段边界 + method 过滤）。
+///
+/// F2：前缀匹配必须停在路径段边界——原实现 `starts_with` 会让 `/api` 命中 `/api-secret`，
+/// 可能把越权请求转发到错误上游。
 ///
 /// 返回匹配到的 RouteDef 引用，或 None。
 pub fn match_route<'a>(routes: &'a [RouteDef], method: &str, path: &str) -> Option<&'a RouteDef> {
     routes
         .iter()
         .filter(|r| {
-            path.starts_with(&r.path)
+            let boundary = r.path.trim_end_matches('/');
+            let matched = if boundary.is_empty() {
+                path.starts_with('/')
+            } else {
+                path == boundary || path.starts_with(&format!("{}/", boundary))
+            };
+            matched
                 && (r.methods.is_empty()
                     || r.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
         })
@@ -40,25 +49,28 @@ pub async fn dispatch(
             .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
     }
 
+    // R2：请求体上限统一读取配置（原实现硬编码 1 MiB，调大 body_limit 无效）
+    let max_body = state.cfg().body_limit.max_bytes;
+
     // 按类型分发
     match &route.route_type {
         RouteType::Proxy => execute_proxy(state, route, session, req).await,
         RouteType::Pipeline => {
             let (parts, body) = req.into_parts();
-            let body_bytes = axum::body::to_bytes(body, 1024 * 1024)
+            let body_bytes = axum::body::to_bytes(body, max_body)
                 .await
                 .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
-            let (session_json, env_json) = build_context_json(session).await;
+            let (session_json, env_json) = build_context_json(session, &route.input_mapping).await;
             let inputs =
                 extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
             execute_pipeline(state, route, inputs).await
         }
         RouteType::Script => {
             let (parts, body) = req.into_parts();
-            let body_bytes = axum::body::to_bytes(body, 1024 * 1024)
+            let body_bytes = axum::body::to_bytes(body, max_body)
                 .await
                 .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
-            let (session_json, env_json) = build_context_json(session).await;
+            let (session_json, env_json) = build_context_json(session, &route.input_mapping).await;
             let inputs =
                 extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
             execute_script(state, route, inputs).await
@@ -67,8 +79,17 @@ pub async fn dispatch(
     }
 }
 
-/// 从 Session 提取用户身份信息 + 收集环境变量，构建 JSON 上下文。
-async fn build_context_json(session: &Session) -> (Value, Value) {
+/// 从 Session 提取用户身份信息 + 按需收集环境变量，构建 JSON 上下文。
+///
+/// S5：
+/// - 仅当 `input_mapping.from_env` 非空时才收集环境变量（原实现在每个
+///   pipeline/script 请求上无条件克隆全量环境变量，是请求路径上的稳定开销）；
+/// - 只注入**显式引用**的变量名，不再默认提供全量环境；
+/// - 显式写 `env: { ... : "." }` 通配时打印告警（保留逃生舱，但可审计）。
+async fn build_context_json(
+    session: &Session,
+    input_mapping: &crate::config::InputMapping,
+) -> (Value, Value) {
     // session_json: sub, provider, access_token
     let session_json = if let Some(tokens) = current_tokens(session).await {
         let mut map = serde_json::Map::new();
@@ -82,16 +103,34 @@ async fn build_context_json(session: &Session) -> (Value, Value) {
         Value::Object(serde_json::Map::new())
     };
 
-    // env_json: 所有环境变量
-    let env_json = {
-        let mut map = serde_json::Map::new();
-        for (k, v) in std::env::vars() {
-            map.insert(k, Value::String(v));
-        }
-        Value::Object(map)
-    };
-
+    let env_json = build_env_context(input_mapping);
     (session_json, env_json)
+}
+
+/// S5：按 `from_env` 映射构建最小环境变量上下文。
+fn build_env_context(input_mapping: &crate::config::InputMapping) -> Value {
+    if input_mapping.from_env.is_empty() {
+        return Value::Object(serde_json::Map::new());
+    }
+    let mut map = serde_json::Map::new();
+    for source_path in input_mapping.from_env.values() {
+        if source_path == "." {
+            tracing::warn!(
+                "input_mapping.from_env 使用了 '.' 通配：将注入全部环境变量，建议改为显式变量名（如 env.MY_VAR）"
+            );
+            for (k, v) in std::env::vars() {
+                map.insert(k, Value::String(v));
+            }
+        } else {
+            let name = source_path
+                .strip_prefix("env.")
+                .unwrap_or(source_path.as_str());
+            if let Ok(v) = std::env::var(name) {
+                map.insert(name.to_string(), Value::String(v));
+            }
+        }
+    }
+    Value::Object(map)
 }
 
 /// 从请求 parts 和 body bytes 中按 InputMapping 提取参数。
@@ -119,10 +158,20 @@ fn extract_inputs_from_parts(
         serde_json::from_slice(body_bytes).unwrap_or(Value::Object(serde_json::Map::new()))
     };
 
-    // 解析 headers
+    // 解析 headers（S5：过滤敏感头，避免 cookie/authorization 进入脚本/编排可见上下文）
     let header_json = {
+        const SENSITIVE: &[&str] = &[
+            "cookie",
+            "authorization",
+            "proxy-authorization",
+            "x-admin-token",
+            "set-cookie",
+        ];
         let mut map = serde_json::Map::new();
         for (name, value) in &parts.headers {
+            if SENSITIVE.contains(&name.as_str()) {
+                continue;
+            }
             if let Ok(v) = value.to_str() {
                 map.insert(name.as_str().to_string(), Value::String(v.to_string()));
             }
@@ -130,11 +179,25 @@ fn extract_inputs_from_parts(
         Value::Object(map)
     };
 
-    mapping::merge_inputs(
+    // F9：from_path 参数提取（模板如 path./api/users/{userId}）
+    let path_json = {
+        let request_path = parts.uri.path();
+        let mut map = serde_json::Map::new();
+        for (target_key, template) in &route.input_mapping.from_path {
+            let tpl = template.strip_prefix("path.").unwrap_or(template.as_str());
+            if let Some(v) = mapping::extract_path_param(request_path, tpl) {
+                map.insert(target_key.clone(), Value::String(v));
+            }
+        }
+        Value::Object(map)
+    };
+
+    mapping::merge_inputs_full(
         &route.input_mapping,
         &query_json,
         &body_json,
         &header_json,
+        &path_json,
         session_json,
         env_json,
     )
@@ -201,7 +264,14 @@ async fn execute_pipeline(
         .record(start.elapsed().as_secs_f64());
 
     match result {
-        Ok(r) => Ok((r.status, Json(r.body)).into_response()),
+        Ok(r) => {
+            // F1/F10：执行 output_mapping（pick/rename/wrap）与 status_map
+            let mapped = mapping::apply_output_mapping(&route.output_mapping, r.body);
+            let status = mapping::resolve_status(&route.output_mapping, &mapped)
+                .unwrap_or(r.status.as_u16());
+            let status = StatusCode::from_u16(status).unwrap_or(r.status);
+            Ok((status, Json(mapped)).into_response())
+        }
         Err(e) => Err(e),
     }
 }
@@ -232,7 +302,13 @@ async fn execute_script(
 
     let engine = crate::scripting::ScriptEngine::new();
     match engine.run_json(&script, inputs).await {
-        Ok(v) => Ok((StatusCode::OK, Json(v)).into_response()),
+        Ok(v) => {
+            // F1/F10：执行 output_mapping 与 status_map
+            let mapped = mapping::apply_output_mapping(&route.output_mapping, v);
+            let status = mapping::resolve_status(&route.output_mapping, &mapped).unwrap_or(200);
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            Ok((status, Json(mapped)).into_response())
+        }
         Err(e) => Err(AppError::unprocessable(e.to_string())),
     }
 }

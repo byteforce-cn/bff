@@ -16,6 +16,7 @@ use crate::utils::AppError;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
+use std::time::Duration;
 use tower_sessions::Session;
 
 /// 获取 Bearer token（若路由需要认证）。
@@ -51,8 +52,11 @@ pub async fn forward_request(
 ) -> Result<Response, AppError> {
     let upstream = upstream.trim_end_matches('/');
 
-    // 熔断检查
-    if !state.breakers.allow(upstream).await {
+    // R3：熔断键改用路由 path（而非 upstream），使路由级阈值/开关有确定语义
+    let breaker_key = route.path.clone();
+    let threshold = (route.config.circuit_breaker_threshold > 0)
+        .then_some(route.config.circuit_breaker_threshold);
+    if !state.breakers.allow(&breaker_key, threshold).await {
         metrics::counter!("bff_proxy_rejected_total", "upstream" => upstream.to_string())
             .increment(1);
         return Err(AppError::new(
@@ -85,18 +89,22 @@ pub async fn forward_request(
     // 关键：必须恢复 Content-Type 等实体头——否则重建 reqwest 请求时，
     // Vec<u8> body 会被 reqwest 默认成 application/octet-stream（本 issue 根因）。
     let passthrough_headers = passthrough_headers(req.headers());
-    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+    // R2：请求体上限统一读取配置（原实现硬编码 10 MiB，调大配置无效）
+    let max_body = state.cfg().body_limit.max_bytes;
+    let body_bytes = axum::body::to_bytes(req.into_body(), max_body)
         .await
         .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
 
     let auth_token = resolve_auth_token(state, session, route).await?;
 
     let proxy_mode = route.config.proxy_mode.as_str();
+    let forward_set_cookie = route.config.forward_set_cookie;
 
     match proxy_mode {
         "sse" => {
             let result = sse_proxy::sse_stream(
-                &state.http,
+                // R1：SSE 使用无总超时的流式客户端（connect 超时 + keepalive 仍生效）
+                &state.http_stream,
                 &url,
                 reqwest::Method::from_bytes(method.as_str().as_bytes())
                     .map_err(|e| AppError::bad_request(format!("非法方法: {}", e)))?,
@@ -104,13 +112,16 @@ pub async fn forward_request(
                 auth_token,
                 request_id.as_deref(),
                 &passthrough_headers,
+                // R15：流结束（正常/异常）时按终态计数，而非“流建立即成功”
+                Some((state.breakers.clone(), breaker_key.clone())),
+                forward_set_cookie,
             )
             .await;
 
             match &result {
-                Ok(_) => state.breakers.record_success(upstream).await,
+                Ok(_) => {}
                 Err(_) => {
-                    state.breakers.record_failure(upstream).await;
+                    state.breakers.record_failure(&breaker_key).await;
                     metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string())
                         .increment(1);
                 }
@@ -122,16 +133,20 @@ pub async fn forward_request(
             let method_c = method.clone();
             let body_c = body_bytes.to_vec();
             let auth_c = auth_token.clone();
+            let timeout = route.config.timeout;
 
             let resp = proxy_http(
                 state,
                 upstream,
+                &breaker_key,
                 &url,
                 method_c,
                 body_c,
                 auth_c,
                 request_id.as_deref(),
                 &passthrough_headers,
+                timeout,
+                forward_set_cookie,
             )
             .await?;
 
@@ -146,12 +161,15 @@ pub async fn forward_request(
                             let retry_resp = proxy_http(
                                 state,
                                 upstream,
+                                &breaker_key,
                                 &url,
                                 method,
                                 body_bytes.to_vec(),
                                 Some(new_token),
                                 request_id.as_deref(),
                                 &passthrough_headers,
+                                timeout,
+                                forward_set_cookie,
                             )
                             .await?;
                             if retry_resp.status() != StatusCode::UNAUTHORIZED {
@@ -206,16 +224,20 @@ fn passthrough_headers(headers: &HeaderMap) -> HeaderMap {
 async fn proxy_http(
     state: &AppState,
     upstream: &str,
+    breaker_key: &str,
     url: &str,
     method: axum::http::Method,
     body: Vec<u8>,
     auth_token: Option<String>,
     request_id: Option<&str>,
     extra_headers: &HeaderMap,
+    timeout: Option<Duration>,
+    forward_set_cookie: bool,
 ) -> Result<Response, AppError> {
     let cfg = state.cfg();
     let max_retries = cfg.http_client.retry_max_attempts;
     let backoff = cfg.http_client.retry_backoff;
+    let max_response = cfg.body_limit.max_response_bytes;
     let is_idempotent = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
 
     let mut last_err = None;
@@ -233,6 +255,11 @@ async fn proxy_http(
             url,
         );
 
+        // R1：路由级超时覆盖全局默认
+        if let Some(t) = timeout {
+            out_req = out_req.timeout(t);
+        }
+        let attempt_start = std::time::Instant::now();
         if let Some(token) = &auth_token {
             out_req = out_req.bearer_auth(token.clone());
         }
@@ -258,8 +285,14 @@ async fn proxy_http(
         match result {
             Ok(resp) => {
                 let status = resp.status();
+                metrics::histogram!(
+                    "bff_upstream_request_duration_seconds",
+                    "upstream" => upstream.to_string(),
+                    "status_class" => format!("{}xx", status.as_u16() / 100),
+                )
+                .record(attempt_start.elapsed().as_secs_f64());
                 if status.is_server_error() {
-                    state.breakers.record_failure(upstream).await;
+                    state.breakers.record_failure(breaker_key).await;
                     // 仅对幂等请求在服务端错误时重试
                     if is_idempotent && attempt < max_retries {
                         last_err = Some(AppError::bad_gateway(format!(
@@ -270,14 +303,23 @@ async fn proxy_http(
                         continue;
                     }
                 } else {
-                    state.breakers.record_success(upstream).await;
+                    state.breakers.record_success(breaker_key).await;
                 }
+                // R2：响应大小上限（Content-Length 快速拒绝 + 流式累计硬上限）
+                if let Some(len) = resp.content_length() {
+                    if len as usize > max_response {
+                        return Err(AppError::bad_gateway(format!(
+                            "上游响应体过大（{} 字节，上限 {} 字节）",
+                            len, max_response
+                        )));
+                    }
+                }
+                let resp_headers = resp.headers().clone();
+                let bytes = read_capped_body(resp, max_response).await?;
                 let mut builder = Response::builder().status(status.as_u16());
-                for (k, v) in resp.headers() {
-                    if matches!(
-                        k.as_str(),
-                        "connection" | "transfer-encoding" | "keep-alive" | "upgrade"
-                    ) {
+                // S9：响应头策略——剥离 hop-by-hop、set-cookie（默认）、CORS 家族
+                for (k, v) in resp_headers.iter() {
+                    if should_strip_response_header(k.as_str(), forward_set_cookie) {
                         continue;
                     }
                     if let (Ok(name), Ok(val)) = (
@@ -287,16 +329,12 @@ async fn proxy_http(
                         builder = builder.header(name, val);
                     }
                 }
-                let bytes = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::bad_gateway(e.to_string()))?;
                 return builder
-                    .body(Body::from(bytes.to_vec()))
+                    .body(Body::from(bytes))
                     .map_err(|e| AppError::internal(e.to_string()));
             }
             Err(e) => {
-                state.breakers.record_failure(upstream).await;
+                state.breakers.record_failure(breaker_key).await;
                 if is_idempotent && attempt < max_retries {
                     last_err = Some(AppError::bad_gateway(format!(
                         "上游调用失败: {}（将重试）",
@@ -312,4 +350,36 @@ async fn proxy_http(
     // 所有重试均已耗尽
     metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string()).increment(1);
     Err(last_err.unwrap_or_else(|| AppError::bad_gateway("未知代理错误")))
+}
+
+/// R2：按上限读取响应体（reqwest 无默认上限；大响应会造成内存膨胀/OOM）。
+async fn read_capped_body(resp: reqwest::Response, max: usize) -> Result<Vec<u8>, AppError> {
+    use futures::StreamExt;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| AppError::bad_gateway(format!("读取上游响应失败: {}", e)))?;
+        if buf.len() + chunk.len() > max {
+            return Err(AppError::bad_gateway(format!(
+                "上游响应体超过上限（{} 字节）",
+                max
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// S9：上游响应头过滤策略（代理与 SSE 路径共用）。
+///
+/// 剥离：hop-by-hop 头、`access-control-*`（CORS 家族，防上游污染跨域策略）、
+/// `set-cookie`（默认剥离，防上游/被攻破服务向浏览器植入 Cookie；
+/// 如确需透传用路由级 `forward_set_cookie: true` 显式开启）。
+pub fn should_strip_response_header(name: &str, forward_set_cookie: bool) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "connection" | "transfer-encoding" | "keep-alive" | "upgrade" | "proxy-authenticate"
+    ) || lower.starts_with("access-control-")
+        || (lower == "set-cookie" && !forward_set_cookie)
 }

@@ -8,8 +8,10 @@
 //! - trusted_proxies = 0 时不信任 X-Forwarded-For（伪造头无法绕过）
 //!
 //! 说明：测试通过 HTTP 直接打到 BFF 业务端口，对端 IP 均为 127.0.0.1；
-//! 模拟「LB 后不同客户端」时设置 `X-Forwarded-For: <client>, <lb>` 并配置
-//! trusted_proxies = 1（右侧 1 个条目为可信代理 LB，取左侧 client 作为限流键）。
+//! 模拟「LB 后不同客户端」时设置 `X-Forwarded-For: <client>`（S13 起统一为
+//! nginx `proxy_add_x_forwarded_for` 语义：每跳追加其接收到的对端地址，
+//! 因此单层 LB 后 XFF 仅含 client；`trusted_proxies` 为可信跳数，
+//! 解析时取“跳过右侧 N 个条目后的第一个条目”，左侧伪造条目自动被忽略）。
 
 mod common;
 
@@ -31,11 +33,11 @@ fn auth_rate_cfg(trusted_proxies: usize, per_second: u64, burst: u32) -> AuthRat
     }
 }
 
-/// 从客户端 IP 视角发一次请求（XFF = 客户端, LB），返回状态码。
+/// 从客户端 IP 视角发一次请求（XFF = 客户端，nginx 语义），返回状态码。
 async fn request_with_client(base: &str, client: &str) -> u16 {
     let resp = test_client()
         .get(format!("{}/login", base))
-        .header("x-forwarded-for", format!("{}, 10.0.0.5", client))
+        .header("x-forwarded-for", client.to_string())
         .send()
         .await
         .expect("请求失败");
@@ -74,7 +76,7 @@ async fn test_auth_rate_limit_block_with_retry_after() {
         let client = test_client();
         let resp = client
             .get(format!("{}/login", base))
-            .header("x-forwarded-for", "1.2.3.4, 10.0.0.5")
+            .header("x-forwarded-for", "1.2.3.4")
             .send()
             .await
             .expect("请求失败");
@@ -156,7 +158,7 @@ async fn test_auth_rate_limit_trusted_zero_ignores_xff() {
     for spoof in spoofs {
         let resp = test_client()
             .get(format!("{}/login", base))
-            .header("x-forwarded-for", format!("{}, 10.0.0.5", spoof))
+            .header("x-forwarded-for", spoof)
             .send()
             .await
             .expect("请求失败");

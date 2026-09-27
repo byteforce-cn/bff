@@ -304,13 +304,19 @@ pub async fn resolve(
     outcome.map_err(ExchangeError::into_app_error)
 }
 
-/// 从缓存读取并反序列化。
+/// 从缓存读取并解密反序列化。
+///
+/// S11：缓存值使用 AES-256-GCM 加密（复用 `crypto` 主密钥）——
+/// 缓存泄压面（内存 dump / Redis 未授权）不再直接暴露上游令牌；
+/// 无法解密的旧格式条目视为 miss（不降级为明文解析）。
 async fn read_cache(state: &AppState, key: &str) -> Option<TokenExchangeResult> {
     let bytes = state.cache.get(key).await?;
-    serde_json::from_slice::<TokenExchangeResult>(&bytes).ok()
+    let s = std::str::from_utf8(&bytes).ok()?;
+    let plain = crate::utils::crypto::decrypt(s).ok()?;
+    serde_json::from_slice::<TokenExchangeResult>(&plain).ok()
 }
 
-/// 成功时按 effective TTL 写缓存；失败不缓存（§6.2）。
+/// 成功时按 effective TTL 加密写缓存；失败不缓存（§6.2）；加密失败则跳过写入（fail-closed）。
 async fn store_result(
     state: &AppState,
     key: &str,
@@ -320,10 +326,13 @@ async fn store_result(
     match outcome {
         Ok(res) => {
             let ttl = effective_ttl(cache_ttl, res.expires_in);
-            state
-                .cache
-                .set(key, serde_json::to_vec(res).unwrap_or_default(), ttl)
-                .await;
+            match serde_json::to_vec(res)
+                .ok()
+                .and_then(|json| crate::utils::crypto::encrypt(&json).ok())
+            {
+                Some(enc) => state.cache.set(key, enc.into_bytes(), ttl).await,
+                None => tracing::warn!("token exchange 缓存加密失败，跳过缓存写入"),
+            }
         }
         Err(e) => {
             metrics::counter!("bff_token_exchange_total", "result" => "error").increment(1);
@@ -334,6 +343,15 @@ async fn store_result(
             .increment(1);
         }
     }
+}
+
+/// R17：会话登出/撤销时清理该会话的全部交换缓存。
+///
+/// 已登出会话换来的上游令牌在 TTL 内仍可被复用是取证/containment 缺口，
+/// 登出必须是有效的吊销手段。返回清理条数（redis 后端乐观返回 0）。
+pub async fn clear_session_cache(state: &AppState, session_id: &str) -> usize {
+    let prefix = format!("{}{}:", CACHE_PREFIX, session_id);
+    state.cache.delete_prefix(&prefix).await
 }
 
 /// 执行交换；`invalid_grant`/`invalid_token` 时刷新会话 token 后重试一次（§7.2）。

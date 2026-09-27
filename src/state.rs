@@ -31,7 +31,10 @@ pub struct SessionInfo {
 pub struct AppState {
     /// 配置快照：管理端导入时整体替换，读取零锁
     pub config: Arc<ArcSwap<AppConfig>>,
+    /// 常规出网客户端（代理 http / 编排 / readiness；默认 30s 总超时）
     pub http: reqwest::Client,
+    /// R1：流式出网客户端（SSE 等长连接：无总超时，仅 connect 超时 + TCP keepalive）
+    pub http_stream: reqwest::Client,
     /// R13：OIDC 出网专用客户端（带超时、连接池复用）
     pub oidc_http: reqwest::Client,
     pub cache: Arc<dyn CacheProvider>,
@@ -46,6 +49,8 @@ pub struct AppState {
     pub breakers: CircuitBreakerRegistry,
     pub scripts: Arc<RwLock<HashMap<String, String>>>,
     pub prometheus: PrometheusHandle,
+    /// P0-4：最近一次由本进程写入持久化文件的 sha256（避免 watcher 自触发）
+    last_config_hash: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -102,6 +107,9 @@ impl AppState {
 
         // 使用配置构建 HTTP 客户端（上游代理/编排/readiness 共用）
         let http = build_http_client(&config, config.http_client.timeout, true)?;
+        // R1：SSE 等流式路径使用无总超时客户端（但仍受 connect 超时/TCP keepalive 保护），
+        // 避免全局 30s 超时把长连接流拦腰截断。
+        let http_stream = build_http_client(&config, None, true)?;
         // R13：OIDC 出网客户端——默认 15s 总超时（可被 http_client.timeout 显式覆盖），
         // 不跟随重定向（防 SSRF），避免 IdP 无响应时 /login、/auth/callback、refresh、
         // discovery 无限期挂起。
@@ -125,11 +133,13 @@ impl AppState {
             dry_run: false,
         };
         let cb_threshold = config.circuit_breaker.failure_threshold;
+        let cb_window = config.circuit_breaker.failure_window;
         let cb_open_duration = config.circuit_breaker.open_duration;
 
         Ok(Self {
             config: Arc::new(ArcSwap::from_pointee(config)),
             http,
+            http_stream,
             oidc_http: oidc_http.clone(),
             cache,
             lock,
@@ -138,9 +148,14 @@ impl AppState {
             oidc_clients: Arc::new(OidcClientManager::new(oidc_http)),
             pipeline_executor: PipelineExecutor::new(step_ctx),
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            breakers: CircuitBreakerRegistry::new_with_config(cb_threshold, cb_open_duration),
+            breakers: CircuitBreakerRegistry::new_with_config(
+                cb_threshold,
+                cb_window,
+                cb_open_duration,
+            ),
             scripts: Arc::new(RwLock::new(HashMap::new())),
             prometheus: init_metrics(),
+            last_config_hash: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -154,10 +169,143 @@ impl AppState {
         if let Some(pool) = &self.redis_pool {
             pool.ping().await?;
         }
+        // P0-4：持久化启用时确保目录可用（fail-fast，避免管理操作时才发现不可写）
+        {
+            let cfg = self.config.load();
+            if cfg.persistence.enabled {
+                let path = std::path::PathBuf::from(&cfg.persistence.path);
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            anyhow::anyhow!("创建持久化目录 {:?} 失败: {}", parent, e)
+                        })?;
+                    }
+                }
+                tracing::info!(path = %path.display(), "配置持久化已启用（管理端变更将落盘并支持多副本收敛）");
+            }
+        }
         Ok(())
     }
 
+    /// R5：`sessions` 索引（管理端会话列表）单轮 GC。
+    ///
+    /// HashMap 中的条目在会话过期（store 中不存在）后必须清理，否则：
+    /// - 内存随登录次数无界增长；
+    /// - 管理端会话列表失真（显示已过期会话）。
+    ///
+    /// 返回清理掉的条目数。
+    pub async fn gc_sessions_once(&self) -> usize {
+        let ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();
+        let mut removed = 0usize;
+        for id in ids {
+            // tower-sessions 的 `Id` 为 32 字节 base64 字符串：非法 ID 直接移除
+            let parsed = match id.parse::<tower_sessions::session::Id>() {
+                Ok(p) => p,
+                Err(_) => {
+                    self.sessions.write().await.remove(&id);
+                    removed += 1;
+                    continue;
+                }
+            };
+            match self.session_store.load(&parsed).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.sessions.write().await.remove(&id);
+                    removed += 1;
+                }
+                // 存储后端临时故障：保守保留，下轮再试
+                Err(_) => {}
+            }
+        }
+        removed
+    }
+
+    /// R5：后台会话 GC 任务（由 main 在启动时 spawn，间隔由 `session.gc_interval` 控制）。
+    pub async fn run_session_gc(self: Arc<Self>, interval: Duration) {
+        if interval == Duration::ZERO {
+            return;
+        }
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let removed = self.gc_sessions_once().await;
+            if removed > 0 {
+                tracing::debug!(removed, "会话索引 GC：已清理过期会话条目");
+            }
+        }
+    }
+    /// P0-4：外部配置变更轮询（多副本共享存储 / 运维手工修改 runtime.yaml）。
+    ///
+    /// - 内容哈希与本进程最近写入一致 → 跳过（避免自我触发）；
+    /// - 外部内容须通过校验且不试图变更 bff_secret，否则忽略并告警（不影响运行态）。
+    pub async fn run_config_watcher(self: Arc<Self>) {
+        loop {
+            let (enabled, path, interval) = {
+                let cfg = self.config.load();
+                (
+                    cfg.persistence.enabled,
+                    cfg.persistence.path.clone(),
+                    cfg.persistence.watch_interval,
+                )
+            };
+            if !enabled || interval == Duration::ZERO {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            tokio::time::sleep(interval).await;
+
+            let p = std::path::PathBuf::from(&path);
+            let raw = match std::fs::read(&p) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let hash = sha256_hex(&raw);
+            if self.is_own_config_write(&hash) {
+                continue;
+            }
+            let mut cfg: AppConfig = match serde_yaml::from_slice(&raw) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(path = %p.display(), error = %e, "外部配置文件解析失败，忽略本次变更");
+                    continue;
+                }
+            };
+            let current = self.config.load();
+            cfg.merge_sensitive_secrets(&current);
+            drop(current);
+            match self.apply_watched_config(cfg, hash).await {
+                Ok(()) => {
+                    tracing::info!(path = %p.display(), "检测到外部配置变更，已热重载");
+                    let providers = { self.config.load().oidc.providers.clone() };
+                    for provider in providers {
+                        self.oidc_clients.invalidate(&provider.id).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(path = %p.display(), error = %e, "外部配置校验失败，忽略本次变更");
+                }
+            }
+        }
+    }
+    /// R5：更新会话索引的 `last_seen`（节流：距上次更新 <60s 时跳过，避免写放大）。
+    pub async fn touch_session(&self, session_id: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut map = self.sessions.write().await;
+        if let Some(info) = map.get_mut(session_id) {
+            if now - info.last_seen >= 60 {
+                info.last_seen = now;
+            }
+        }
+    }
+
     /// 原子替换配置快照（热重载）。
+    ///
+    /// P0-4：持久化开启时先把脱敏配置原子落盘（失败则不应用，避免
+    /// “内存改了、磁盘没改”的分裂）；重启与多副本据此收敛。
     pub fn replace_config(&self, cfg: AppConfig) -> anyhow::Result<()> {
         cfg.validate().map_err(|e| anyhow::anyhow!(e))?;
         // P0-3：bff_secret 不支持热更新。crypto::init 使用进程级 OnceLock，仅启动时生效；
@@ -173,8 +321,63 @@ impl AppState {
                 );
             }
         }
+        self.persist_config(&cfg)?;
         self.config.store(Arc::new(cfg));
         Ok(())
+    }
+
+    /// P0-4：把配置（脱敏）原子写入持久化文件；未启用时为 no-op。
+    pub fn persist_config(&self, cfg: &AppConfig) -> anyhow::Result<()> {
+        if !cfg.persistence.enabled {
+            return Ok(());
+        }
+        let path = std::path::PathBuf::from(&cfg.persistence.path);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| anyhow::anyhow!("创建持久化目录 {:?} 失败: {}", parent, e))?;
+            }
+        }
+        let yaml = serde_yaml::to_string(&cfg.sanitized())
+            .map_err(|e| anyhow::anyhow!("序列化持久化配置失败: {}", e))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, yaml.as_bytes())
+            .map_err(|e| anyhow::anyhow!("写入持久化配置 {:?} 失败: {}", tmp, e))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| anyhow::anyhow!("提交持久化配置 {:?} 失败: {}", path, e))?;
+        let digest = sha256_hex(yaml.as_bytes());
+        let mut guard = self.last_config_hash.write().expect("哈希锁损坏");
+        *guard = Some(digest);
+        tracing::info!(path = %path.display(), "配置已持久化");
+        Ok(())
+    }
+
+    /// P0-4：应用外部（另一副本/运维手工）写入的配置文件。
+    ///
+    /// 与 `replace_config` 的差异：不再回写文件（避免写放大），但同样校验与
+    /// 拒绝 bff_secret 变更，并记录文件哈希避免自我触发。
+    pub async fn apply_watched_config(
+        &self,
+        cfg: AppConfig,
+        file_hash: String,
+    ) -> anyhow::Result<()> {
+        cfg.validate().map_err(|e| anyhow::anyhow!(e))?;
+        {
+            let current = self.config.load();
+            if cfg.bff_secret.secret != current.bff_secret.secret
+                || cfg.bff_secret.salt != current.bff_secret.salt
+            {
+                anyhow::bail!("外部配置试图变更 bff_secret（不支持热更新），已忽略");
+            }
+        }
+        self.config.store(Arc::new(cfg));
+        *self.last_config_hash.write().expect("哈希锁损坏") = Some(file_hash);
+        Ok(())
+    }
+
+    /// P0-4：watcher 调用——文件内容是否为本进程自己写入的（是则跳过）。
+    pub fn is_own_config_write(&self, file_hash: &str) -> bool {
+        self.last_config_hash.read().expect("哈希锁损坏").as_deref() == Some(file_hash)
     }
 }
 
@@ -190,6 +393,14 @@ fn init_metrics() -> PrometheusHandle {
         .clone()
 }
 
+/// sha256 十六进制（配置持久化哈希用）。
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
 /// 构建 HTTP 客户端（含 mTLS / 自定义 CA）；`timeout` 为整体超时。
 ///
 /// `follow_redirects=false` 时禁止跟随重定向（OIDC 出网防 SSRF）；
@@ -203,6 +414,11 @@ fn build_http_client(
         .connect_timeout(cfg.http_client.connect_timeout)
         .pool_max_idle_per_host(cfg.http_client.pool_max_idle_per_host)
         .pool_idle_timeout(cfg.http_client.pool_idle_timeout);
+
+    // R1/R16：TCP keepalive 探活（0 表示禁用）
+    if cfg.http_client.tcp_keepalive > Duration::ZERO {
+        b = b.tcp_keepalive(cfg.http_client.tcp_keepalive);
+    }
 
     if let Some(t) = timeout {
         b = b.timeout(t);

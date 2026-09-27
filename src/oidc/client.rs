@@ -12,6 +12,8 @@ use tokio::sync::RwLock;
 
 pub struct OidcClientManager {
     clients: RwLock<HashMap<String, Arc<CoreClient>>>,
+    /// F12：discovery 元数据中的 `end_session_endpoint` 缓存（None = 已探测但不存在）
+    logout_endpoints: RwLock<HashMap<String, Option<String>>>,
     /// R13：OIDC 出网专用客户端（bounded 超时 + 连接池复用）
     http: reqwest::Client,
 }
@@ -20,8 +22,45 @@ impl OidcClientManager {
     pub fn new(http: reqwest::Client) -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
+            logout_endpoints: RwLock::new(HashMap::new()),
             http,
         }
+    }
+
+    /// F12：发现 IdP 的 RP-Initiated Logout 端点（`end_session_endpoint`）。
+    ///
+    /// 各 IdP 登出路径不同（Spring AS `/connect/logout`、Keycloak
+    /// `/protocol/openid-connect/logout`、Okta `/oauth2/v1/logout` …），
+    /// 硬编码必然“换个 IdP 就登不出去”——一律以 discovery 元数据为准。
+    pub async fn end_session_endpoint(&self, cfg: &OidcProviderConfig) -> Option<String> {
+        if let Some(cached) = self.logout_endpoints.read().await.get(&cfg.id) {
+            return cached.clone();
+        }
+        let issuer = match IssuerUrl::new(cfg.issuer_url.clone()) {
+            Ok(i) => i,
+            Err(_) => return None,
+        };
+        let endpoint = match openidconnect::ProviderMetadataWithLogout::discover_async(
+            issuer,
+            crate::oidc::http_client::client_fn(self.http.clone()),
+        )
+        .await
+        {
+            Ok(md) => md
+                .additional_metadata()
+                .end_session_endpoint
+                .as_ref()
+                .map(|u| u.url().to_string()),
+            Err(e) => {
+                tracing::warn!(provider = %cfg.id, error = %e, "登出端点 discovery 失败");
+                None
+            }
+        };
+        self.logout_endpoints
+            .write()
+            .await
+            .insert(cfg.id.clone(), endpoint.clone());
+        endpoint
     }
 
     /// 缓存键必须包含 base_url（P0-2）：redirect_uri 在 build_client 时烧入客户端，
@@ -50,13 +89,14 @@ impl OidcClientManager {
         Ok(client)
     }
 
-    /// 失效某 provider 的**全部**客户端（所有 base_url 变体）。
+    /// 失效某 provider 的**全部**客户端（所有 base_url 变体）与登出端点缓存。
     pub async fn invalidate(&self, provider_id: &str) {
         let prefix = format!("{}|", provider_id);
         self.clients
             .write()
             .await
             .retain(|k, _| !k.starts_with(&prefix));
+        self.logout_endpoints.write().await.remove(provider_id);
     }
 }
 

@@ -53,6 +53,11 @@ pub async fn delete_session(
 
     // 从管理端 HashMap 中删除
     let removed = state.sessions.write().await.remove(&session_id);
+    // R17：同步清理该会话的 token exchange 缓存（交换得到的上游令牌必须随撤销失效）
+    let cleared = crate::server::token_exchange::clear_session_cache(&state, &session_id).await;
+    if cleared > 0 {
+        tracing::info!(session_id = %session_id, cleared, "会话撤销清理 token exchange 缓存");
+    }
     if removed.is_some() {
         tracing::info!(session_id = %id, "管理员撤销会话");
         Ok((

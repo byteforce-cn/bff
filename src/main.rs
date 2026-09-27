@@ -24,6 +24,19 @@ async fn main() -> anyhow::Result<()> {
     state.verify_dependencies().await?;
     tracing::info!(business_port, admin_port, "BFF 启动中");
 
+    // R5：后台会话索引 GC（清理 store 中已过期的会话条目，防内存无界增长与列表失真）
+    {
+        let gc_state = std::sync::Arc::new(state.clone());
+        let gc_interval = state.cfg().session.gc_interval;
+        tokio::spawn(async move { gc_state.run_session_gc(gc_interval).await });
+    }
+
+    // P0-4：外部配置变更轮询（多副本共享存储时收敛管理端变更）
+    {
+        let watch_state = std::sync::Arc::new(state.clone());
+        tokio::spawn(async move { watch_state.run_config_watcher().await });
+    }
+
     let business_router = bff::server::business::build_business_router(state.clone())?;
     let admin_router = bff::server::admin::build_admin_router(state)?;
 

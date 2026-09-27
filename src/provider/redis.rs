@@ -128,6 +128,49 @@ impl CacheProvider for RedisCache {
             tracing::warn!(%key, error = %e, "RedisCache::delete 失败");
         }
     }
+
+    /// R17：按前缀删除（SCAN + DEL）。
+    async fn delete_prefix(&self, prefix: &str) -> usize {
+        let mut conn = match self.pool.conn().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Redis 连接不可用，前缀删除丢弃");
+                return 0;
+            }
+        };
+        let mut cursor: u64 = 0;
+        let mut removed = 0usize;
+        loop {
+            let reply: redis::RedisResult<(u64, Vec<String>)> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(format!("{}*", prefix))
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await;
+            match reply {
+                Ok((next, keys)) => {
+                    for key in keys {
+                        let res: redis::RedisResult<i64> =
+                            redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
+                        if let Ok(n) = res {
+                            removed += n.max(0) as usize;
+                        }
+                    }
+                    cursor = next;
+                    if cursor == 0 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%prefix, error = %e, "RedisCache::delete_prefix SCAN 失败");
+                    break;
+                }
+            }
+        }
+        removed
+    }
 }
 
 // ── Lock ──

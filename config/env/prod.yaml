@@ -11,6 +11,13 @@ admin:
   # 生产强制关闭 test/eval 端点（validate 也会在 BFF_ENV=prod 时强制校验）
   enable_test_endpoints: false
 
+# P0-4：配置持久化——管理端变更落盘，重启/多副本据此收敛
+# path 需为可写持久化卷（K8s PVC / compose 挂载）；多副本共享同一文件可实现收敛
+persistence:
+  enabled: true
+  path: "/data/bff/runtime.yaml"
+  watch_interval: "5s"
+
 # 认证端点 per-IP 限流：生产启用（需按实际拓扑调整 trusted_proxies）
 auth_rate_limit:
   enabled: true

@@ -26,6 +26,29 @@ pub fn merge_inputs(
     session_json: &Value,
     env_json: &Value,
 ) -> Value {
+    merge_inputs_full(
+        mapping,
+        query_json,
+        body_json,
+        header_json,
+        &Value::Object(serde_json::Map::new()),
+        session_json,
+        env_json,
+    )
+}
+
+/// 完整版合并（F9：新增 `from_path` 来源）。
+///
+/// 优先级：defaults < env < session < header < path < body < query
+pub fn merge_inputs_full(
+    mapping: &InputMapping,
+    query_json: &Value,
+    body_json: &Value,
+    header_json: &Value,
+    path_json: &Value,
+    session_json: &Value,
+    env_json: &Value,
+) -> Value {
     let mut result = serde_json::Map::new();
 
     // 1. defaults（最低优先级）
@@ -42,13 +65,40 @@ pub fn merge_inputs(
     // 4. from_header
     apply_source(&mut result, &mapping.from_header, header_json);
 
-    // 5. from_body
+    // 5. from_path（F9：原实现静默忽略该配置）
+    apply_source(&mut result, &mapping.from_path, path_json);
+
+    // 6. from_body
     apply_source(&mut result, &mapping.from_body, body_json);
 
-    // 6. from_query（最高优先级）
+    // 7. from_query（最高优先级）
     apply_source(&mut result, &mapping.from_query, query_json);
 
     Value::Object(result)
+}
+
+/// 从实际请求路径按模板提取路径参数（F9）。
+///
+/// 模板示例：`/api/users/{userId}`；实际路径 `/api/users/42` → `Some("42")`。
+/// 支持多段与多参数；`{name}` 段缺失或不匹配返回 None。
+pub fn extract_path_param(request_path: &str, template: &str) -> Option<String> {
+    let req_segs: Vec<&str> = request_path.trim_matches('/').split('/').collect();
+    let tpl_segs: Vec<&str> = template.trim_matches('/').split('/').collect();
+    if req_segs.len() != tpl_segs.len() {
+        return None;
+    }
+    let mut captured: Option<String> = None;
+    for (r, t) in req_segs.iter().zip(tpl_segs.iter()) {
+        if t.starts_with('{') && t.ends_with('}') {
+            if r.is_empty() {
+                return None;
+            }
+            captured.get_or_insert_with(|| (*r).to_string());
+        } else if r != t {
+            return None;
+        }
+    }
+    captured
 }
 
 fn apply_source(
@@ -79,6 +129,20 @@ fn extract_json_path(source: &Value, path: &str) -> Value {
         }
     }
     current.clone()
+}
+
+/// 解析 `status_map`（F10）：按响应体中的 `status` 字段（字符串）查表，
+/// 缺省回退 `"default"` 键。返回 None 表示保持原状态码。
+pub fn resolve_status(mapping: &OutputMapping, body: &Value) -> Option<u16> {
+    if mapping.status_map.is_empty() {
+        return None;
+    }
+    if let Some(s) = body.get("status").and_then(|v| v.as_str()) {
+        if let Some(code) = mapping.status_map.get(s) {
+            return Some(*code);
+        }
+    }
+    mapping.status_map.get("default").copied()
 }
 
 /// 按 OutputMapping 转换输出：pick → rename → wrap。

@@ -11,19 +11,44 @@
 //! - 其余路径：构造 `Governor::new(next, &config)` 执行原有限流逻辑。
 //!   `Governor::new` 内部复用同一个 `Arc<RateLimiter>`，限流状态跨请求共享，与直接挂
 //!   `GovernorLayer` 完全等价。
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use governor::middleware::NoOpMiddleware;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tower::Service;
 use tower_governor::governor::{Governor, GovernorConfig, GovernorConfigBuilder};
-use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::key_extractor::KeyExtractor;
+use tower_governor::GovernorError;
+
+/// S13：按「真实客户端 IP」限流的 key extractor。
+///
+/// 原实现用 `PeerIpKeyExtractor`（按对端 IP）：LB 拓扑下全站共享一个桶，
+/// 真实业务超 50rps 即对**所有用户** 429，限流器反而成为单点放大器。
+/// 本提取器复用统一 IP 解析（信任 `X-Forwarded-For` 的右侧 N 跳）。
+#[derive(Clone, Debug)]
+pub struct ClientIpKeyExtractor {
+    pub trusted_proxies: usize,
+}
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip());
+        crate::middleware::client_ip::resolve_client_ip(req.headers(), peer, self.trusted_proxies)
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+}
 
 /// 全局限流跳过层的运行状态：共享的 governor 配置（内部复用同一个 `RateLimiter`）+ 跳过前缀。
 #[derive(Clone)]
 pub struct RateLimitSkipState {
-    governor_conf: Arc<GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>>,
+    governor_conf: Arc<GovernorConfig<ClientIpKeyExtractor, NoOpMiddleware>>,
     skip_prefixes: Vec<String>,
 }
 
@@ -32,12 +57,14 @@ pub fn rate_limit_skip_state(
     per_second: u64,
     burst_size: u32,
     skip_prefixes: Vec<String>,
+    trusted_proxies: usize,
 ) -> RateLimitSkipState {
     RateLimitSkipState {
         governor_conf: Arc::new(
             GovernorConfigBuilder::default()
                 .per_second(per_second)
                 .burst_size(burst_size)
+                .key_extractor(ClientIpKeyExtractor { trusted_proxies })
                 .finish()
                 .expect("限流配置非法"),
         ),

@@ -122,6 +122,12 @@ pub struct AppConfig {
     /// 脚本引擎配置
     #[serde(default)]
     pub scripting: ScriptingConfig,
+    /// WebSocket 隧道配置（超时/心跳/消息上限，S6/R7/R16）
+    #[serde(default)]
+    pub websocket: WebSocketTunnelConfig,
+    /// P0-4：配置持久化（管理端变更落盘 + 外部变更热重载）
+    #[serde(default)]
+    pub persistence: PersistenceConfig,
     /// 健康检查配置（就绪探针 / 存活探针）
     #[serde(default)]
     pub health: HealthConfig,
@@ -173,9 +179,13 @@ pub struct HttpClientConfig {
     /// 连接超时
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
     pub connect_timeout: Duration,
-    /// 全局请求超时（含连接+读取）
-    #[serde(default, with = "humantime_serde::option")]
+    /// 全局请求超时（含连接+读取），默认 30s（R1：防慢上游拖垮实例）。
+    /// 显式设为 null 可关闭（不推荐）；SSE 等流式路径使用独立的无总超时客户端。
+    #[serde(default = "default_http_timeout", with = "humantime_serde::option")]
     pub timeout: Option<Duration>,
+    /// TCP keepalive 探测间隔（长连接探活，0 = 禁用）
+    #[serde(default = "default_tcp_keepalive", with = "humantime_serde")]
+    pub tcp_keepalive: Duration,
     /// 每个 host 最大空闲连接数
     #[serde(default = "default_pool_max_idle")]
     pub pool_max_idle_per_host: usize,
@@ -203,7 +213,8 @@ impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
             connect_timeout: default_connect_timeout(),
-            timeout: None,
+            timeout: default_http_timeout(),
+            tcp_keepalive: default_tcp_keepalive(),
             pool_max_idle_per_host: default_pool_max_idle(),
             pool_idle_timeout: default_pool_idle_timeout(),
             client_cert_path: None,
@@ -217,6 +228,12 @@ impl Default for HttpClientConfig {
 
 fn default_retry_backoff() -> Duration {
     Duration::from_millis(100)
+}
+fn default_http_timeout() -> Option<Duration> {
+    Some(Duration::from_secs(30))
+}
+fn default_tcp_keepalive() -> Duration {
+    Duration::from_secs(60)
 }
 fn default_connect_timeout() -> Duration {
     Duration::from_secs(5)
@@ -408,15 +425,19 @@ fn default_referrer_policy() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BodyLimitConfig {
-    /// 请求体最大字节数
+    /// 请求体最大字节数（统一作用于代理 / pipeline / script / 管理面）
     #[serde(default = "default_body_limit")]
     pub max_bytes: usize,
+    /// 代理响应体最大字节数（R2：防大响应内存膨胀/OOM）
+    #[serde(default = "default_response_limit")]
+    pub max_response_bytes: usize,
 }
 
 impl Default for BodyLimitConfig {
     fn default() -> Self {
         Self {
             max_bytes: default_body_limit(),
+            max_response_bytes: default_response_limit(),
         }
     }
 }
@@ -425,13 +446,20 @@ fn default_body_limit() -> usize {
     10 * 1024 * 1024 // 10 MiB
 }
 
+fn default_response_limit() -> usize {
+    64 * 1024 * 1024 // 64 MiB
+}
+
 // ── 熔断器配置 ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerConfig {
-    /// 连续失败阈值
+    /// 失败阈值（R15：滚动窗口内失败次数，非“连续失败”——间歇性故障同样会累积触发）
     #[serde(default = "default_cb_failure_threshold")]
     pub failure_threshold: u32,
+    /// 失败计数滚动窗口（窗口外的失败自动衰减）
+    #[serde(default = "default_cb_failure_window", with = "humantime_serde")]
+    pub failure_window: Duration,
     /// 熔断打开持续时间
     #[serde(default = "default_cb_open_duration", with = "humantime_serde")]
     pub open_duration: Duration,
@@ -441,6 +469,7 @@ impl Default for CircuitBreakerConfig {
     fn default() -> Self {
         Self {
             failure_threshold: default_cb_failure_threshold(),
+            failure_window: default_cb_failure_window(),
             open_duration: default_cb_open_duration(),
         }
     }
@@ -448,6 +477,9 @@ impl Default for CircuitBreakerConfig {
 
 fn default_cb_failure_threshold() -> u32 {
     5
+}
+fn default_cb_failure_window() -> Duration {
+    Duration::from_secs(60)
 }
 fn default_cb_open_duration() -> Duration {
     Duration::from_secs(30)
@@ -474,6 +506,85 @@ fn default_script_max_duration() -> Duration {
     Duration::from_secs(2)
 }
 
+// ── WebSocket 隧道配置 ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSocketTunnelConfig {
+    /// 上游握手连接超时（R16）
+    #[serde(default = "default_ws_connect_timeout", with = "humantime_serde")]
+    pub connect_timeout: Duration,
+    /// 空闲超时：双向均无消息超过该时长则关闭（0 = 禁用）
+    #[serde(default = "default_ws_idle_timeout", with = "humantime_serde")]
+    pub idle_timeout: Duration,
+    /// 心跳间隔（周期向对端发 Ping；0 = 禁用）
+    #[serde(default = "default_ws_heartbeat", with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
+    /// 单条消息最大字节数
+    #[serde(default = "default_ws_max_message")]
+    pub max_message_bytes: usize,
+}
+
+impl Default for WebSocketTunnelConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: default_ws_connect_timeout(),
+            idle_timeout: default_ws_idle_timeout(),
+            heartbeat_interval: default_ws_heartbeat(),
+            max_message_bytes: default_ws_max_message(),
+        }
+    }
+}
+
+fn default_ws_connect_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+fn default_ws_idle_timeout() -> Duration {
+    Duration::from_secs(300)
+}
+fn default_ws_heartbeat() -> Duration {
+    Duration::from_secs(30)
+}
+fn default_ws_max_message() -> usize {
+    1024 * 1024 // 1 MiB
+}
+
+// ── 配置持久化（P0-4） ──
+
+/// 管理端热更新落盘与外部变更热重载。
+///
+/// 开启后管理端写操作（导入配置/路由/provider/pipeline/脚本）会先把
+/// **脱敏后的完整配置**原子写入 `path`，再应用内存；重启/多副本可据此收敛。
+/// 文件中的 `***` 哨兵在加载时按环境变量/基础配置回填真实密钥。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistenceConfig {
+    /// 是否启用（生产建议 true；默认 false 避免开发/测试意外落盘）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 持久化文件路径
+    #[serde(default = "default_persistence_path")]
+    pub path: String,
+    /// 外部变更轮询间隔（多副本共享存储时用于收敛；0 = 关闭轮询）
+    #[serde(default = "default_persistence_watch", with = "humantime_serde")]
+    pub watch_interval: Duration,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_persistence_path(),
+            watch_interval: default_persistence_watch(),
+        }
+    }
+}
+
+fn default_persistence_path() -> String {
+    "config/state/runtime.yaml".into()
+}
+fn default_persistence_watch() -> Duration {
+    Duration::from_secs(5)
+}
+
 // ── 健康检查配置 ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,6 +593,9 @@ pub struct HealthConfig {
     /// 如果为空，则自动从 routes 中提取所有 proxy 类路由的 upstream 去重
     #[serde(default)]
     pub upstreams: Vec<String>,
+    /// 探测结果缓存时长（R10：避免探针风暴与上游抖动放大；0 = 不缓存）
+    #[serde(default = "default_probe_cache_ttl", with = "humantime_serde")]
+    pub cache_ttl: Duration,
     /// 每次探测的超时时间
     #[serde(default = "default_probe_timeout", with = "humantime_serde")]
     pub probe_timeout: Duration,
@@ -497,6 +611,7 @@ impl Default for HealthConfig {
     fn default() -> Self {
         Self {
             upstreams: vec![],
+            cache_ttl: default_probe_cache_ttl(),
             probe_timeout: default_probe_timeout(),
             allow_degraded: false,
             probe_path: default_probe_path(),
@@ -504,6 +619,9 @@ impl Default for HealthConfig {
     }
 }
 
+fn default_probe_cache_ttl() -> Duration {
+    Duration::from_secs(1)
+}
 fn default_probe_timeout() -> Duration {
     Duration::from_secs(2)
 }
@@ -550,6 +668,13 @@ pub struct SessionConfig {
     pub http_only: bool,
     #[serde(default = "default_same_site")]
     pub same_site: String,
+    /// 会话空闲过期时间（R5）。与 Cookie `Max-Age` 和服务端存储 TTL 对齐；
+    /// 设为 null 则退回浏览器会话级 Cookie + 服务端默认 2 周（不推荐）。
+    #[serde(default = "default_session_ttl", with = "humantime_serde::option")]
+    pub ttl: Option<Duration>,
+    /// `sessions` 索引（管理端列表）GC 周期（R5）：按会话存储实际存在性清理，默认 10 分钟。
+    #[serde(default = "default_session_gc_interval", with = "humantime_serde")]
+    pub gc_interval: Duration,
 }
 
 impl Default for SessionConfig {
@@ -559,8 +684,17 @@ impl Default for SessionConfig {
             secure: true, // P1-3: 默认安全
             http_only: true,
             same_site: default_same_site(),
+            ttl: default_session_ttl(),
+            gc_interval: default_session_gc_interval(),
         }
     }
+}
+
+fn default_session_ttl() -> Option<Duration> {
+    Some(Duration::from_secs(14 * 24 * 3600))
+}
+fn default_session_gc_interval() -> Duration {
+    Duration::from_secs(600)
 }
 
 fn default_cookie_name() -> String {
@@ -587,6 +721,15 @@ pub struct AdminConfig {
     /// test/eval 端点每分钟每 IP 最大请求数
     #[serde(default = "default_test_rate_limit")]
     pub test_endpoint_rate_limit: u32,
+    /// 管理 API 请求体上限（R18，与业务 body_limit 独立）
+    #[serde(default = "default_admin_body_limit")]
+    pub max_body_bytes: usize,
+    /// 管理 token 认证失败限流（S3）：每个来源 IP 每分钟允许的失败次数，超出 → 429
+    #[serde(default = "default_admin_auth_fail_limit")]
+    pub auth_fail_limit_per_minute: u32,
+    /// 管理白名单 / 失败限流解析客户端 IP 时信任的代理跳数（S13，0 = 不信任 XFF）
+    #[serde(default)]
+    pub trusted_proxies: usize,
 }
 
 impl Default for AdminConfig {
@@ -597,8 +740,18 @@ impl Default for AdminConfig {
             auth_token: default_auth_token(),
             enable_test_endpoints: true,
             test_endpoint_rate_limit: default_test_rate_limit(),
+            max_body_bytes: default_admin_body_limit(),
+            auth_fail_limit_per_minute: default_admin_auth_fail_limit(),
+            trusted_proxies: 0,
         }
     }
+}
+
+fn default_admin_body_limit() -> usize {
+    8 * 1024 * 1024 // 8 MiB
+}
+fn default_admin_auth_fail_limit() -> u32 {
+    30
 }
 
 fn default_ip_whitelist() -> Vec<String> {
@@ -926,7 +1079,7 @@ pub struct RouteTypeConfig {
     pub upstream: Option<String>,
     #[serde(default)]
     pub strip_prefix: bool,
-    /// 熔断阈值（连续失败次数），0 = 不熔断
+    /// 熔断阈值（R3/R15：滚动窗口内失败次数；0 = 该路由不熔断，使用全局默认）
     #[serde(default)]
     pub circuit_breaker_threshold: u32,
     /// 代理模式: "http" | "sse" | "websocket" | "auto"
@@ -936,6 +1089,15 @@ pub struct RouteTypeConfig {
     /// - auto: 自动检测（根据 Upgrade/Content-Type）
     #[serde(default = "default_proxy_mode")]
     pub proxy_mode: String,
+
+    /// 路由级请求超时（R1，覆盖 http_client.timeout；仅 proxy http 模式生效）。
+    /// 如上传/导出类慢接口可单独放宽。
+    #[serde(default, with = "humantime_serde::option")]
+    pub timeout: Option<Duration>,
+
+    /// S9：是否向浏览器透传上游 `set-cookie`（默认 false，防上游/被攻破服务植入 Cookie）。
+    #[serde(default)]
+    pub forward_set_cookie: bool,
 
     /// RFC 8693 Token Exchange（代理上游认证的前置交换，可选）。
     /// 启用后以会话 access token 交换面向上游资源的 token 再注入代理请求。
@@ -1055,7 +1217,24 @@ impl AppConfig {
 
         fig = fig.merge(Env::prefixed("BFF_").split("__"));
 
-        let cfg: AppConfig = fig.extract()?;
+        let mut cfg: AppConfig = fig.extract()?;
+
+        // P0-4：持久化配置覆盖（管理端落盘的完整配置）
+        // 优先级：base/分文件 < runtime.yaml < BFF_* 环境变量。
+        // runtime.yaml 为脱敏快照（密钥为 *** 哨兵）→ 按当前基础配置回填后再合并。
+        if cfg.persistence.enabled {
+            let state_path = PathBuf::from(&cfg.persistence.path);
+            if state_path.is_file() {
+                let raw = std::fs::read_to_string(&state_path)?;
+                let mut overlay: AppConfig = serde_yaml::from_str(&raw)
+                    .map_err(|e| anyhow::anyhow!("解析持久化配置 {:?} 失败: {}", state_path, e))?;
+                overlay.merge_sensitive_secrets(&cfg);
+                let merged = Figment::from(Serialized::defaults(&overlay))
+                    .merge(Env::prefixed("BFF_").split("__"));
+                cfg = merged.extract()?;
+            }
+        }
+
         cfg.validate()?;
         Ok(cfg)
     }
@@ -1233,6 +1412,23 @@ impl AppConfig {
                 !p.client_id.is_empty(),
                 "OIDC provider {} client_id 不能为空",
                 p.id
+            );
+            // F11：callback_path 用于注册回调路由，必须是可用且不冲突的绝对路径
+            anyhow::ensure!(
+                p.callback_path.starts_with('/'),
+                "OIDC provider {} callback_path 必须以 / 开头: {}",
+                p.id,
+                p.callback_path
+            );
+            const RESERVED: &[&str] = &["/login", "/logout", "/live", "/ready", "/ws", "/pipeline"];
+            anyhow::ensure!(
+                !RESERVED
+                    .iter()
+                    .any(|r| p.callback_path == *r
+                        || p.callback_path.starts_with(&format!("{}/", r))),
+                "OIDC provider {} callback_path 与保留路径冲突: {}",
+                p.id,
+                p.callback_path
             );
         }
 
