@@ -13,7 +13,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # E13：注意——`-D warnings` 只允许出现在 clippy 步骤的显式参数中。
+  # 注意——`-D warnings` 只允许出现在 clippy 步骤的显式参数中。
   # 若作为全局 RUSTFLAGS 注入，会连 `cargo test` 的 rustc 编译一起打死（历史事故）。
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # E4/E14：依赖漏洞与维护状态审计。
+      # 依赖漏洞与维护状态审计。
       # 例外清单在 .cargo/audit.toml（每条均有整改说明/影响范围界定）
       - uses: rustsec/audit-check@v2
         with:
@@ -31,7 +31,7 @@ jobs:
   rust:
     name: Rust (fmt + clippy + test)
     runs-on: ubuntu-latest
-    # M1：Redis provider / 跨实例会话用例需要 Redis；提供后不再自动跳过
+    # Redis provider / 跨实例会话用例需要 Redis；提供后不再自动跳过
     services:
       redis:
         image: redis:7-alpine
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # E1：admin-ui/dist 是 RustEmbed 的编译期强依赖，必须先构建（否则 cargo test 无法编译）
+      # admin-ui/dist 是 RustEmbed 的编译期强依赖，必须先构建（否则 cargo test 无法编译）
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -85,8 +85,7 @@ jobs:
   coverage:
     name: Coverage (cargo-llvm-cov ≥75% lines)
     runs-on: ubuntu-latest
-    # E5：行覆盖率门禁。当前基线 lines 79.03%（2026-09-27 第六轮实测，含 Redis 用例；
-    # 自 70.71% 经第五/六轮两次上调）；阈值为下限护栏，
+    # 行覆盖率门禁：当前基线约 79%（含 Redis 用例）；阈值 ≥75 为下限护栏，
     # 新增测试后应逐步上调（棘轮策略）。
     services:
       redis:
@@ -163,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # E1/E13：`setup-node` 的 `cache: pnpm` 要求 pnpm 已在 PATH 中，
+      # 注意：`setup-node` 的 `cache: pnpm` 要求 pnpm 已在 PATH 中，
       # 因此必须先安装 pnpm 再配置 Node（历史事故：顺序反置时该 job 在
       # "Set up Node 22" 步骤报 `Unable to locate executable file: pnpm`）。
       - name: Install pnpm

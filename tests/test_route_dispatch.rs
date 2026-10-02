@@ -1,6 +1,6 @@
-//! 统一路由分发器（`server/route_dispatcher.rs`）覆盖补测（第六轮 P1）。
+//! 统一路由分发器（`server/route_dispatcher.rs`）覆盖补测。
 //!
-//! 审计 §2 P1 热点：该文件覆盖率长期最低（11.87%），根因是分发路径
+//! 覆盖率热点补测：该文件覆盖率曾长期偏低（11.87%），根因是分发路径
 //! （Static / Pipeline / Script / Proxy）与输入/输出映射大量分支仅有部分路径被走过。
 //! 本文件经**业务端口真实 HTTP 链路**覆盖：
 //! - Static：响应体 / 自定义头（含非法头名容错）/ 自定义状态码 / 非法状态码；
@@ -287,7 +287,7 @@ async fn script_route_extracts_inputs_across_sources() {
 
 #[tokio::test]
 async fn script_route_extracts_from_env_with_prefixed_path() {
-    // 第六轮修复回归：`env.NAME`（文档推荐形式）此前恒为 Null（被当 JSON 路径拆成
+    // 修复回归：`env.NAME`（文档推荐形式）此前恒为 Null（被当 JSON 路径拆成
     // ["env","NAME"] 查询），修复后应按变量名取值；未引用的变量不得注入。
     std::env::set_var("BFF_DT_ENV_TOKEN", "from-env");
     let mut cfg = base_config();

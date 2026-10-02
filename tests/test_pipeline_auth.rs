@@ -1,6 +1,6 @@
-//! P0-5 回归测试：`/pipeline/:name` 兼容入口必须要求认证。
+//! 回归测试：`/pipeline/:name` 兼容入口必须要求认证。
 //!
-//! 背景（审计 v2 §P0-5）：该显式路由不经过统一路由分发器，
+//! 背景：该显式路由不经过统一路由分发器，
 //! `auth_required` 对其不生效 → 匿名请求可触发任意 pipeline 真实执行。
 //! 修复后：匿名 GET/POST 一律 401（且不暴露 pipeline 是否存在）。
 
@@ -41,7 +41,7 @@ async fn anonymous_pipeline_get_returns_401() {
     assert_eq!(
         resp.status().as_u16(),
         401,
-        "匿名 GET /pipeline/:name 必须返回 401（P0-5）"
+        "匿名 GET /pipeline/:name 必须返回 401"
     );
 }
 
@@ -61,7 +61,7 @@ async fn anonymous_pipeline_post_returns_401() {
     assert_eq!(
         resp.status().as_u16(),
         401,
-        "匿名 POST /pipeline/:name 必须返回 401（P0-5）"
+        "匿名 POST /pipeline/:name 必须返回 401"
     );
 }
 

@@ -1,4 +1,4 @@
-package com.example.fakesvc.model;
+package cn.byteforce.bff.dev.fakesvc.model;
 
 /**
  * 示例用户实体 — 纯内存数据。

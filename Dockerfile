@@ -65,7 +65,7 @@ COPY --from=builder /app/target/release/bff /usr/local/bin/bff
 COPY config ./config
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 
-# P0-4：配置持久化目录（具名卷初始化时继承该目录的属主 → 非 root 进程可写）
+# 配置持久化目录（具名卷初始化时继承该目录的属主 → 非 root 进程可写）
 RUN mkdir -p /data/bff && chown 10001:10001 /data/bff
 
 # 数值 UID（无需 useradd）

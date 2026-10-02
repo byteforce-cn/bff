@@ -1,4 +1,4 @@
-//! Redis provider 集成测试（P0-1）：Cache / Lock / Session 与跨实例会话共享。
+//! Redis provider 集成测试：Cache / Lock / Session 与跨实例会话共享。
 //!
 //! 需要可达的 Redis；未设置 `BFF_TEST_REDIS_URL` 时自动跳过（CI 无 Redis 不红）。
 //!

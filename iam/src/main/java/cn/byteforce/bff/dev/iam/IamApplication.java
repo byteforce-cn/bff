@@ -1,4 +1,4 @@
-package com.example.iam;
+package cn.byteforce.bff.dev.iam;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

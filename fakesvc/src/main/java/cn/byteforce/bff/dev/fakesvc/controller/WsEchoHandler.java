@@ -1,4 +1,4 @@
-package com.example.fakesvc.controller;
+package cn.byteforce.bff.dev.fakesvc.controller;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

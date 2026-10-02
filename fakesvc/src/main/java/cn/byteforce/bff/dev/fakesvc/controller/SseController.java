@@ -1,4 +1,4 @@
-package com.example.fakesvc.controller;
+package cn.byteforce.bff.dev.fakesvc.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;

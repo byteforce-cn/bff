@@ -1,4 +1,4 @@
-package com.example.fakesvc.config;
+package cn.byteforce.bff.dev.fakesvc.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

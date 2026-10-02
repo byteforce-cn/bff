@@ -1,6 +1,6 @@
-//! P0-2 回归测试：回调地址推导与 OIDC 客户端缓存键。
+//! 回归测试：回调地址推导与 OIDC 客户端缓存键。
 //!
-//! 验收（审计 v2）：
+//! 回归验收：
 //! - 并发触发（伪造 Host 的 login）后，`redirect_uri` 始终等于 `public_base_url` 推导值；
 //! - 未配置 `public_base_url` 时，未受信任的 Host 被拒绝（不再静默拼 http://<evil>）；
 //! - 后台刷新路径不再污染请求路径的 redirect_uri（client 缓存键含 base_url）。
@@ -96,7 +96,7 @@ async fn oidc_client_cache_is_keyed_by_base_url() {
         .unwrap();
     assert!(
         !std::sync::Arc::ptr_eq(&a, &b),
-        "不同 base_url 不得共享同一 client（P0-2）"
+        "不同 base_url 不得共享同一 client"
     );
 
     // 相同 base_url → 命中缓存（指针相同）

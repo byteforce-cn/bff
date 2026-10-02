@@ -45,11 +45,11 @@ services:
       BFF_SECRET: ${BFF_SECRET:?请设置 BFF_SECRET（≥32 字节随机值）}
       BFF_SECRET_SALT: ${BFF_SECRET_SALT:?请设置 BFF_SECRET_SALT（≥16 字节随机值）}
       BFF_PROVIDER__REDIS_URL: redis://bff-redis:6379
-      # 生产防呆要求 public_base_url 或 trusted_hosts（P0-2）；本地形态按 localhost 固定
+      # 生产防呆要求 public_base_url 或 trusted_hosts；本地形态按 localhost 固定
       BFF_SERVER__PUBLIC_BASE_URL: http://localhost:8080
       # Docker 端口映射来源 IP 属 172.16.0.0/12；真实生产请按入口 LB/跳板机收紧
       BFF_ADMIN__IP_WHITELIST: '["127.0.0.1","172.16.0.0/12"]'
-      # P0-4：持久化路径（prod.yaml 默认 /data/bff/runtime.yaml）
+      # 持久化路径（prod.yaml 默认 /data/bff/runtime.yaml）
       BFF_PERSISTENCE__PATH: /data/bff/runtime.yaml
     ports:
       - "8080:8080"

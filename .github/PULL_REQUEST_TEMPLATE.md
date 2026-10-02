@@ -20,7 +20,7 @@
 - [ ] 服务编排 (pipeline/DAG)
 - [ ] 反向代理
 - [ ] 管理 API / Admin UI
-- [ ] 脚本引擎 (Rhai)
+- [ ] 脚本引擎 (QuickJS)
 - [ ] Provider
 - [ ] 配置加载
 - [ ] 其他

@@ -1,4 +1,4 @@
-package com.example.iam.config;
+package cn.byteforce.bff.dev.iam.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

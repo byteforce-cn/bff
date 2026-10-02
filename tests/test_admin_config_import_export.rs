@@ -19,7 +19,7 @@ hello:
 async fn config_export_import_and_hot_reload() {
     let idp = common::spawn_mock_oidc_provider().await;
     let mut cfg = common::base_config();
-    // P0-3：指定可识别的真实主密钥，断言导出绝不泄露
+    // 指定可识别的真实主密钥，断言导出绝不泄露
     cfg.bff_secret.secret = "e2e-master-secret-777".into();
     cfg.bff_secret.salt = "e2e-master-salt-888".into();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
@@ -42,7 +42,7 @@ async fn config_export_import_and_hot_reload() {
     assert!(yaml.contains("mock"), "导出应包含 provider: {}", yaml);
     assert!(yaml.contains("***"), "导出应脱敏: {}", yaml);
     assert!(!yaml.contains("bff-secret"), "导出不应包含真实密钥");
-    // P0-3：主密钥（secret/salt）绝不能出现在导出结果中
+    // 主密钥（secret/salt）绝不能出现在导出结果中
     assert!(
         !yaml.contains("e2e-master-secret-777"),
         "导出不得泄露 bff_secret.secret: {}",
@@ -82,7 +82,7 @@ async fn config_export_import_and_hot_reload() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["msg"], "hi from pipeline");
 
-    // 5. P0-3：导出→回导回环后，原管理口令必须仍然有效（哨兵已回填真实值）
+    // 5. 导出→回导回环后，原管理口令必须仍然有效（哨兵已回填真实值）
     let resp = client
         .get(format!("{}/admin/api/config/export", admin))
         .header("x-admin-token", auth())
@@ -92,11 +92,11 @@ async fn config_export_import_and_hot_reload() {
     assert_eq!(
         resp.status(),
         200,
-        "回导后原管理口令失效——导出入侵回环破坏了密钥（P0-3）"
+        "回导后原管理口令失效——导出入侵回环破坏了密钥"
     );
 }
 
-/// P0-3：热导入 bff_secret 必须被显式拒绝（不得静默分裂配置与运行态）。
+/// 热导入 bff_secret 必须被显式拒绝（不得静默分裂配置与运行态）。
 #[tokio::test]
 async fn import_rejects_bff_secret_change() {
     let cfg = common::base_config();
@@ -180,7 +180,7 @@ loop:
     assert_eq!(resp.status(), 422);
 }
 
-/// F5：provider 连通性校验与真实删除端点。
+/// provider 连通性校验与真实删除端点。
 #[tokio::test]
 async fn provider_verify_and_delete() {
     let idp = common::spawn_mock_oidc_provider().await;

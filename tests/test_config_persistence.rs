@@ -1,4 +1,4 @@
-//! P0-4：配置持久化与多副本收敛（管理端落盘 + 外部变更热重载）。
+//! 配置持久化与多副本收敛（管理端落盘 + 外部变更热重载）。
 mod common;
 
 use bff::config::{RouteDef, RouteType, RouteTypeConfig};

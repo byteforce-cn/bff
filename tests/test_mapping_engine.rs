@@ -307,7 +307,7 @@ fn empty_input_mapping_returns_empty() {
 }
 
 // ============================================================
-// from_env / from_path（第六轮修复回归）
+// from_env / from_path（修复回归）
 //
 // 背景：两处“接入层键名 vs 合并层路径”不一致导致特性从未生效：
 // - from_env：上下文以**变量名**为键，而合并层把 `env.NAME` 当 JSON 路径查 `["env"]["NAME"]`；
@@ -336,7 +336,7 @@ fn from_env_accepts_prefixed_and_bare_names() {
         &json!({}),
         &env_json,
     );
-    assert_eq!(result["a"], "t0k", "env.NAME 形式必须生效（第六轮修复）");
+    assert_eq!(result["a"], "t0k", "env.NAME 形式必须生效（修复回归）");
     assert_eq!(result["b"], "t0k", "裸变量名形式保持可用");
     assert!(
         result.get("missing").is_none(),
@@ -383,7 +383,7 @@ fn from_path_merged_by_target_key() {
         &json!({}),
         &json!({}),
     );
-    assert_eq!(result["userId"], "42", "from_path 必须生效（第六轮修复）");
+    assert_eq!(result["userId"], "42", "from_path 必须生效（修复回归）");
 }
 
 #[test]

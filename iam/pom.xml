@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.example</groupId>
+    <groupId>cn.byteforce.bff.dev</groupId>
     <artifactId>iam</artifactId>
     <version>0.1.0</version>
     <name>iam</name>

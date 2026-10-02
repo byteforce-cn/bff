@@ -1,5 +1,5 @@
 # 生产环境覆盖（BFF_ENV=prod 时加载）
-# 多实例状态外置（P0-1：Redis provider 已实现）
+# 多实例状态外置（Redis provider）
 provider:
   session_store: redis
   cache: redis
@@ -11,7 +11,7 @@ admin:
   # 生产强制关闭 test/eval 端点（validate 也会在 BFF_ENV=prod 时强制校验）
   enable_test_endpoints: false
 
-# P0-4：配置持久化——管理端变更落盘，重启/多副本据此收敛
+# 配置持久化——管理端变更落盘，重启/多副本据此收敛
 # path 需为可写持久化卷（K8s PVC / compose 挂载）；多副本共享同一文件可实现收敛
 persistence:
   enabled: true
@@ -32,7 +32,7 @@ auth_rate_limit:
     - "/connect/logout"
   log_over_limit: true
 
-# O3：OTel 追踪导出（默认禁用）。接入 collector 后取消注释并调整端点/采样率：
+# OTel 追踪导出（默认禁用）。接入 collector 后取消注释并调整端点/采样率：
 # - 采样建议：ParentBased 语义下有上游上下文的请求跟随上游采样位；根请求按 sample_ratio 采样
 # - endpoint 支持 https（rustls，读系统证书库），可配 BFF_TELEMETRY__OTLP_ENDPOINT 环境变量覆盖
 # telemetry:

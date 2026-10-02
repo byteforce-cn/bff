@@ -56,7 +56,7 @@ pub fn merge_inputs_full(
         result.insert(key.clone(), val.clone());
     }
 
-    // 2. from_env（第六轮修正：`env.NAME` 与裸 `NAME` 均可解析；
+    // 2. from_env（`env.NAME` 与裸 `NAME` 均可解析；
     //    原实现把 `env.NAME` 当 JSON 路径拆成 ["env","NAME"] → 恒 Null，文档推荐写法失效）
     apply_env_source(&mut result, &mapping.from_env, env_json);
 
@@ -66,7 +66,7 @@ pub fn merge_inputs_full(
     // 4. from_header
     apply_source(&mut result, &mapping.from_header, header_json);
 
-    // 5. from_path（F9；第六轮修正：path_json 由 route_dispatcher 以**目标键**预提取，
+    // 5. from_path（path_json 由 route_dispatcher 以**目标键**预提取，
     //    模板匹配已在提取阶段完成——原实现用模板串当 JSON 路径查询 → 恒 Null，from_path 从未生效）
     apply_path_source(&mut result, &mapping.from_path, path_json);
 

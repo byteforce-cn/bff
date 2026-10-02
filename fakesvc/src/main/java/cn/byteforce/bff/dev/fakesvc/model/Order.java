@@ -1,4 +1,4 @@
-package com.example.fakesvc.model;
+package cn.byteforce.bff.dev.fakesvc.model;
 
 public class Order {
 

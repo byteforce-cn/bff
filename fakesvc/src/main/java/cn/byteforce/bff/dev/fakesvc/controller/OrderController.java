@@ -1,6 +1,6 @@
-package com.example.fakesvc.controller;
+package cn.byteforce.bff.dev.fakesvc.controller;
 
-import com.example.fakesvc.model.Order;
+import cn.byteforce.bff.dev.fakesvc.model.Order;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.HttpStatus;

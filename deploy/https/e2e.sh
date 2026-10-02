@@ -27,13 +27,13 @@ done
 [[ "$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$BASE/live")" == "200" ]] || fail "BFF /live 未就绪"
 pass "/live = 200（经 nginx TLS 终止）"
 
-echo "== 1) redirect_uri 必须基于 public_base_url（防 Host 污染，P0-2）"
+echo "== 1) redirect_uri 必须基于 public_base_url（防 Host 污染）"
 LOC="$("${CURL[@]}" -D- -o /dev/null "$BASE/login" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')"
 echo "$LOC" | grep -q "redirect_uri=https%3A%2F%2Flocalhost%3A9443%2Fauth%2Fcallback" \
   || fail "redirect_uri 未按 public_base_url 推导: $LOC"
 pass "登录重定向含固定 redirect_uri（https://localhost:9443/auth/callback）"
 
-# P0-2 验收：伪造 Host 并发触发后 redirect_uri 仍恒定
+# 验收：伪造 Host 并发触发后 redirect_uri 仍恒定
 for _ in 1 2 3; do
   LOC_EVIL="$("${CURL[@]}" -H 'Host: evil.example.com' -D- -o /dev/null "$BASE/login" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')"
   echo "$LOC_EVIL" | grep -q "redirect_uri=https%3A%2F%2Flocalhost%3A9443%2Fauth%2Fcallback" \

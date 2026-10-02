@@ -1,7 +1,7 @@
 server:
   business_port: 8080
   admin_port: 8443
-  # 对外基础 URL（P0-2）：设置后 OIDC redirect_uri / 登出回跳一律基于它推导，
+  # 对外基础 URL：设置后 OIDC redirect_uri / 登出回跳一律基于它推导，
   # 不再信任 Host 头。生产（BFF_ENV=prod）必须配置 public_base_url 或 trusted_hosts。
   # public_base_url: "https://bff.example.com"
   # 可信 Host 白名单（未配置 public_base_url 时的回退防护；为空时仅允许 loopback）
@@ -21,7 +21,7 @@ provider:
 
 session:
   cookie_name: "BFF_SESSION"
-  secure: true                  # P1-3: 默认安全，LB 做 TLS 终止
+  secure: true                  # 默认安全，LB 做 TLS 终止
   http_only: true
   # 跨站点 IdP（Okta/Entra/独立域 Keycloak 等）的回调是跨站顶层导航：
   # SameSite=Strict 会使浏览器不带会话 Cookie 请求回调 → 登录必败
@@ -60,13 +60,13 @@ token_refresh:
 # HTTP 客户端配置
 http_client:
   connect_timeout: "5s"
-  timeout: "30s"              # R1: 默认总超时（含读取）；SSE 等流式路径使用独立无总超时客户端
-  tcp_keepalive: "60s"        # R1: TCP keepalive 探活（0 = 禁用）
+  timeout: "30s"              # 默认总超时（含读取）；SSE 等流式路径使用独立无总超时客户端
+  tcp_keepalive: "60s"        # TCP keepalive 探活（0 = 禁用）
   pool_max_idle_per_host: 32
   pool_idle_timeout: "90s"
   retry_max_attempts: 0       # 代理重试次数（0 = 不重试，仅幂等请求）
   retry_backoff: "100ms"      # 重试初始退避
-  max_concurrent_per_upstream: 0   # R11: 每上游并发上限（0 = 不限制；防慢上游耗尽全局连接）
+  max_concurrent_per_upstream: 0   # 每上游并发上限（0 = 不限制；防慢上游耗尽全局连接）
   # mTLS（可选）
   # client_cert_path: "/etc/bff/certs/client.pem"
   # client_key_path: "/etc/bff/certs/client-key.pem"
@@ -129,15 +129,15 @@ security_headers:
 # 请求体大小限制
 body_limit:
   max_bytes: 10485760         # 10 MiB（统一作用于代理 / pipeline / script / 管理面）
-  max_response_bytes: 67108864 # 64 MiB（R2: 代理响应体上限，防大响应 OOM）
+  max_response_bytes: 67108864 # 64 MiB（代理响应体上限，防大响应 OOM）
 
-# 熔断器（R15: 滚动窗口失败计数，成功不清零窗口）
+# 熔断器（滚动窗口失败计数，成功不清零窗口）
 circuit_breaker:
   failure_threshold: 5
   failure_window: "60s"
   open_duration: "30s"
 
-# WebSocket 隧道（S6/R7/R16）
+# WebSocket 隧道
 websocket:
   connect_timeout: "5s"       # 上游握手超时
   idle_timeout: "300s"        # 空闲超时（0 = 禁用）

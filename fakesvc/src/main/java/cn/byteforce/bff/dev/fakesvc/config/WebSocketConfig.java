@@ -1,9 +1,9 @@
-package com.example.fakesvc.config;
+package cn.byteforce.bff.dev.fakesvc.config;
 
-import com.example.fakesvc.controller.WsChatHandler;
-import com.example.fakesvc.controller.WsClockHandler;
-import com.example.fakesvc.controller.WsEchoHandler;
-import com.example.fakesvc.controller.WsWelcomeHandler;
+import cn.byteforce.bff.dev.fakesvc.controller.WsChatHandler;
+import cn.byteforce.bff.dev.fakesvc.controller.WsClockHandler;
+import cn.byteforce.bff.dev.fakesvc.controller.WsEchoHandler;
+import cn.byteforce.bff.dev.fakesvc.controller.WsWelcomeHandler;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;

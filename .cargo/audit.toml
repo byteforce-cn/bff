@@ -11,7 +11,7 @@ ignore = [
     #   - src/admin/config_api.rs（import 解析）
     #   - 测试与管线 YAML 解析
     # 影响界定：这是“unmaintained”公告而非在野漏洞；解析对象为受信来源
-    # （本地配置文件 + 持 token 的管理操作），且管理命体上限 8 MiB（R18）。
+    # （本地配置文件 + 持 token 的管理操作），且管理请求体上限 8 MiB。
     # 整改计划：跟踪 figment 上游迁移（如上游切换 serde_yaml_ng），
     # 或替换配置层为自研合并 + serde_norway/serde_yaml_ng。
     "RUSTSEC-2024-0320",
@@ -25,9 +25,9 @@ ignore = [
     # 整体移除；升级需回归 tests/test_telemetry.rs 的进程内 collector 契约。
     "RUSTSEC-2025-0134",
 
-    # ── 第六轮（2026-09-27）更正：原 reqwest 0.11 旧栈例外（h2 0.3 / rustls-webpki 0.101）
-    #    已随 openidconnect 4.0 / oauth2 5 / reqwest 0.12 迁移清零，不再需要例外。
-    #    迁移后审计结果：仅余「停维」类告警，无漏洞类告警。
+    # 说明：原 reqwest 0.11 旧栈例外（h2 0.3 / rustls-webpki 0.101）已随
+    # openidconnect 4.0 / oauth2 5 / reqwest 0.12 迁移清零，不再需要例外。
+    # 当前审计结果：仅余「停维」类与「私钥运算不可达」类告警，无在野漏洞类告警。
 
     # rsa 0.9.10 Marvin 计时侧信道（RUSTSEC-2023-0071；上游无修复版本）。
     # 引入链：openidconnect → rsa（RS256 验签）；dev-deps rsa（测试签发用）。

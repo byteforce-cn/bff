@@ -19,5 +19,5 @@ springdoc:
 
 logging:
   level:
-    com.example.fakesvc: DEBUG
+    cn.byteforce.bff.dev.fakesvc: DEBUG
     org.springframework.security: DEBUG

@@ -1,4 +1,4 @@
-# P0-4：配置持久化卷。
+# 配置持久化卷。
 #
 # 多副本收敛要求各副本共享同一文件 → 需要 ReadWriteMany（NFS/CephFS/EFS 等）。
 # 单副本（replicas=1）可用 ReadWriteOnce。

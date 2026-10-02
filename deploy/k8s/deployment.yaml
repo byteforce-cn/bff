@@ -47,15 +47,15 @@ spec:
           env:
             - name: BFF_ENV
               value: "prod"
-            # P0-2：固定对外地址（redirect_uri 不再依赖 Host 头）
+            # 固定对外地址（redirect_uri 不再依赖 Host 头）
             - name: BFF_SERVER__PUBLIC_BASE_URL
               value: "https://bff.example.com"
-            # P0-4：配置持久化（共享存储时多副本收敛）
+            # 配置持久化（共享存储时多副本收敛）
             - name: BFF_PERSISTENCE__ENABLED
               value: "true"
             - name: BFF_PERSISTENCE__PATH
               value: "/data/bff/runtime.yaml"
-            # S13：按实际入口拓扑标定（LB 后为 1；直连为 0）
+            # 按实际入口拓扑标定（LB 后为 1；直连为 0）
             - name: BFF_AUTH_RATE_LIMIT__TRUSTED_PROXIES
               value: "1"
             - name: BFF_ADMIN__TRUSTED_PROXIES

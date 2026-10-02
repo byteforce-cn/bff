@@ -1,4 +1,4 @@
-package com.example.iam.config;
+package cn.byteforce.bff.dev.iam.config;
 
 import com.nimbusds.jose.Algorithm;
 import com.nimbusds.jose.jwk.JWKSet;

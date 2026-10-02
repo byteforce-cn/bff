@@ -77,7 +77,7 @@ async fn spawn(router: axum::Router) -> String {
 
 /// 带 cookie jar、不自动跟随重定向的测试客户端。
 ///
-/// E12：必须 `no_proxy()`——否则会继承环境 `HTTP_PROXY/HTTPS_PROXY`，
+/// 必须 `no_proxy()`——否则会继承环境 `HTTP_PROXY/HTTPS_PROXY`，
 /// 导致对 127.0.0.1 的测试请求被代理拦截（结果随环境翻转）。
 pub fn test_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -250,7 +250,7 @@ pub async fn create_session_with_tokens(
 
 /// 便捷函数：为测试构造一个「已登录」会话，返回 Cookie 头值。
 ///
-/// P0-5 之后 `/pipeline/:name` 强制要求认证，测试需携带该 Cookie。
+/// `/pipeline/:name` 强制要求认证，测试需携带该 Cookie。
 pub async fn login_cookie(state: &AppState) -> String {
     let tokens = bff::oidc::StoredTokens::new(
         "mock",

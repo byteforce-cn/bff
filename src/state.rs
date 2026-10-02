@@ -476,7 +476,7 @@ fn build_http_client(
         .pool_max_idle_per_host(cfg.http_client.pool_max_idle_per_host)
         .pool_idle_timeout(cfg.http_client.pool_idle_timeout)
         // 出网统一 HTTP/1.1：连接池与超时语义简单可预期（reqwest 未启用 `http2` feature，
-        // h2 仅出现在 tonic/OTLP 独立栈）。第六轮迁移后此处不再与供应链例外相关。
+        // h2 仅出现在 tonic/OTLP 独立栈）。openidconnect 4.0 迁移后此处不再与供应链例外相关。
         .http1_only();
 
     // R1/R16：TCP keepalive 探活（0 表示禁用）

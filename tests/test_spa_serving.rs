@@ -157,7 +157,7 @@ async fn rate_limit_skip_paths_bypass_global() {
 
 /// 全局限流补液速率回归：`rate_limit.per_second` 必须表示「每秒 N 个令牌」，
 /// 而非「每 N 秒 1 个」（tower-governor 0.4.x 的 `per_second` 是周期语义，
-/// 一旦直接透传会把限流收紧 N 倍——压测实测发现，见 docs/production-progress.md）。
+/// 一旦直接透传会把限流收紧 N 倍——压测实测发现）。
 #[tokio::test]
 async fn global_rate_limit_refill_uses_per_second_rate() {
     let mut cfg = common::base_config();
