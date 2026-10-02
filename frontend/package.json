@@ -1,7 +1,13 @@
 {
-  "name": "bff-test-spa",
+  "name": "bff-demo-spa",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
+  "description": "BFF 演示 SPA（本地联调与契约验证）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/byteforce-cn/bff.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

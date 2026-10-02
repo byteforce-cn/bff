@@ -13,9 +13,23 @@ frontend/dist/
 docs/
 benchmark/
 tests/
+iam/
+fakesvc/
+examples/
 
 # 其他
 *.md
 !README.md
 .dockerignore
 docker-compose.yml
+
+# 本地工具 / 暂存（绝不进入构建上下文）
+tmp/
+.codegraph/
+
+# 密钥与证书（绝不进入构建上下文）
+certs/
+deploy/
+**/*.key
+**/*.crt
+**/*.pem

@@ -2,6 +2,11 @@
 name = "bff"
 version = "0.1.0"
 edition = "2021"
+description = "通用型 Backend-For-Frontend 中间件（Rust/Axum）：OIDC 登录、YAML 服务编排、反向代理与内嵌管理台"
+license = "MIT"
+repository = "https://github.com/byteforce-cn/bff"
+rust-version = "1.93"
+publish = false
 
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
@@ -15,7 +20,7 @@ figment = { version = "0.10", features = ["yaml", "env"] }
 async-trait = "0.1"
 moka = { version = "0.12", features = ["future"] }
 tower-sessions = "0.12"
-# 第六轮 P1 迁移：openidconnect 4.0 + oauth2 5 + reqwest 0.12 —— 移除旧栈
+# openidconnect 4.0 + oauth2 5 + reqwest 0.12 迁移：移除旧栈
 # （h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14），清零对应审计例外。
 # 注意：oauth2 5 起出网客户端直接传 `&reqwest::Client`（已实现 `AsyncHttpClient`），
 # 旧闭包式 `async_http_client` 已移除（共享客户端带超时/禁重定向，见 `state.rs::build_http_client`）。
@@ -59,7 +64,7 @@ tracing-opentelemetry = { version = "0.28", default-features = false }
 
 [dev-dependencies]
 wiremock = "0.6"
-# E9：dev-deps 也统一 rustls（原默认特性引入 native-tls/openssl-sys，
+# dev-deps 也统一 rustls（原默认特性引入 native-tls/openssl-sys，
 # 导致 `cargo test` 依赖系统 libssl-dev/pkg-config）
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 # 真实验签契约测试：进程内生成 RSA 密钥并以 RS256 签发 id_token（tests/test_oidc_signature.rs）。
@@ -70,7 +75,7 @@ opentelemetry-proto = { version = "0.27", default-features = false, features = [
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
-# E6：release 构建优化（体积/性能）
+# release 构建优化（体积/性能）
 [profile.release]
 opt-level = 3
 lto = "thin"

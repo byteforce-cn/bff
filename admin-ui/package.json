@@ -1,7 +1,13 @@
 {
   "name": "bff-admin-ui",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
+  "description": "BFF 管理台（编译期内嵌于二进制）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/byteforce-cn/bff.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

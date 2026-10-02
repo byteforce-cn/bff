@@ -1,0 +1,13 @@
+# gitleaks 配置
+#
+# 门禁原则：例外必须附理由，禁止静默忽略（与 .cargo/audit.toml 同一约定）。
+[extend]
+useDefault = true
+
+# 例外：签名契约测试内嵌入的固定 RSA 测试密钥。
+# 理由：仅测试进程使用、非秘密、与任何生产密钥无关（见 tests/test_oidc_signature.rs 顶部说明）。
+[allowlist]
+description = "fixed RSA keypair embedded in signature contract tests (test-only, non-secret)"
+paths = [
+  '''tests/test_oidc_signature\.rs''',
+]
