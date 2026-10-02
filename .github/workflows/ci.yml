@@ -24,9 +24,13 @@ jobs:
       - uses: actions/checkout@v4
       # 依赖漏洞与维护状态审计。
       # 例外清单在 .cargo/audit.toml（每条均有整改说明/影响范围界定）
+      # RUSTUP_TOOLCHAIN=stable：审计工具链独立于项目 pin——
+      # rust-toolchain.toml（1.93.0）可能低于 audit-check 安装 cargo-audit 所需版本。
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          RUSTUP_TOOLCHAIN: stable
 
   rust:
     name: Rust (fmt + clippy + test)
