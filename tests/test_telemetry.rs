@@ -159,7 +159,7 @@ async fn otlp_export_roundtrip_with_parent_linkage() {
         ))
         .expect("构造父上下文");
         let span = tracing::info_span!("test.span", "http.method" = "GET");
-        span.set_parent(parent);
+        span.set_parent(parent).expect("设置父上下文");
         let _g = span.enter();
         tracing::info!("inside span");
     });
@@ -281,7 +281,8 @@ async fn traceparent_continues_parent_trace_and_respects_sampling() {
             let span = tracing::info_span!("propagation.test");
             span.set_parent(
                 bff::telemetry::context_from_traceparent(&parent).expect("构造父上下文"),
-            );
+            )
+            .expect("设置父上下文");
             let _g = span.enter();
             bff::telemetry::current_span_traceparent()
         })

@@ -160,7 +160,10 @@ impl<B> MakeSpan<B> for BffMakeSpan {
             .and_then(crate::telemetry::context_from_traceparent)
         {
             use tracing_opentelemetry::OpenTelemetrySpanExt;
-            span.set_parent(parent);
+            // 失败（如父上下文非法）时保留无父 span，不影响请求处理
+            if let Err(err) = span.set_parent(parent) {
+                tracing::debug!(%err, "设置 OTel 父上下文失败");
+            }
         }
         span
     }

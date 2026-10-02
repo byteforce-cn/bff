@@ -18,7 +18,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use opentelemetry::{Context, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-use opentelemetry_sdk::trace::{Sampler, Tracer, TracerProvider};
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider, Tracer};
 use opentelemetry_sdk::Resource;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// 进程退出前必须调用 [`TelemetryHandle::shutdown`]（main.rs 已接线）。
 pub struct TelemetryHandle {
-    provider: TracerProvider,
+    provider: SdkTracerProvider,
     service_name: String,
 }
 
@@ -86,18 +86,20 @@ pub fn init(cfg: &TelemetryConfig) -> anyhow::Result<Option<TelemetryHandle>> {
             anyhow::anyhow!("初始化 OTLP exporter 失败（telemetry.otlp_endpoint={endpoint}）: {e}")
         })?;
 
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", cfg.service_name.clone()),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-        // 环境标识（BFF_ENV=prod/staging/...；未设置视为 dev）
-        KeyValue::new(
-            "deployment.environment",
-            std::env::var("BFF_ENV").unwrap_or_else(|_| "dev".into()),
-        ),
-    ]);
+    let resource = Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new("service.name", cfg.service_name.clone()),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            // 环境标识（BFF_ENV=prod/staging/...；未设置视为 dev）
+            KeyValue::new(
+                "deployment.environment",
+                std::env::var("BFF_ENV").unwrap_or_else(|_| "dev".into()),
+            ),
+        ])
+        .build();
 
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
             cfg.sample_ratio,
         ))))
