@@ -74,12 +74,12 @@ scope=<可选>
     同 endpoint 不同 audience/scope 不串用；
   - `subject_fp`：会话 access_token 的 SHA-256 前 16 位——会话刷新后键自动失效；
 - **值**：`TokenExchangeResult` JSON **AES-256-GCM 加密**后写入 `CacheProvider`
-  （S11：缓存泄压面不暴露上游明文令牌）；
+  （缓存中不出现上游明文令牌）；
 - **TTL** = `min(cache_ttl, expires_in − 30s, 300s)`（后端内存上限），下限 1s；
 - **single-flight**：miss 时经 `LockProvider` 抢 `bff:token_exchange_lock:{key}`：
   - 持锁者执行交换并写缓存；
   - 未持锁者最多等待 5×100ms 重读缓存，仍 miss 则自行交换（避免慢持有者拖死）；
-- **失效**：会话登出 / 管理端撤销会话时按 `bff:token_exchange:{sid}:` 前缀清理（R17）。
+- **失效**：会话登出 / 管理端撤销会话时按 `bff:token_exchange:{sid}:` 前缀清理。
 
 ## 5. 失败语义与重试
 
@@ -98,7 +98,7 @@ scope=<可选>
 ## 6. 安全注意
 
 - `client_secret` 支持 `${ENV:default}` 注入；配置导出自动打码为 `***`，
-  导入回环按 `route.path` 回填（P0-3）；
+  导入回环按 `route.path` 回填；
 - 交换缓存加密密钥即 `BFF_SECRET`（轮换 = 全员重登，见部署文档迁移预警）；
 - 该能力放大 BFF 的令牌面：务必配置 `audience`/`scope` 收窄，遵循最小权限；
 - 上游 401 时代理层会 `force_refresh` 会话令牌并**重下一轮交换**（subject 变化 → 键变化 → 重新交换）。

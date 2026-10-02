@@ -7,7 +7,7 @@
 | main   | 安全修复中（beta）|
 | v0.x   | 不提供 LTS        |
 
-> 当前项目处于早期开发阶段（POC/alpha），尚未发布正式版本。请勿在生产环境直接使用默认配置。
+> 当前为 **beta**（v0.1.x）：可用于评估与试点。生产使用前请完成[安全加固](docs/security-hardening.md)自评，并务必替换全部默认密钥。
 
 ## 报告漏洞
 
@@ -32,3 +32,5 @@
 - 管理端口（`:8443`）的 `X-Admin-Token` 默认值为 `changeme`，生产环境必须修改并配合 IP 白名单（见 `config/base.yaml`）。
 - OIDC `client_secret`、Redis 连接串等敏感配置同样通过环境变量注入，勿硬编码。
 - 内置 POC 密钥仅用于本地开发，生产必须覆盖。
+
+更多加固项（密钥管理、会话与回调地址保护、限流语义、供应链例外界定等）与验证方式见 [docs/security-hardening.md](docs/security-hardening.md)。

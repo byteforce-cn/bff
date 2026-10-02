@@ -1,147 +1,152 @@
 # BFF — 通用型 Backend-For-Frontend 中间件
 
 [![CI](https://github.com/byteforce-cn/bff/actions/workflows/ci.yml/badge.svg)](https://github.com/byteforce-cn/bff/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/byteforce-cn/bff)](https://github.com/byteforce-cn/bff/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.93.0-orange)](https://www.rust-lang.org/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.5-green)](https://spring.io/projects/spring-boot)
 
-基于 **Axum** 的 Backend-For-Frontend 聚合层 · **生产就绪**（P0 阻断全关；上线前仅剩环境类终验）
+基于 **Axum** 的通用型 Backend-For-Frontend 中间件：把 **OIDC 登录 / 会话管理 / 声明式服务编排 / 反向代理 / 脚本扩展 / 管理台** 收拢进一个单二进制服务，让前端与下游服务之间只隔一层可配置的 BFF。
 
-> ✅ **状态**：六轮生产化改造完成——M0 工程止血、M1 状态外置与可用性、M2 安全加固主体、
-> M3 可观测性与运营、P0-4 配置持久化；**P0 阻断项已全部关闭**；
-> **OIDC 依赖栈已迁移至 openidconnect 4.0 / oauth2 5 / reqwest 0.12**（整体移除
-> h2 0.3 / rustls 0.21 / rustls-webpki 0.101 旧栈，对应审计例外清零）；
-> **真实 IdP 契约验证**（Keycloak 26：登录/回调/RS256 验签/刷新/登出/Bearer/Redis 会话，
-> 见 [deploy/keycloak/README.md](deploy/keycloak/README.md)）与**真实验签回归**
-> （进程内 RS256/JWKS + 伪造密钥/`alg:none`/nonce 攻击拒绝）均已入库；
-> **SLO/容量基线已实测标定**（单实例 ≥10.4k QPS、0 错误、p95 39ms，
-> [benchmark/README.md](benchmark/README.md)）；**OTel（OTLP）追踪导出**已就绪
-> （含端到端契约测试）；HTTPS+LB 全链路 E2E 与 K8s 清单齐备。
-> 上线前仅剩**环境类动作**：外部渗透测试、生产域名 HTTPS 终验（本地同构流程见
-> [deploy/https/](deploy/https/)，逐步证据见 [docs/production-progress.md](docs/production-progress.md)）。
-> 生产环境必须通过环境变量/密钥管理注入真实密钥（见 [SECURITY.md](SECURITY.md)）。
-> 部署与运维：[production-deployment.md](docs/production-deployment.md) · [runbook.md](docs/runbook.md)。
+> English version: [README.en.md](README.en.md)
 
-## 🤖 AI 辅助开发
+> **状态：beta**（v0.1.x）。可用于评估与试点；生产使用前请阅读 [SECURITY.md](SECURITY.md) 与[安全加固](docs/security-hardening.md)，并完成默认密钥替换、TLS 与渗透测试等自评项。
 
-本项目在开发过程中使用以下 AI 工具辅助编码、代码评审与设计讨论：
+## 🎯 适用场景
 
-- **Kimi K3**
-- **DeepSeek V4**
-
-当前项目已完成六轮生产化改造（P0 阻断全部关闭，见上述进度文档）；
-OIDC 依赖栈已迁移至 openidconnect 4.0 / oauth2 5 / reqwest 0.12（审计例外清零），
-真实 IdP 兼容性已用 Keycloak 26 完成契约验证（`deploy/keycloak/`），
-真实验签已入库回归（`tests/test_oidc_signature.rs`），
-SLO/容量基线已实测标定（单实例 ≥10.4k QPS、0 错误，`benchmark/README.md`），
-OTel（OTLP）导出与端到端契约测试已就绪（`tests/test_telemetry.rs`），
-渗透测试与生产域名 HTTPS 终验仍属上线前环境类动作
-
-> AI 生成内容均经过人工审查与测试验证。
+- 前端需要统一的登录 / 会话 / 鉴权收口，而不是在每个前端项目里重复实现；
+- 需要把多个下游服务的调用聚合、编排成面向页面的接口；
+- 希望通过 YAML + 少量脚本完成接入，而不是为每条业务链路写一个定制网关。
 
 ## ✨ 功能特性
 
-- 📄 **静态 SPA 发布**：内嵌前端资源 + 前端路由 fallback
-- 🔐 **OIDC 登录**：授权码 + PKCE、令牌刷新（分布式锁防惊群）、登出
-- 🔀 **YAML 声明式服务编排**：DAG 分层并行、硬超时、fail_fast、HTTP 缓存
-- 📜 **QuickJS 脚本扩展**（JavaScript）：沙箱 + `spawn_blocking` 隔离 + 内存/栈/时长上限
-- 🔁 **反向代理**：路由映射、Bearer 注入、熔断（滚动窗口 + 半开单探针）、限流、SSE / WebSocket 透传（WS 鉴权/心跳/上限）
-- 🛠️ **管理端口（`:8443`）**：配置导入/导出（脱敏 + 热重载 + **落盘持久化**）、provider / pipeline / 脚本管理、会话列表、Prometheus 指标、内嵌管理 UI
-- 🧩 **Provider 可插拔**：缓存 / 锁 / Session，支持 `memory | redis`（Redis 为多实例共享实现，含跨实例会话/锁验证）
-- 📈 **可观测性**：请求/上游延迟直方图（低基数标签）、W3C `traceparent` 传播、**OTel（OTLP）追踪导出**（跨服务链路衔接、ParentBased 采样、关停 flush）、Grafana 面板与告警规则（`deploy/`）
-- 📦 **交付物**：多阶段 Dockerfile、docker-compose（含本地 HTTPS E2E）、K8s 清单（Deployment/Service/Ingress/PDB/HPA/NetworkPolicy/PVC）
+- 🔐 **OIDC 登录**：授权码 + PKCE、令牌刷新（分布式锁防惊群）、RP-Initiated 登出；跨站点 IdP 场景已用 Keycloak 26 实测
+- 🔀 **声明式服务编排**：YAML 定义 DAG，分层并行执行、硬超时、`fail_fast`、HTTP 缓存
+- 📜 **QuickJS 脚本扩展**：JavaScript 沙箱（内存 / 栈 / 时长上限，`spawn_blocking` 隔离）
+- 🔁 **反向代理**：路由映射与输入输出变换、Bearer 注入、熔断（滚动窗口 + 半开单探针）、限流、SSE / WebSocket 透传（含鉴权与心跳）
+- 🛠️ **管理端口（`:8443`）**：配置导入 / 导出（自动脱敏）、热重载与落盘持久化、Provider / Pipeline / 脚本管理、会话管理、Prometheus 指标、内嵌管理台
+- 🧩 **Provider 可插拔**：`memory | redis`，Redis 提供多实例共享的会话 / 锁 / 缓存
+- 📈 **可观测性**：请求与上游延迟直方图、W3C `traceparent` 传播、OTel（OTLP/gRPC）追踪导出；附 Grafana 面板与告警规则
+- 📄 **静态资源发布**：业务端口内置 SPA 托管与前端路由 fallback
+- 📦 **交付物**：多阶段 Dockerfile、docker-compose（含本地 HTTPS E2E）、K8s 清单（Deployment / Service / Ingress / PDB / HPA / NetworkPolicy / PVC）
 
-## 🏗️ 项目结构
+## 🏗️ 架构
 
-```text
-.
-├── src/              # Rust BFF 核心（Axum）
-│   ├── oidc/         #   OIDC 客户端、令牌处理
-│   ├── orchestration/#   DAG 服务编排
-│   ├── provider/     #   可插拔缓存 / 锁 / Session
-│   ├── server/       #   业务 / 管理 / 代理 / 路由分发
-│   ├── middleware/   #   熔断、IP 白名单、令牌刷新
-│   └── admin/        #   管理 API
-├── tests/            # Rust 集成测试（内存 provider，无外部依赖）
-├── admin-ui/         # 管理端 UI（React 19 + Vite + Tailwind 4 + shadcn/ui）
-├── frontend/         # 演示 SPA（Vite + TypeScript）
-├── iam/              # 测试用 OIDC Provider（Spring Authorization Server，端口 9090）
-├── fakesvc/          # 测试用下游服务（Spring Boot 3，端口 9091）
-├── config/           # 声明式配置
-└── benchmark/        # k6 压测脚本
+```mermaid
+flowchart LR
+    Browser["浏览器 / SPA"] -->|":8080 业务端口"| BFF
+    Operator["管理端 / 运维"] -->|":8443 管理端口 · X-Admin-Token + IP 白名单"| BFF
+    BFF["BFF（单进程 · Rust / Axum）<br/>OIDC 会话 · 路由分发 · 服务编排 · 反向代理 · 管理 API"]
+    BFF -->|"OIDC（授权码 + PKCE）"| IdP["OIDC Provider（Keycloak 等）"]
+    BFF -->|"代理 / 聚合"| Upstream["下游服务"]
+    BFF -.->|"provider = redis"| Redis[("Redis（会话 / 锁 / 缓存）")]
+    BFF -.->|"OTLP/gRPC（可选）"| OTel["OTel Collector"]
 ```
+
+请求从业务端口进入后，经会话与限流等中间件，由统一路由分发器按配置决定走 **代理（proxy）/ 编排（pipeline）/ 脚本（script）/ 静态资源（static）** 四类处理；管理端口独立监听，承载管理 API、指标与嵌入式管理台。
+
+### 项目结构
+
+| 目录 | 说明 |
+| --- | --- |
+| `src/` | BFF 核心（Rust / Axum）：OIDC、编排、代理、中间件、管理 API |
+| `tests/` | 集成测试（默认内存 provider，无外部依赖） |
+| `admin-ui/` | 管理台（React 19 + Vite + Tailwind 4 + shadcn/ui），编译期内嵌进二进制 |
+| `frontend/` | 演示 SPA（本地联调与契约验证用） |
+| `iam/` | **开发/测试组件**：本地 OIDC Provider（Spring Authorization Server） |
+| `fakesvc/` | **开发/测试组件**：本地下游服务（Spring Boot） |
+| `config/` | 声明式配置（`base.yaml` 为入口） |
+| `deploy/` | 部署资产（HTTPS、Keycloak E2E、K8s / Grafana / Prometheus） |
+| `benchmark/` | k6 压测脚本与场景说明 |
 
 ## 🚀 快速开始
 
 ### 环境要求
 
-| 组件 | 版本   | 工具 |
-| ---- | ------ | ---- |
-| Rust | 1.93.0 | cargo |
-| Java | 17     | Maven |
-| Node | 22.x   | pnpm |
-
-### 运行 BFF
+| 组件 | 版本 | 需要的场景 |
+| --- | --- | --- |
+| Rust | 1.93.0 | 运行 BFF（必需） |
+| Node.js | 22.x + pnpm 9 | 构建管理台 / 演示 SPA |
+| Java | 17 + Maven | 运行 `iam/`、`fakesvc/` 本地联调组件 |
+| Redis | 7 | 可选，Redis provider / 多实例场景 |
 
 ```bash
-cargo run            # 业务 :8080  管理 :8443（默认 token: changeme）
+git clone https://github.com/byteforce-cn/bff.git
+cd bff
+cargo run
 ```
 
-- 业务端口：`/login` `/auth/callback` `/logout` `/pipeline/:name` `/health` 以及 SPA
-- 管理端口：`/admin/api/*`（需 `X-Admin-Token` 头，IP 白名单见 `config/base.yaml`）
+- 业务端口：<http://localhost:8080>（`/login`、`/auth/callback`、`/logout`、`/pipeline/:name`、`/health` 与 SPA）
+- 管理端口：<http://localhost:8443>（`/admin/api/*` 需 `X-Admin-Token` 请求头，默认 `changeme`；IP 白名单见 `config/base.yaml`）
+
+> 管理台 UI 是编译期内嵌资源。未构建管理端时 `build.rs` 会生成占位提示页，保证干净克隆可以直接编译运行；
+> 需要完整管理台时，先构建再重新编译：
+
+```bash
+cd admin-ui && pnpm install && pnpm build && cd ..
+cargo run          # 或 make build（= 管理台构建 + release 构建）
+```
+
+> 演示 SPA 由业务端口按 `config/base.yaml` 的 `spa.dir`（默认 `frontend/dist`）发布，属运行时资源；未构建时 SPA 路径返回 404，不影响 API：
+
+```bash
+cd frontend && pnpm install && pnpm build
+```
 
 ### 完整本地链路（可选）
 
 ```bash
-make build           # admin-ui 构建 + bff release 构建
-make iam-run         # 启动测试 OIDC Provider (9090)
-cargo run            # 启动 bff
+docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine   # Redis（可选）
+make iam-run                    # 本地 OIDC Provider（:9090）
+cd fakesvc && mvn spring-boot:run   # 本地下游服务（:9091）
+cargo run
 ```
 
-`iam/` 与 `fakesvc/` 用于本地联调 OIDC 登录与下游代理，均为测试组件。
+`iam/` 与 `fakesvc/` 仅用于本地开发与契约验证，不是生产组件；各自目录的 README 有详细说明。
 
 ## ⚙️ 配置
 
-`config/base.yaml` 为入口（合并 `providers/pipelines/routes` 等声明式配置）；环境变量 `BFF_` 前缀可覆盖任意配置（`__` 分层），`BFF_ENV=prod` 时叠加 `config/env/prod.yaml`。
+- 入口为 `config/base.yaml`，合并顺序：`base.yaml` → `oidc/providers.yaml` → `pipelines/*.yaml` → `routes/routes.yaml` → `env/${BFF_ENV}.yaml` → `BFF_*` 环境变量（最高优先级，`__` 表示层级，如 `BFF_PROVIDER__SESSION_STORE=redis`）
+- 敏感值（`bff_secret`、OIDC `client_secret`、管理 token 等）通过环境变量 / 密钥管理注入；仓库内默认值是 **POC 占位值，生产必须替换**
+- `BFF_ENV=prod` 启用启动防呆：拒绝弱口令、内存 provider、跳过验签等不安全配置
 
-令牌加密密钥通过 `BFF_SECRET` 注入。**POC 内置开发密钥，生产必须覆盖**（详见 [SECURITY.md](SECURITY.md)）。
-
-分布式追踪（可选）：配置 `telemetry.otlp_endpoint` 启用 OTLP/gRPC 导出（默认禁用；采样、属性与 collector 对接见 [docs/production-deployment.md](docs/production-deployment.md)）。
+配置字段的完整说明见 [docs/configuration.md](docs/configuration.md)。
 
 ## 🧪 测试
 
 ```bash
-cargo test           # 单元 + 全部集成测试（无外部依赖）
-# Redis provider / 跨实例会话测试（需本地 Redis，可用 Docker）：
-docker run -d --name bff-redis -p 127.0.0.1:6379:6379 redis:7-alpine
-BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
-cargo audit          # 供应链审计（例外清单 .cargo/audit.toml，均含风险界定）
-make check           # fmt + clippy + test 全量检查
+cargo test                                   # 单元 + 集成测试（默认内存 provider，无外部依赖）
+make check                                   # fmt + clippy + test 全量检查
+cargo audit                                  # 供应链审计（例外清单与风险界定见 .cargo/audit.toml）
+BFF_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features   # 含 Redis provider 用例
+make coverage                                # 覆盖率（cargo-llvm-cov；CI 门禁 ≥75% lines）
 ```
 
-关键契约测试：WS 隧道（`tests/test_ws_tunnel.rs`）、RS256 真实验签（`tests/test_oidc_signature.rs`）、
-OTel OTLP 导出（`tests/test_telemetry.rs`）、统一路由分发与映射（`tests/test_route_dispatch.rs`、
-`tests/test_mapping_engine.rs`）；生产级 E2E 见 [deploy/https/](deploy/https/) 与 [deploy/keycloak/](deploy/keycloak/)。
+端到端与性能验证资产：
+
+- Keycloak 真实 IdP 契约（登录 / 回调 / RS256 验签 / 刷新 / 登出 / Bearer / Redis 会话）：[deploy/keycloak/README.md](deploy/keycloak/README.md)
+- HTTPS + LB 全链路 E2E：[deploy/https/](deploy/https/)
+- k6 压测（含 SLO / 容量基线方法）：[benchmark/README.md](benchmark/README.md)
 
 ## 📚 文档
 
 | 文档 | 说明 |
-| ---- | ---- |
-| [docs/production-deployment.md](docs/production-deployment.md) | 生产部署（TLS 方案/K8s/热生效对照表/SLO） |
-| [docs/production-readiness.md](docs/production-readiness.md) | 生产就绪审计报告（v2）与路线图 |
-| [docs/production-progress.md](docs/production-progress.md) | 实施进度与验证证据 |
-| [docs/runbook.md](docs/runbook.md) | 告警处置手册（Runbook） |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | 架构、模块边界与请求流 |
+| [docs/configuration.md](docs/configuration.md) | 配置参考 |
+| [docs/security-hardening.md](docs/security-hardening.md) | 安全加固清单与验证方式 |
+| [docs/deployment.md](docs/deployment.md) | 生产部署（TLS / K8s / SLO） |
+| [docs/runbook.md](docs/runbook.md) | 告警处置手册 |
 | [docs/token-exchange-rfc8693.md](docs/token-exchange-rfc8693.md) | RFC 8693 Token Exchange 设计与运维 |
 | [deploy/keycloak/README.md](deploy/keycloak/README.md) | Keycloak 真实 IdP 契约验证（一键 E2E） |
 | [benchmark/README.md](benchmark/README.md) | k6 压测说明 |
 
 ## 🤝 贡献
 
-欢迎提交 Issue 与 PR！请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+欢迎提交 Issue 与 PR。开始前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 ## 🔒 安全
 
-发现安全漏洞？请阅读 [SECURITY.md](SECURITY.md)，通过私下渠道报告，勿公开提交。
+请勿通过公开 Issue 报告安全漏洞，报告渠道与支持范围见 [SECURITY.md](SECURITY.md)。
 
 ## 📄 许可证
 

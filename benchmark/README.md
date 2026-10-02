@@ -167,7 +167,7 @@ docker run --rm -i --network host -v "$PWD/benchmark":/bench -w /bench grafana/k
 - **单实例 ≥ 10,464 QPS** 且 0 错误、0 丢弃（dropped_iterations=0）；共享 8 线程环境下仍未出现错误
   拐点（延迟随负载上升，但无失败/无熔断/无限流误伤）。
 - 最重的代理路径在峰值仅 p95 ≈ 53–56ms，**对 SLO 有 ~9× 余量**；脚本/Pipeline 路径 p95 ≈ 32ms。
-- 结果用于反推限流参数（见 `docs/production-deployment.md` §SLO）：单 IP 50rps 默认在实测能力内
+- 结果用于反推限流参数（见 `docs/deployment.md` §SLO）：单 IP 50rps 默认在实测能力内
   留出两个数量级余量，适合作为防滥用阈值而非容量阈值。
 
 ### ⚠️ 压测暴露的真实缺陷（已修复）

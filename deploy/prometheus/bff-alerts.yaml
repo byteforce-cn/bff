@@ -1,4 +1,4 @@
-# BFF Prometheus 告警规则（示例；按 SLO 基线调参，见 docs/production-deployment.md §SLO）
+# BFF Prometheus 告警规则（示例；按 SLO 基线调参，见 docs/deployment.md §SLO）
 groups:
   - name: bff
     rules:

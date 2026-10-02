@@ -1,7 +1,6 @@
 # BFF 生产部署与运维指南
 
-> 配套文档：[production-readiness.md](production-readiness.md)（审计与路线图）、
-> [production-progress.md](production-progress.md)（实施与验证记录）、
+> 配套文档：[architecture.md](architecture.md)（架构）、[security-hardening.md](security-hardening.md)（安全加固）、
 > [runbook.md](runbook.md)（告警处置手册）、
 > [../deploy/keycloak/README.md](../deploy/keycloak/README.md)（Keycloak 真实 IdP 契约验证）。
 
@@ -9,7 +8,7 @@
 
 ## 1. 目标拓扑与 TLS 方案
 
-推荐拓扑（本文档与审计 v2 §2.1 一致）：
+推荐拓扑：
 
 ```mermaid
 flowchart LR
@@ -32,7 +31,7 @@ flowchart LR
 
 - **BFF 自身不提供 TLS**（仅明文监听）：必须由上述方案之一终止 TLS；
 - **`server.public_base_url` 是硬约束**：设置后 `redirect_uri` / `post_logout_redirect_uri`
-  一律由它推导，**完全不信任 Host 头**（防 P0-2 类污染）。未设置时回退
+  一律由它推导，**完全不信任 Host 头**（防匿名 Host 污染）。未设置时回退
   `trusted_hosts` 白名单（生产 `BFF_ENV=prod` 强制二者至少其一）；
 - 上游出网：默认 rustls 校验；内网自签可用 `http_client.ca_cert_path`，
   双向 TLS 用 `client_cert_path` / `client_key_path`（PEM）；
@@ -114,7 +113,7 @@ kubectl -n bff apply -k deploy/k8s/
 
 ---
 
-## 3. 配置热生效 / 需重启对照表（P0-4 交付物）
+## 3. 配置热生效 / 需重启对照表
 
 > 依据当前实现与代码路径核对（读取 `state.cfg()` 的即热生效；启动时构建的层/客户端反之）。
 > 管理端变更已支持**落盘 + 多副本收敛**（见 §4）。
@@ -160,7 +159,7 @@ kubectl -n bff apply -k deploy/k8s/
 
 ---
 
-## 4. 配置持久化与多副本一致性（P0-4）
+## 4. 配置持久化与多副本一致性
 
 - 单一事实源：`persistence.path`（默认 `config/state/runtime.yaml`；prod 模板为
   `/data/bff/runtime.yaml`）保存**脱敏后的完整配置**（密钥以 `***` 哨兵写入）；
@@ -205,7 +204,7 @@ kubectl -n bff apply -k deploy/k8s/
 - `rate_limit.per_second: 50 / burst_size: 500`（按真实客户端 IP）：防单客户端滥用的阈值，
   与实测引擎能力相差两个数量级，无需按容量放大；
 - HPA 建议以 **50–60% 水位**设置扩容触发（如单副本 5k QPS 触发），并按副本数 ×10k QPS 估算集群上限；
-- ⚠️ 限流语义修复（本轮压测发现）：tower-governor 0.4.x 的 `per_second` 为周期语义，
+- ⚠️ 限流语义修复（压测实测发现）：tower-governor 0.4.x 的 `per_second` 为周期语义，
   旧实现会把 50/s 退化为每 50s 1 个；已在 `rate_limit_skip.rs` 显式换算并加回归测试，升级依赖时勿回退。
 
 ---
@@ -222,7 +221,7 @@ kubectl -n bff apply -k deploy/k8s/
 - **资源属性**：`service.name`（可配，默认 `bff`）、`service.version`、`deployment.environment`（取 `BFF_ENV`）。
 - **关停**：SIGTERM 排空后 flush 导出队列再退出；异常退出最多丢失批量窗口（默认 5s）内的 span。
 - **出网方向**：BFF 自身出网统一 **HTTP/1.1**（`.http1_only()`，连接池/超时行为确定性优先；
-  第六轮 openidconnect 4.0 / reqwest 0.12 迁移后已与供应链例外无关）；OTLP 走独立 tonic 栈（HTTP/2）。
+  已随 openidconnect 4.0 / reqwest 0.12 迁移，与供应链例外界定无关）；OTLP 走独立 tonic 栈（HTTP/2）。
 - collector 最小接收示例（验证用）：
 
   ```yaml
@@ -243,7 +242,8 @@ kubectl -n bff apply -k deploy/k8s/
 - [ ] CORS：仅按需填写 `allowed_origins`（空 = 不允许跨域；`permissive` 仅限本地）；
 - [ ] `security_headers.hsts_max_age` 在 LB 未代发时配置（如 `31536000`）；
 - [ ] OIDC `insecure_skip_id_token_verification` 保持 false（prod 强制）；
-- [ ] 依赖审计（CI `audit` job + `.cargo/audit.toml` 例外清单）无新增未处置项。- [ ] **生产上游一律 https**（`routes[].config.upstream`、OIDC issuer/token endpoint）：
+- [ ] 依赖审计（CI `audit` job + `.cargo/audit.toml` 例外清单）无新增未处置项；
+- [ ] **生产上游一律 https**（`routes[].config.upstream`、OIDC issuer/token endpoint）：
   内网自签配 `http_client.ca_cert_path`；双向 TLS 配 `client_cert_path/key_path`；
-  示例配置中的 `http://localhost` 仅为本地联调，照抄上线属不安全默认值（审计附录 C）。
+  示例配置中的 `http://localhost` 仅为本地联调，照抄上线属不安全默认值。
 - [ ] `telemetry.otlp_endpoint` 指向内网 collector（勿暴露公网；跨网段用 https 端点）。

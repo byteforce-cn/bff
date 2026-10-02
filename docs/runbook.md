@@ -57,7 +57,7 @@
 4. 全局限流 429：确认 `rate_limit.skip_path_prefixes` 是否覆盖 SPA 静态资源；
    排查响应头 `x-ratelimit-after`（秒）估算恢复时间；
 5. 全局限流参数（`rate_limit.per_second/burst_size`）在**启动期固化**，调整后需滚动重启；
-   `per_second` 语义 = 每秒补液令牌数（容量与参数反推见 `docs/production-deployment.md` §SLO），
+   `per_second` 语义 = 每秒补液令牌数（容量与参数反推见 `docs/deployment.md` §SLO），
    压测验证方法见 `benchmark/README.md`。
 
 ## Token Exchange
@@ -67,7 +67,7 @@
    `denied` → 权限/audience/scope 配置；
    `client_config` → client_id/secret/token_endpoint 配置；
    `upstream` → 授权服务器故障；
-2. 会话登出后缓存已随会话清理（R17）；如怀疑残留，可重启或等待 TTL 过期；
+2. 会话登出后缓存已随会话清理；如怀疑残留，可重启或等待 TTL 过期；
 3. discovery 结果缓存 10 分钟；更换 IdP token endpoint 后需等待或重启。
 
 ---
@@ -78,5 +78,5 @@
 | --- | --- |
 | 回滚最近一次管理端配置 | 用变更前的 `config/export` 文件重新 import（`***` 哨兵会保留现网密钥） |
 | 强制放弃运行时覆盖 | 停止实例 → 移除/备份 `runtime.yaml` → 重启（回落到 base/env 配置） |
-| 密钥轮换 | 走 §production-deployment.md「迁移预警」：与 Session 迁移合并窗口执行，重启生效，全员重登 |
+| 密钥轮换 | 走 `docs/deployment.md` 的「迁移预警」：与 Session 迁移合并窗口执行，重启生效，全员重登 |
 | 恢复单实例形态 | 临时置 `provider.*=memory` **仅限已声明风险的单副本环境**；prod 防呆会拒绝，需同时改环境标记（不建议） |

@@ -1,8 +1,7 @@
 # Keycloak 真实 IdP 契约验证
 
 用 **Keycloak 26**（Docker）替代仓库自带的 Mock IdP / Spring AS，验证 BFF 对**真实、
-非 Spring Authorization Server 的 IdP** 的 OIDC 契约兼容性（审计 v2「上线前 Should 项」：
-真实 IdP 兼容性验证）。
+非 Spring Authorization Server 的 IdP** 的 OIDC 契约兼容性。
 
 与 Mock IdP（`examples/mock_idp.rs`、未签名 id_token、自动授权）的关键差异：
 
