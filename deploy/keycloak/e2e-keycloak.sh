@@ -142,7 +142,7 @@ echo "$DOC" | grep -q '"token_endpoint_auth_methods_supported":\[[^]]*"client_se
   fail "discovery 未声明 client_secret_post"
 pass "discovery：issuer=$KC_ISSUER，end_session_endpoint / S256 / client_secret_post 齐备"
 
-# BFF 侧经容器网络完成真实 discovery（provider verify 端点，F5）
+# BFF 侧经容器网络完成真实 discovery（provider verify 端点）
 VERIFY="$(curl -s --max-time 15 -X POST -H "X-Admin-Token: $BFF_ADMIN_TOKEN" \
   "$ADMIN_API/oidc/providers/keycloak/verify")"
 echo "$VERIFY" | grep -q '"ok":true' || fail "BFF provider verify 失败（容器→Keycloak）：$VERIFY"

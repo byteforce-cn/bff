@@ -146,7 +146,7 @@ steps:
     );
 }
 
-/// M1: Pipeline 内 script step 可以通过 params 读取 session/env 注入值。
+/// Pipeline 内 script step 可以通过 params 读取 session/env 注入值。
 #[tokio::test]
 async fn script_step_reads_params_from_session_env() {
     let yaml = r#"
@@ -188,7 +188,7 @@ steps:
     );
 }
 
-/// M1: 上游 step 输出 + params 均可被 script step 访问。
+/// 上游 step 输出 + params 均可被 script step 访问。
 /// params 在顶层，step 输出嵌套在 step_id.body 下。
 #[tokio::test]
 async fn script_step_params_and_step_outputs_both_accessible() {
@@ -252,7 +252,7 @@ steps:
     );
 }
 
-/// M1: 无 session/env 映射的 pipeline 行为不变（向后兼容）。
+/// 无 session/env 映射的 pipeline 行为不变（向后兼容）。
 #[tokio::test]
 async fn pipeline_without_params_behaves_same() {
     let yaml = r#"

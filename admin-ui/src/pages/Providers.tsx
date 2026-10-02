@@ -93,7 +93,7 @@ export default function ProvidersPage() {
   const handleDelete = async () => {
     if (!deleteId) return;
     try {
-      // F5：调用真实 DELETE 端点（原实现用 PUT {_delete:true} 冒充删除，后端从不识别）
+      // 调用真实 DELETE 端点（原实现用 PUT {_delete:true} 冒充删除，后端从不识别）
       await deleteProvider(deleteId);
       toast.success(`Provider "${deleteId}" 已删除`);
       setDeleteId(null);
@@ -106,7 +106,7 @@ export default function ProvidersPage() {
   const handleTest = async (id: string) => {
     setTestingId(id);
     try {
-      // F5：后端执行真实 OIDC discovery（原实现不发任何请求、无条件报“通过”）
+      // 后端执行真实 OIDC discovery（原实现不发任何请求、无条件报“通过”）
       const res = await verifyProvider(id);
       if (res.ok) {
         toast.success(

@@ -69,7 +69,7 @@ impl PipelineExecutor {
 
                     set.spawn(async move {
                         let inputs = results.read().await.clone();
-                        // Per-step timeout (P1-8)
+                        // Per-step timeout
                         let step_fut =
                             execute_step(step.step_type, &step.config, &params, &inputs, &ctx);
                         match tokio::time::timeout(step_timeout, step_fut).await {

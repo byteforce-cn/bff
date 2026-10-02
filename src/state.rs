@@ -33,13 +33,13 @@ pub struct AppState {
     pub config: Arc<ArcSwap<AppConfig>>,
     /// 常规出网客户端（代理 http / 编排 / readiness；默认 30s 总超时）
     pub http: reqwest::Client,
-    /// R1：流式出网客户端（SSE 等长连接：无总超时，仅 connect 超时 + TCP keepalive）
+    /// 流式出网客户端（SSE 等长连接：无总超时，仅 connect 超时 + TCP keepalive）
     pub http_stream: reqwest::Client,
-    /// R13：OIDC 出网专用客户端（带超时、连接池复用）
+    /// OIDC 出网专用客户端（带超时、连接池复用）
     pub oidc_http: reqwest::Client,
     pub cache: Arc<dyn CacheProvider>,
     pub lock: Arc<dyn LockProvider>,
-    /// 会话存储：按配置为 memory / redis（P0-1 多实例共享）
+    /// 会话存储：按配置为 memory / redis（多实例共享）
     pub session_store: Arc<dyn SessionStore>,
     /// Redis 连接池（仅当任一 provider 使用 redis 时存在）
     pub redis_pool: Option<RedisPool>,
@@ -49,20 +49,20 @@ pub struct AppState {
     pub breakers: CircuitBreakerRegistry,
     pub scripts: Arc<RwLock<HashMap<String, String>>>,
     pub prometheus: PrometheusHandle,
-    /// R11：按上游的并发舱壁（0 = 不限制）
+    /// 按上游的并发舱壁（0 = 不限制）
     pub upstream_limits: UpstreamLimits,
-    /// P0-4：最近一次由本进程写入持久化文件的 sha256（避免 watcher 自触发）
+    /// 最近一次由本进程写入持久化文件的 sha256（避免 watcher 自触发）
     last_config_hash: Arc<std::sync::RwLock<Option<String>>>,
 }
 
-/// R11：按上游分组的并发信号量（舱壁），隔离慢上游对全局连接/任务的耗尽。
+/// 按上游分组的并发信号量（舱壁），隔离慢上游对全局连接/任务的耗尽。
 #[derive(Clone)]
 pub struct UpstreamLimits {
     max_per_upstream: usize,
     semaphores: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
 }
 
-/// R11：舱壁决策。
+/// 舱壁决策。
 pub enum BulkheadDecision {
     /// 未启用（上限 0）
     Disabled,
@@ -102,7 +102,7 @@ impl AppState {
     pub fn new(config: AppConfig) -> anyhow::Result<Self> {
         config.validate()?;
 
-        // P0-2：未固定对外地址时的部署提醒（生产防呆已在 validate 中强制）
+        // 未固定对外地址时的部署提醒（生产防呆已在 validate 中强制）
         if config.server.public_base_url.is_none() {
             tracing::warn!(
                 "未配置 server.public_base_url：OIDC 回调地址将按可信 Host 推导（仅限本机/白名单场景；生产请配置固定对外地址）"
@@ -113,7 +113,7 @@ impl AppState {
         crate::utils::crypto::init(&config.bff_secret.secret, &config.bff_secret.salt)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // P0-1：按配置构建 provider（memory | redis），Redis 连接惰性建立
+        // 按配置构建 provider（memory | redis），Redis 连接惰性建立
         let need_redis = config.provider.session_store == "redis"
             || config.provider.cache == "redis"
             || config.provider.lock == "redis";
@@ -152,10 +152,10 @@ impl AppState {
 
         // 使用配置构建 HTTP 客户端（上游代理/编排/readiness 共用）
         let http = build_http_client(&config, config.http_client.timeout, true)?;
-        // R1：SSE 等流式路径使用无总超时客户端（但仍受 connect 超时/TCP keepalive 保护），
+        // SSE 等流式路径使用无总超时客户端（但仍受 connect 超时/TCP keepalive 保护），
         // 避免全局 30s 超时把长连接流拦腰截断。
         let http_stream = build_http_client(&config, None, true)?;
-        // R13：OIDC 出网客户端——默认 15s 总超时（可被 http_client.timeout 显式覆盖），
+        // OIDC 出网客户端——默认 15s 总超时（可被 http_client.timeout 显式覆盖），
         // 不跟随重定向（防 SSRF），避免 IdP 无响应时 /login、/auth/callback、refresh、
         // discovery 无限期挂起。
         let oidc_http = build_http_client(
@@ -216,7 +216,7 @@ impl AppState {
         if let Some(pool) = &self.redis_pool {
             pool.ping().await?;
         }
-        // P0-4：持久化启用时确保目录可用（fail-fast，避免管理操作时才发现不可写）
+        // 持久化启用时确保目录可用（fail-fast，避免管理操作时才发现不可写）
         {
             let cfg = self.config.load();
             if cfg.persistence.enabled {
@@ -248,7 +248,7 @@ impl AppState {
         Ok(())
     }
 
-    /// R5：`sessions` 索引（管理端会话列表）单轮 GC。
+    /// `sessions` 索引（管理端会话列表）单轮 GC。
     ///
     /// HashMap 中的条目在会话过期（store 中不存在）后必须清理，否则：
     /// - 内存随登录次数无界增长；
@@ -281,7 +281,7 @@ impl AppState {
         removed
     }
 
-    /// R5：后台会话 GC 任务（由 main 在启动时 spawn，间隔由 `session.gc_interval` 控制）。
+    /// 后台会话 GC 任务（由 main 在启动时 spawn，间隔由 `session.gc_interval` 控制）。
     pub async fn run_session_gc(self: Arc<Self>, interval: Duration) {
         if interval == Duration::ZERO {
             return;
@@ -296,7 +296,7 @@ impl AppState {
             }
         }
     }
-    /// P0-4：外部配置变更轮询（多副本共享存储 / 运维手工修改 runtime.yaml）。
+    /// 外部配置变更轮询（多副本共享存储 / 运维手工修改 runtime.yaml）。
     ///
     /// - 内容哈希与本进程最近写入一致 → 跳过（避免自我触发）；
     /// - 外部内容须通过校验且不试图变更 bff_secret，否则忽略并告警（不影响运行态）。
@@ -349,7 +349,7 @@ impl AppState {
             }
         }
     }
-    /// R5：更新会话索引的 `last_seen`（节流：距上次更新 <60s 时跳过，避免写放大）。
+    /// 更新会话索引的 `last_seen`（节流：距上次更新 <60s 时跳过，避免写放大）。
     pub async fn touch_session(&self, session_id: &str) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -365,11 +365,11 @@ impl AppState {
 
     /// 原子替换配置快照（热重载）。
     ///
-    /// P0-4：持久化开启时先把脱敏配置原子落盘（失败则不应用，避免
+    /// 持久化开启时先把脱敏配置原子落盘（失败则不应用，避免
     /// “内存改了、磁盘没改”的分裂）；重启与多副本据此收敛。
     pub fn replace_config(&self, cfg: AppConfig) -> anyhow::Result<()> {
         cfg.validate().map_err(|e| anyhow::anyhow!(e))?;
-        // P0-3：bff_secret 不支持热更新。crypto::init 使用进程级 OnceLock，仅启动时生效；
+        // bff_secret 不支持热更新。crypto::init 使用进程级 OnceLock，仅启动时生效；
         // 若允许替换，会造成「配置显示新密钥、加解密仍用旧密钥」的静默分裂，
         // 且新密钥反而会被导出接口泄露 → 显式拒绝并提示重启。
         {
@@ -387,7 +387,7 @@ impl AppState {
         Ok(())
     }
 
-    /// P0-4：把配置（脱敏）原子写入持久化文件；未启用时为 no-op。
+    /// 把配置（脱敏）原子写入持久化文件；未启用时为 no-op。
     pub fn persist_config(&self, cfg: &AppConfig) -> anyhow::Result<()> {
         if !cfg.persistence.enabled {
             return Ok(());
@@ -413,7 +413,7 @@ impl AppState {
         Ok(())
     }
 
-    /// P0-4：应用外部（另一副本/运维手工）写入的配置文件。
+    /// 应用外部（另一副本/运维手工）写入的配置文件。
     ///
     /// 与 `replace_config` 的差异：不再回写文件（避免写放大），但同样校验与
     /// 拒绝 bff_secret 变更，并记录文件哈希避免自我触发。
@@ -436,7 +436,7 @@ impl AppState {
         Ok(())
     }
 
-    /// P0-4：watcher 调用——文件内容是否为本进程自己写入的（是则跳过）。
+    /// watcher 调用——文件内容是否为本进程自己写入的（是则跳过）。
     pub fn is_own_config_write(&self, file_hash: &str) -> bool {
         self.last_config_hash.read().expect("哈希锁损坏").as_deref() == Some(file_hash)
     }
@@ -479,7 +479,7 @@ fn build_http_client(
         // h2 仅出现在 tonic/OTLP 独立栈）。openidconnect 4.0 迁移后此处不再与供应链例外相关。
         .http1_only();
 
-    // R1/R16：TCP keepalive 探活（0 表示禁用）
+    // TCP keepalive 探活（0 表示禁用）
     if cfg.http_client.tcp_keepalive > Duration::ZERO {
         b = b.tcp_keepalive(cfg.http_client.tcp_keepalive);
     }

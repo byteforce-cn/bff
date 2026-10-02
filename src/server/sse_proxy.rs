@@ -19,10 +19,10 @@ use futures::StreamExt;
 /// - 大文件下载
 /// - 任何需要流式传输的 HTTP 响应
 ///
-/// R15：传入 `completion` 时按**流的终态**计熔断（正常结束=成功；读取错误=失败），
+/// 传入 `completion` 时按**流的终态**计熔断（正常结束=成功；读取错误=失败），
 /// 修正“流建立成功即记健康、中途夭折被忽略”的假健康问题。
 ///
-/// S9：响应头走统一过滤策略（剥离 hop-by-hop / CORS 家族 / 默认剥离 set-cookie）。
+/// 响应头走统一过滤策略（剥离 hop-by-hop / CORS 家族 / 默认剥离 set-cookie）。
 #[allow(clippy::too_many_arguments)]
 pub async fn sse_stream(
     http: &reqwest::Client,
@@ -59,7 +59,7 @@ pub async fn sse_stream(
 
     let resp = out_req.send().await.map_err(|e| {
         tracing::warn!(%upstream_url, error = %e, "上游 SSE 连接失败");
-        // S12：对外不暴露上游地址/错误细节
+        // 对外不暴露上游地址/错误细节
         AppError::bad_gateway("上游服务暂不可用")
     })?;
 
@@ -83,7 +83,7 @@ pub async fn sse_stream(
 
     let mut builder = Response::builder().status(status.as_u16());
 
-    // S9：统一响应头过滤（原实现连 hop-by-hop 都未过滤）
+    // 统一响应头过滤（原实现连 hop-by-hop 都未过滤）
     for (k, v) in headers.iter() {
         if crate::server::proxy::should_strip_response_header(k.as_str(), forward_set_cookie) {
             continue;

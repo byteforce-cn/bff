@@ -14,7 +14,7 @@ use tower_sessions::Session;
 
 /// 在 routes 中匹配请求（最长 path 前缀 + 段边界 + method 过滤）。
 ///
-/// F2：前缀匹配必须停在路径段边界——原实现 `starts_with` 会让 `/api` 命中 `/api-secret`，
+/// 前缀匹配必须停在路径段边界——原实现 `starts_with` 会让 `/api` 命中 `/api-secret`，
 /// 可能把越权请求转发到错误上游。
 ///
 /// 返回匹配到的 RouteDef 引用，或 None。
@@ -49,7 +49,7 @@ pub async fn dispatch(
             .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
     }
 
-    // R2：请求体上限统一读取配置（原实现硬编码 1 MiB，调大 body_limit 无效）
+    // 请求体上限统一读取配置（原实现硬编码 1 MiB，调大 body_limit 无效）
     let max_body = state.cfg().body_limit.max_bytes;
 
     // 按类型分发
@@ -81,7 +81,7 @@ pub async fn dispatch(
 
 /// 从 Session 提取用户身份信息 + 按需收集环境变量，构建 JSON 上下文。
 ///
-/// S5：
+///
 /// - 仅当 `input_mapping.from_env` 非空时才收集环境变量（原实现在每个
 ///   pipeline/script 请求上无条件克隆全量环境变量，是请求路径上的稳定开销）；
 /// - 只注入**显式引用**的变量名，不再默认提供全量环境；
@@ -107,7 +107,7 @@ async fn build_context_json(
     (session_json, env_json)
 }
 
-/// S5：按 `from_env` 映射构建最小环境变量上下文。
+/// 按 `from_env` 映射构建最小环境变量上下文。
 fn build_env_context(input_mapping: &crate::config::InputMapping) -> Value {
     if input_mapping.from_env.is_empty() {
         return Value::Object(serde_json::Map::new());
@@ -158,7 +158,7 @@ fn extract_inputs_from_parts(
         serde_json::from_slice(body_bytes).unwrap_or(Value::Object(serde_json::Map::new()))
     };
 
-    // 解析 headers（S5：过滤敏感头，避免 cookie/authorization 进入脚本/编排可见上下文）
+    // 解析 headers（过滤敏感头，避免 cookie/authorization 进入脚本/编排可见上下文）
     let header_json = {
         const SENSITIVE: &[&str] = &[
             "cookie",
@@ -179,7 +179,7 @@ fn extract_inputs_from_parts(
         Value::Object(map)
     };
 
-    // F9：from_path 参数提取（模板如 path./api/users/{userId}）
+    // from_path 参数提取（模板如 path./api/users/{userId}）
     let path_json = {
         let request_path = parts.uri.path();
         let mut map = serde_json::Map::new();
@@ -265,7 +265,7 @@ async fn execute_pipeline(
 
     match result {
         Ok(r) => {
-            // F1/F10：执行 output_mapping（pick/rename/wrap）与 status_map
+            // 执行 output_mapping（pick/rename/wrap）与 status_map
             let mapped = mapping::apply_output_mapping(&route.output_mapping, r.body);
             let status = mapping::resolve_status(&route.output_mapping, &mapped)
                 .unwrap_or(r.status.as_u16());
@@ -303,7 +303,7 @@ async fn execute_script(
     let engine = crate::scripting::ScriptEngine::new();
     match engine.run_json(&script, inputs).await {
         Ok(v) => {
-            // F1/F10：执行 output_mapping 与 status_map
+            // 执行 output_mapping 与 status_map
             let mapped = mapping::apply_output_mapping(&route.output_mapping, v);
             let status = mapping::resolve_status(&route.output_mapping, &mapped).unwrap_or(200);
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -390,7 +390,7 @@ mod tests {
             match_route(&routes, "GET", "/api/dt/1").unwrap().path,
             "/api/dt"
         );
-        // F2：段边界——/api/dt 不得命中 /api/dt-secret
+        // 段边界——/api/dt 不得命中 /api/dt-secret
         assert_eq!(
             match_route(&routes, "GET", "/api/dt-secret").unwrap().path,
             "/api/dt-secret"
@@ -452,7 +452,7 @@ mod tests {
     fn build_env_context_respects_explicit_and_wildcard() {
         std::env::set_var("BFF_UT_ENV_A", "va");
 
-        // 空映射 → 不收集（S5：非显式引用不注入）
+        // 空映射 → 不收集（非显式引用不注入）
         assert_eq!(
             build_env_context(&InputMapping::default()),
             serde_json::json!({})

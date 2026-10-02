@@ -25,7 +25,7 @@ use tower_governor::governor::{Governor, GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::KeyExtractor;
 use tower_governor::GovernorError;
 
-/// S13：按「真实客户端 IP」限流的 key extractor。
+/// 按「真实客户端 IP」限流的 key extractor。
 ///
 /// 原实现用 `PeerIpKeyExtractor`（按对端 IP）：LB 拓扑下全站共享一个桶，
 /// 真实业务超 50rps 即对**所有用户** 429，限流器反而成为单点放大器。

@@ -5,7 +5,7 @@
 //! - 两个 spawn task 分别处理 客户端→上游 和 上游→客户端 两个方向
 //! - 任一方向断开即终止整个隧道
 //!
-//! 生产加固（S6/R7/R16）：
+//! 生产加固：
 //! - 上游握手带 **connect 超时**（黑洞上游不再让升级请求永久悬挂）；
 //! - 空闲超时 + 双向心跳（Ping），防连接泄漏与被中间设备静默回收；
 //! - 消息大小上限（超限以 1009 关闭）；
@@ -60,7 +60,7 @@ pub async fn ws_tunnel(
 ) {
     tracing::info!(%upstream_url, "WebSocket 隧道建立中");
 
-    // 1. 连接上游 WebSocket（R16：带 connect 超时；S6：Bearer 注入）
+    // 1. 连接上游 WebSocket（带 connect 超时与 Bearer 注入）
     let connect = connect_upstream(&upstream_url, auth_token.as_deref());
     let upstream_ws = match tokio::time::timeout(cfg.connect_timeout, connect).await {
         Ok(Ok((ws, _))) => ws,

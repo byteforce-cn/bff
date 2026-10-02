@@ -6,7 +6,7 @@
 //! 3. `config/pipelines/*.yaml`（每个文件顶层 map 合并到 `pipelines` 键下）
 //! 4. `config/routes/routes.yaml`
 //! 5. `config/env/{BFF_ENV}.yaml`
-//! 6. 环境变量 `BFF_` 前缀（`__` 分隔层级）——最高优先级（F14：12-factor）
+//! 6. 环境变量 `BFF_` 前缀（`__` 分隔层级）——最高优先级（12-factor）
 
 use figment::providers::{Env, Format, Serialized, Yaml};
 use figment::Figment;
@@ -122,13 +122,13 @@ pub struct AppConfig {
     /// 脚本引擎配置
     #[serde(default)]
     pub scripting: ScriptingConfig,
-    /// WebSocket 隧道配置（超时/心跳/消息上限，S6/R7/R16）
+    /// WebSocket 隧道配置（超时/心跳/消息上限）
     #[serde(default)]
     pub websocket: WebSocketTunnelConfig,
-    /// O3：OpenTelemetry 追踪导出（默认禁用，仅保留 W3C traceparent 传播）
+    /// OpenTelemetry 追踪导出（默认禁用，仅保留 W3C traceparent 传播）
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-    /// P0-4：配置持久化（管理端变更落盘 + 外部变更热重载）
+    /// 配置持久化（管理端变更落盘 + 外部变更热重载）
     #[serde(default)]
     pub persistence: PersistenceConfig,
     /// 健康检查配置（就绪探针 / 存活探针）
@@ -148,7 +148,7 @@ pub struct ServerConfig {
     pub admin_port: u16,
     /// 对外基础 URL（如 `https://bff.example.com`）。
     /// 设置后 OIDC `redirect_uri` / `post_logout_redirect_uri` 一律基于它推导，
-    /// **不再信任 Host 头**（P0-2：防止匿名 Host 污染全体用户的授权地址）。
+    /// **不再信任 Host 头**（防止匿名 Host 污染全体用户的授权地址）。
     #[serde(default)]
     pub public_base_url: Option<String>,
     /// 可信 Host 白名单（未配置 `public_base_url` 时的回退路径防护）。
@@ -182,7 +182,7 @@ pub struct HttpClientConfig {
     /// 连接超时
     #[serde(default = "default_connect_timeout", with = "humantime_serde")]
     pub connect_timeout: Duration,
-    /// 全局请求超时（含连接+读取），默认 30s（R1：防慢上游拖垮实例）。
+    /// 全局请求超时（含连接+读取），默认 30s（防慢上游拖垮实例）。
     /// 显式设为 null 可关闭（不推荐）；SSE 等流式路径使用独立的无总超时客户端。
     #[serde(default = "default_http_timeout", with = "humantime_serde::option")]
     pub timeout: Option<Duration>,
@@ -210,7 +210,7 @@ pub struct HttpClientConfig {
     /// 重试初始退避时间
     #[serde(default = "default_retry_backoff", with = "humantime_serde")]
     pub retry_backoff: Duration,
-    /// R11：每个上游的最大并发请求数（0 = 不限制）。
+    /// 每个上游的最大并发请求数（0 = 不限制）。
     /// 用于隔离慢上游，避免单一上游耗尽全局连接/任务（仅 http 代理模式；SSE 为长连接不占名额）。
     #[serde(default)]
     pub max_concurrent_per_upstream: usize,
@@ -436,7 +436,7 @@ pub struct BodyLimitConfig {
     /// 请求体最大字节数（统一作用于代理 / pipeline / script / 管理面）
     #[serde(default = "default_body_limit")]
     pub max_bytes: usize,
-    /// 代理响应体最大字节数（R2：防大响应内存膨胀/OOM）
+    /// 代理响应体最大字节数（防大响应内存膨胀/OOM）
     #[serde(default = "default_response_limit")]
     pub max_response_bytes: usize,
 }
@@ -462,7 +462,7 @@ fn default_response_limit() -> usize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CircuitBreakerConfig {
-    /// 失败阈值（R15：滚动窗口内失败次数，非“连续失败”——间歇性故障同样会累积触发）
+    /// 失败阈值（滚动窗口内失败次数，非“连续失败”——间歇性故障同样会累积触发）
     #[serde(default = "default_cb_failure_threshold")]
     pub failure_threshold: u32,
     /// 失败计数滚动窗口（窗口外的失败自动衰减）
@@ -518,7 +518,7 @@ fn default_script_max_duration() -> Duration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketTunnelConfig {
-    /// 上游握手连接超时（R16）
+    /// 上游握手连接超时
     #[serde(default = "default_ws_connect_timeout", with = "humantime_serde")]
     pub connect_timeout: Duration,
     /// 空闲超时：双向均无消息超过该时长则关闭（0 = 禁用）
@@ -556,12 +556,12 @@ fn default_ws_max_message() -> usize {
     1024 * 1024 // 1 MiB
 }
 
-// ── OTel（OTLP）遥测配置（O3） ──
+// ── OTel（OTLP）遥测配置 ──
 
 /// OpenTelemetry 追踪导出配置。
 ///
 /// `otlp_endpoint` 为空（默认）时**完全禁用导出**：不注册导出层、无网络出站，
-/// 仅保留 W3C `traceparent` 注入/传播（行为与 O3 引入时一致）。
+/// 仅保留 W3C `traceparent` 注入/传播（未启用导出时行为不变）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     /// OTLP/gRPC 出口（如 `http://otel-collector:4317`；`https` 走 rustls）。留空禁用。
@@ -593,7 +593,7 @@ fn default_telemetry_sample_ratio() -> f64 {
     1.0
 }
 
-// ── 配置持久化（P0-4） ──
+// ── 配置持久化 ──
 
 /// 管理端热更新落盘与外部变更热重载。
 ///
@@ -638,7 +638,7 @@ pub struct HealthConfig {
     /// 如果为空，则自动从 routes 中提取所有 proxy 类路由的 upstream 去重
     #[serde(default)]
     pub upstreams: Vec<String>,
-    /// 探测结果缓存时长（R10：避免探针风暴与上游抖动放大；0 = 不缓存）
+    /// 探测结果缓存时长（避免探针风暴与上游抖动放大；0 = 不缓存）
     #[serde(default = "default_probe_cache_ttl", with = "humantime_serde")]
     pub cache_ttl: Duration,
     /// 每次探测的超时时间
@@ -713,11 +713,11 @@ pub struct SessionConfig {
     pub http_only: bool,
     #[serde(default = "default_same_site")]
     pub same_site: String,
-    /// 会话空闲过期时间（R5）。与 Cookie `Max-Age` 和服务端存储 TTL 对齐；
+    /// 会话空闲过期时间。与 Cookie `Max-Age` 和服务端存储 TTL 对齐；
     /// 设为 null 则退回浏览器会话级 Cookie + 服务端默认 2 周（不推荐）。
     #[serde(default = "default_session_ttl", with = "humantime_serde::option")]
     pub ttl: Option<Duration>,
-    /// `sessions` 索引（管理端列表）GC 周期（R5）：按会话存储实际存在性清理，默认 10 分钟。
+    /// `sessions` 索引（管理端列表）GC 周期：按会话存储实际存在性清理，默认 10 分钟。
     #[serde(default = "default_session_gc_interval", with = "humantime_serde")]
     pub gc_interval: Duration,
 }
@@ -726,7 +726,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             cookie_name: default_cookie_name(),
-            secure: true, // P1-3: 默认安全
+            secure: true, // 默认安全
             http_only: true,
             same_site: default_same_site(),
             ttl: default_session_ttl(),
@@ -769,13 +769,13 @@ pub struct AdminConfig {
     /// test/eval 端点每分钟每 IP 最大请求数
     #[serde(default = "default_test_rate_limit")]
     pub test_endpoint_rate_limit: u32,
-    /// 管理 API 请求体上限（R18，与业务 body_limit 独立）
+    /// 管理 API 请求体上限（与业务 body_limit 独立）
     #[serde(default = "default_admin_body_limit")]
     pub max_body_bytes: usize,
-    /// 管理 token 认证失败限流（S3）：每个来源 IP 每分钟允许的失败次数，超出 → 429
+    /// 管理 token 认证失败限流：每个来源 IP 每分钟允许的失败次数，超出 → 429
     #[serde(default = "default_admin_auth_fail_limit")]
     pub auth_fail_limit_per_minute: u32,
-    /// 管理白名单 / 失败限流解析客户端 IP 时信任的代理跳数（S13，0 = 不信任 XFF）
+    /// 管理白名单 / 失败限流解析客户端 IP 时信任的代理跳数（0 = 不信任 XFF）
     #[serde(default)]
     pub trusted_proxies: usize,
 }
@@ -1127,7 +1127,7 @@ pub struct RouteTypeConfig {
     pub upstream: Option<String>,
     #[serde(default)]
     pub strip_prefix: bool,
-    /// 熔断阈值（R3/R15：滚动窗口内失败次数；0 = 该路由不熔断，使用全局默认）
+    /// 熔断阈值（滚动窗口内失败次数；0 = 该路由不熔断，使用全局默认）
     #[serde(default)]
     pub circuit_breaker_threshold: u32,
     /// 代理模式: "http" | "sse" | "websocket" | "auto"
@@ -1138,12 +1138,12 @@ pub struct RouteTypeConfig {
     #[serde(default = "default_proxy_mode")]
     pub proxy_mode: String,
 
-    /// 路由级请求超时（R1，覆盖 http_client.timeout；仅 proxy http 模式生效）。
+    /// 路由级请求超时（覆盖 http_client.timeout；仅 proxy http 模式生效）。
     /// 如上传/导出类慢接口可单独放宽。
     #[serde(default, with = "humantime_serde::option")]
     pub timeout: Option<Duration>,
 
-    /// S9：是否向浏览器透传上游 `set-cookie`（默认 false，防上游/被攻破服务植入 Cookie）。
+    /// 是否向浏览器透传上游 `set-cookie`（默认 false，防上游/被攻破服务植入 Cookie）。
     #[serde(default)]
     pub forward_set_cookie: bool,
 
@@ -1192,7 +1192,7 @@ pub struct InputMapping {
     /// 从 OIDC Session 提取。
     ///
     /// 上下文为**扁平**对象：`{ "sub": ..., "provider": ..., "access_token": ... }`，
-    /// 因此路径写 `sub` / `provider`（F8：文档曾误写为 `session.sub`，会解析为 Null 静默丢弃）。
+    /// 因此路径写 `sub` / `provider`（文档曾误写为 `session.sub`，会解析为 Null 静默丢弃）。
     #[serde(default)]
     pub from_session: HashMap<String, String>,
 
@@ -1258,7 +1258,7 @@ impl AppConfig {
 
         fig = fig.merge(Yaml::file(config_dir.join("routes/routes.yaml")));
 
-        // F14：env 文件优先级低于 `BFF_*` 环境变量（环境变量最高，符合 12-factor）
+        // env 文件优先级低于 `BFF_*` 环境变量（环境变量最高，符合 12-factor）
         if let Ok(env) = std::env::var("BFF_ENV") {
             let env_file = config_dir.join("env").join(format!("{}.yaml", env));
             if env_file.is_file() {
@@ -1270,7 +1270,7 @@ impl AppConfig {
 
         let mut cfg: AppConfig = fig.extract()?;
 
-        // P0-4：持久化配置覆盖（管理端落盘的完整配置）
+        // 持久化配置覆盖（管理端落盘的完整配置）
         // 优先级：base/分文件 < runtime.yaml < BFF_* 环境变量。
         // runtime.yaml 为脱敏快照（密钥为 *** 哨兵）→ 按当前基础配置回填后再合并。
         if cfg.persistence.enabled {
@@ -1302,7 +1302,7 @@ impl AppConfig {
             self.bff_secret.salt.len()
         );
 
-        // Provider 类型校验（P0-1：支持 memory | redis）
+        // Provider 类型校验（支持 memory | redis）
         for (label, kind) in [
             ("session_store", &self.provider.session_store),
             ("cache", &self.provider.cache),
@@ -1340,7 +1340,7 @@ impl AppConfig {
             "业务端口与管理端口不能相同"
         );
 
-        // public_base_url 校验（P0-2）
+        // public_base_url 校验
         if let Some(base) = &self.server.public_base_url {
             let parsed = url::Url::parse(base)
                 .map_err(|e| anyhow::anyhow!("server.public_base_url 非法: {}", e))?;
@@ -1372,7 +1372,7 @@ impl AppConfig {
             );
         }
 
-        // 生产环境防呆（M0：BFF_ENV=prod 时拒绝 POC 配置）
+        // 生产环境防呆（BFF_ENV=prod 时拒绝 POC 配置）
         let is_prod = std::env::var("BFF_ENV")
             .map(|v| v == "prod")
             .unwrap_or(false);
@@ -1428,7 +1428,7 @@ impl AppConfig {
             "rate_limit.per_second 必须 > 0"
         );
 
-        // OTel 遥测配置（O3）：endpoint 非空时必须为合法 http(s) URL
+        // OTel 遥测配置：endpoint 非空时必须为合法 http(s) URL
         if let Some(endpoint) = &self.telemetry.otlp_endpoint {
             let parsed = url::Url::parse(endpoint)
                 .map_err(|e| anyhow::anyhow!("telemetry.otlp_endpoint 非法: {}", e))?;
@@ -1486,7 +1486,7 @@ impl AppConfig {
                 "OIDC provider {} client_id 不能为空",
                 p.id
             );
-            // F11：callback_path 用于注册回调路由，必须是可用且不冲突的绝对路径
+            // callback_path 用于注册回调路由，必须是可用且不冲突的绝对路径
             anyhow::ensure!(
                 p.callback_path.starts_with('/'),
                 "OIDC provider {} callback_path 必须以 / 开头: {}",
@@ -1646,7 +1646,7 @@ impl AppConfig {
     /// 含凭据的 Redis URL、TLS 私钥路径，用于导出。
     pub fn sanitized(&self) -> Self {
         let mut c = self.clone();
-        // P0-3：主密钥绝不能出现在导出结果中——结合会话数据可解密全部用户令牌
+        // 主密钥绝不能出现在导出结果中——结合会话数据可解密全部用户令牌
         if !c.bff_secret.secret.is_empty() {
             c.bff_secret.secret = SECRET_SENTINEL.into();
         }
@@ -1680,7 +1680,7 @@ impl AppConfig {
 
     /// 导入时合并敏感信息：识别 `***` 哨兵并从现有配置回填真实值（保留已注入的环境值）。
     ///
-    /// 规则（P0-3）：导出→导入回环不得破坏任何密钥，覆盖
+    /// 规则：导出→导入回环不得破坏任何密钥，覆盖
     /// `bff_secret.{secret,salt}`、`provider.redis_url`、TLS 私钥路径、
     /// `admin.auth_token`、`oidc.providers[].client_secret`（按 id 对齐）、
     /// `token_exchange.client_secret`（按 route.path 对齐）。
@@ -1765,7 +1765,7 @@ routes:
         .expect("测试配置解析失败")
     }
 
-    /// P0-3：脱敏必须覆盖全部敏感字段，且序列化结果不含任何真实值。
+    /// 脱敏必须覆盖全部敏感字段，且序列化结果不含任何真实值。
     #[test]
     fn sanitized_hides_all_secrets() {
         let cfg = config_with_secrets();
@@ -1803,7 +1803,7 @@ routes:
         }
     }
 
-    /// P0-3：导出→导入回环必须完整恢复所有密钥（不得覆盖为 `***`）。
+    /// 导出→导入回环必须完整恢复所有密钥（不得覆盖为 `***`）。
     #[test]
     fn export_import_roundtrip_preserves_secrets() {
         let original = config_with_secrets();

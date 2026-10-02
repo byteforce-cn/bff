@@ -66,7 +66,7 @@ pub fn select_provider(state: &AppState, id: Option<&str>) -> Result<OidcProvide
 
 /// 校验 redirect 参数：只允许**同源绝对路径**。
 ///
-/// S1：原实现 `starts_with('/') && !starts_with("//")` 可被 `\/\evil.com` 绕过
+/// 原实现 `starts_with('/') && !starts_with("//")` 可被 `\/\evil.com` 绕过
 /// （浏览器将 `\` 归一为 `/` → 实际跳转到外站）。改为用 URL 解析器按同源校验：
 /// - 拒绝控制字符；
 /// - 以校验基准（dummy origin）解析后，结果 origin 必须仍为基准本身，
@@ -75,7 +75,7 @@ pub fn validate_redirect(redirect: &str) -> bool {
     if redirect.is_empty() || redirect.chars().any(|c| c.is_control()) {
         return false;
     }
-    // S1：路径中不允许出现裸反斜杠（浏览器会将其归一为 `/`，形成 `//evil.com` 类外链）
+    // 路径中不允许出现裸反斜杠（浏览器会将其归一为 `/`，形成 `//evil.com` 类外链）
     if redirect.contains('\\') {
         return false;
     }
@@ -101,7 +101,7 @@ pub fn validate_redirect(redirect: &str) -> bool {
     }
 }
 
-/// 推导本服务对外 base_url（P0-2）。
+/// 推导本服务对外 base_url。
 ///
 /// 1. 配置了 `server.public_base_url` → **一律使用它，完全不信任 Host 头**；
 /// 2. 否则回退 `Host`（+ 可信 `X-Forwarded-Proto`），且：
@@ -146,7 +146,7 @@ fn base_url_from(headers: &HeaderMap, state: &AppState) -> Result<String, AppErr
     Ok(format!("http://127.0.0.1:{}", cfg.server.business_port))
 }
 
-/// 与请求无关的规范 base_url（后台刷新等非请求路径使用，P0-2）。
+/// 与请求无关的规范 base_url（后台刷新等非请求路径使用）。
 ///
 /// `public_base_url` 优先；否则回退本机地址（仅用于 client 缓存键与 discovery，
 /// 不参与 redirect_uri 下发）。
@@ -203,7 +203,7 @@ pub async fn login(
         .get(&provider, &base_url)
         .await
         .map_err(|e| {
-            // S12：对外统一文案；内部细节（含拓扑/元数据错误）仅进日志
+            // 对外统一文案；内部细节（含拓扑/元数据错误）仅进日志
             tracing::error!(provider = %provider.id, error = %e, "OIDC client 构建失败");
             AppError::bad_gateway("身份服务暂不可用（discovery 失败）")
         })?;
@@ -284,14 +284,14 @@ pub async fn callback(
         .request_async(&state.oidc_http)
         .await
         .map_err(|e| {
-            // S12：不向调用方回显 IdP 内部细节
+            // 不向调用方回显 IdP 内部细节
             tracing::warn!(error = %e, "code 换 token 失败");
             AppError::unauthorized("登录失败：令牌交换未完成，请重试")
         })?;
 
     let sub = verify_id_token(&state, &provider, &base_url, &token_response, &flow.nonce).await?;
 
-    // S2：登录成功（权限提升）后轮换 session id，防会话固定攻击。
+    // 登录成功（权限提升）后轮换 session id，防会话固定攻击。
     // tower-sessions 的 cycle_id 会生成新 ID 并删除旧记录；
     // 之后的令牌写入/会话登记均基于新 ID。
     session.cycle_id().await.context("轮换 session id 失败")?;
@@ -326,7 +326,7 @@ pub async fn callback(
     // tower-sessions 的 `cycle_id()` 会把内部 session id 置空（crate 语义：
     // 保存时由 store.create 重新分配），必须显式 save 后才能读到新 id；
     // 否则 `register_session` 的 `session.id()` 为 None → 管理端会话列表永远为空
-    // （Keycloak 真实 IdP 契约验证实测发现，S2 会话轮换的回归）。
+    // （Keycloak 真实 IdP 契约验证实测发现，会话轮换的回归）。
     session.save().await.context("保存会话失败")?;
 
     register_session(&state, &session, &provider.id, &sub).await;
@@ -373,7 +373,7 @@ pub async fn logout(
     unregister_session(&state, &session).await;
     session.flush().await.ok();
 
-    // R17：登出必须同时吊销该会话的 token exchange 缓存，
+    // 登出必须同时吊销该会话的 token exchange 缓存，
     // 否则已登出会话换来的上游令牌在 TTL 内仍可被复用（containment 缺口）。
     if let Some(sid) = &sid {
         let cleared = crate::server::token_exchange::clear_session_cache(&state, sid).await;
@@ -382,7 +382,7 @@ pub async fn logout(
         }
     }
 
-    // F12：登出端点以 discovery 的 `end_session_endpoint` 为准
+    // 登出端点以 discovery 的 `end_session_endpoint` 为准
     // （原实现硬编码 Spring AS 的 `/connect/logout`，换 IdP 即失效）。
     match &provider {
         Some(p) => {
@@ -666,7 +666,7 @@ async fn do_refresh(
     sub: &str,
     refresh_token: String,
 ) -> anyhow::Result<StoredTokens> {
-    // P0-2：refresh 路径不再硬编码 127.0.0.1，改用与 public_base_url 对齐的规范 base；
+    // refresh 路径不再硬编码 127.0.0.1，改用与 public_base_url 对齐的规范 base；
     // 叠加 OidcClientManager 的 (provider_id, base_url) 缓存键，
     // 彻底消除“后台刷新把整机 redirect_uri 钉死”的跨用户污染。
     let base_url = canonical_base_url(state);
@@ -748,7 +748,7 @@ mod redirect_tests {
 
     #[test]
     fn rejects_open_redirect_shapes() {
-        // S1：浏览器把 `\` 归一为 `/`，`/\evil.com` 实为协议相对外链
+        // 浏览器把 `\` 归一为 `/`，`/\evil.com` 实为协议相对外链
         assert!(!validate_redirect("/\\evil.com"));
         assert!(!validate_redirect("\\evil.com"));
         assert!(!validate_redirect("\\\\evil.com"));

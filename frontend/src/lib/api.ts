@@ -32,7 +32,7 @@ export interface RequestHistoryEntry {
 
 // ---- API 函数 ----
 
-// F13：管理 API 基地址。
+// 管理 API 基地址。
 // 业务端口（8080）不提供 /admin/api/*（会返回 404）；生产通常由网关把
 // /admin/api 反代到管理端口（8443）。如需直连管理端口，可在宿主 HTML 中设置
 // `window.__BFF_ADMIN_BASE__ = "http://host:8443/admin/api"`。

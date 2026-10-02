@@ -52,14 +52,14 @@ pub async fn forward_request(
 ) -> Result<Response, AppError> {
     let upstream = upstream.trim_end_matches('/');
 
-    // R3：熔断键改用路由 path（而非 upstream），使路由级阈值/开关有确定语义
+    // 熔断键改用路由 path（而非 upstream），使路由级阈值/开关有确定语义
     let breaker_key = route.path.clone();
     let threshold = (route.config.circuit_breaker_threshold > 0)
         .then_some(route.config.circuit_breaker_threshold);
     if !state.breakers.allow(&breaker_key, threshold).await {
         metrics::counter!("bff_proxy_rejected_total", "upstream" => upstream.to_string())
             .increment(1);
-        // S12：不向外回显上游地址
+        // 不向外回显上游地址
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "服务暂不可用（上游熔断中）",
@@ -90,7 +90,7 @@ pub async fn forward_request(
     // 关键：必须恢复 Content-Type 等实体头——否则重建 reqwest 请求时，
     // Vec<u8> body 会被 reqwest 默认成 application/octet-stream（本 issue 根因）。
     let passthrough_headers = passthrough_headers(req.headers());
-    // R2：请求体上限统一读取配置（原实现硬编码 10 MiB，调大配置无效）
+    // 请求体上限统一读取配置（原实现硬编码 10 MiB，调大配置无效）
     let max_body = state.cfg().body_limit.max_bytes;
     let body_bytes = axum::body::to_bytes(req.into_body(), max_body)
         .await
@@ -104,7 +104,7 @@ pub async fn forward_request(
     match proxy_mode {
         "sse" => {
             let result = sse_proxy::sse_stream(
-                // R1：SSE 使用无总超时的流式客户端（connect 超时 + keepalive 仍生效）
+                // SSE 使用无总超时的流式客户端（connect 超时 + keepalive 仍生效）
                 &state.http_stream,
                 &url,
                 reqwest::Method::from_bytes(method.as_str().as_bytes())
@@ -113,7 +113,7 @@ pub async fn forward_request(
                 auth_token,
                 request_id.as_deref(),
                 &passthrough_headers,
-                // R15：流结束（正常/异常）时按终态计数，而非“流建立即成功”
+                // 流结束（正常/异常）时按终态计数，而非“流建立即成功”
                 Some((state.breakers.clone(), breaker_key.clone())),
                 forward_set_cookie,
             )
@@ -131,7 +131,7 @@ pub async fn forward_request(
         }
         // "http" | "auto" | "" | 其他 → 标准一次性 HTTP 代理（含 401 刷新重试）
         _ => {
-            // R11：上游并发舱壁（0 = 不限制；仅 http 模式，占用至响应读取完成）
+            // 上游并发舱壁（0 = 不限制；仅 http 模式，占用至响应读取完成）
             use crate::state::BulkheadDecision;
             let _permit = match state.upstream_limits.try_acquire(upstream) {
                 BulkheadDecision::Disabled => None,
@@ -270,7 +270,7 @@ async fn proxy_http(
             url,
         );
 
-        // R1：路由级超时覆盖全局默认
+        // 路由级超时覆盖全局默认
         if let Some(t) = timeout {
             out_req = out_req.timeout(t);
         }
@@ -320,7 +320,7 @@ async fn proxy_http(
                 } else {
                     state.breakers.record_success(breaker_key).await;
                 }
-                // R2：响应大小上限（Content-Length 快速拒绝 + 流式累计硬上限）
+                // 响应大小上限（Content-Length 快速拒绝 + 流式累计硬上限）
                 if let Some(len) = resp.content_length() {
                     if len as usize > max_response {
                         return Err(AppError::bad_gateway(format!(
@@ -332,7 +332,7 @@ async fn proxy_http(
                 let resp_headers = resp.headers().clone();
                 let bytes = read_capped_body(resp, max_response).await?;
                 let mut builder = Response::builder().status(status.as_u16());
-                // S9：响应头策略——剥离 hop-by-hop、set-cookie（默认）、CORS 家族
+                // 响应头策略——剥离 hop-by-hop、set-cookie（默认）、CORS 家族
                 for (k, v) in resp_headers.iter() {
                     if should_strip_response_header(k.as_str(), forward_set_cookie) {
                         continue;
@@ -367,11 +367,11 @@ async fn proxy_http(
         tracing::warn!(upstream, error = %e, "代理请求最终失败");
     }
     metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string()).increment(1);
-    // S12：对外统一文案（详情已进日志，可用 x-request-id 关联）
+    // 对外统一文案（详情已进日志，可用 x-request-id 关联）
     Err(AppError::bad_gateway("上游服务暂不可用"))
 }
 
-/// R2：按上限读取响应体（reqwest 无默认上限；大响应会造成内存膨胀/OOM）。
+/// 按上限读取响应体（reqwest 无默认上限；大响应会造成内存膨胀/OOM）。
 async fn read_capped_body(resp: reqwest::Response, max: usize) -> Result<Vec<u8>, AppError> {
     use futures::StreamExt;
     let mut buf: Vec<u8> = Vec::new();
@@ -389,7 +389,7 @@ async fn read_capped_body(resp: reqwest::Response, max: usize) -> Result<Vec<u8>
     Ok(buf)
 }
 
-/// S9：上游响应头过滤策略（代理与 SSE 路径共用）。
+/// 上游响应头过滤策略（代理与 SSE 路径共用）。
 ///
 /// 剥离：hop-by-hop 头、`access-control-*`（CORS 家族，防上游污染跨域策略）、
 /// `set-cookie`（默认剥离，防上游/被攻破服务向浏览器植入 Cookie；

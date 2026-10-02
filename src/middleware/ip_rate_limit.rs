@@ -2,7 +2,7 @@
 //!
 //! 与全局限流（tower-governor，默认 PeerIpKeyExtractor 按对端 IP 的 GCRA）互补：
 //! - 按「来源 IP + 命中路径前缀」独立计数（令牌桶），复用 `CacheProvider` / `LockProvider`
-//!   抽象，与 P1-6 cacheprovider 平滑切换保持一致；
+//!   抽象，与 cacheprovider 平滑切换兼容；
 //! - 支持配置可信代理数解析 `X-Forwarded-For`（`trusted_proxies = 0` 时不信任 XFF，
 //!   防止伪造头绕过；LB 后配置为可信代理数，取 XFF 右侧第 N+1 项为客户端 IP）；
 //! - 超限 → 429 + `Retry-After`，不进入上游，避免把打爆压力传导到 IAM；
@@ -146,7 +146,7 @@ pub async fn ip_rate_limit_middleware(
     next.run(req).await
 }
 
-/// 解析客户端 IP（S13：统一入口，修正原实现 `len - trusted - 1` 的 off-by-one，
+/// 解析客户端 IP（统一入口，修正原实现 `len - trusted - 1` 的 off-by-one，
 /// 与 nginx `proxy_add_x_forwarded_for` 语义对齐）。
 fn client_ip(req: &Request<Body>, peer: Option<IpAddr>, trusted_proxies: usize) -> Option<IpAddr> {
     crate::middleware::client_ip::resolve_client_ip(req.headers(), peer, trusted_proxies)

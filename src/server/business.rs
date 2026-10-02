@@ -33,7 +33,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         MakeRequestUuid,
     );
 
-    // CORS：S8 默认收紧——仅显式 `permissive: true` 才全开；
+    // CORS 默认收紧——仅显式 `permissive: true` 才全开；
     // `allowed_origins` 为空且未开 permissive = 不允许任何跨域来源（原实现回落 permissive）。
     let cors_layer = if cfg.cors.permissive {
         CorsLayer::permissive()
@@ -65,7 +65,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
     // 安全响应头中间件
     let sec_headers = cfg.security_headers.clone();
 
-    // E6：gzip 压缩（原依赖 tower-http "compression-gzip" 特性但从未挂载 CompressionLayer）。
+    // gzip 压缩（原依赖 tower-http "compression-gzip" 特性但从未挂载 CompressionLayer）。
     // 谓词排除 `text/event-stream`：SSE 需要逐块低延迟，不能被压缩缓冲。
     let compression_layer = CompressionLayer::new()
         .compress_when(DefaultPredicate::new().and(NotForContentType::new("text/event-stream")));
@@ -75,7 +75,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .route("/logout", get(oidc::logout))
         .route("/live", get(liveness));
 
-    // F11：按 provider 配置的 `callback_path` 动态注册回调路由（去重），
+    // 按 provider 配置的 `callback_path` 动态注册回调路由（去重），
     // 原实现硬编码 `/auth/callback`——配置改成其它路径时 IdP 回调会落到 SPA fallback，
     // 登录静默失败且无启动期告警。默认入口 `/auth/callback` 始终保留（兼容热添加 provider）。
     {
@@ -111,7 +111,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
             token_refresh_middleware,
         ))
         .layer(session_layer)
-        // O3：W3C traceparent 注入/传播。
+        // W3C traceparent 注入/传播。
         // ⚠️ 层序敏感：必须位于 TraceLayer（外层，创建 http.request span）之内、
         // 且在任何会创建子 span 的层（如 tower-sessions 的 `call` span）之外——
         // 否则 Span::current() 不是请求 span，traceparent 的 span-id 会与导出 span 不一致。
@@ -122,7 +122,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .layer(PropagateRequestIdLayer::new(
             axum::http::HeaderName::from_static("x-request-id"),
         ))
-        // O3：span 遵循 OTel HTTP semconv，入站 traceparent 作为 OTel 父上下文
+        // span 遵循 OTel HTTP semconv，入站 traceparent 作为 OTel 父上下文
         // （导出层未注册时 set_parent 无副作用，行为与默认 TraceLayer 一致）
         .layer(
             TraceLayer::new_for_http()
@@ -130,7 +130,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
                 .on_response(crate::middleware::trace_context::RecordStatusOnResponse),
         )
         .layer(cors_layer)
-        // E6：gzip（SSE 已由谓词排除）
+        // gzip（SSE 已由谓词排除）
         .layer(compression_layer)
         // 全局限流（tower-governor）：与 CSP csp_overrides 同风格按路径前缀收窄，
         // SPA 静态资源等 skip_path_prefixes 命中的请求不消耗全局限流令牌，其余路径保持限流
@@ -139,7 +139,7 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
                 cfg.rate_limit.per_second,
                 cfg.rate_limit.burst_size,
                 cfg.rate_limit.skip_path_prefixes.clone(),
-                // S13：全局限流同样按真实客户端 IP 建桶（信任的代理跳数复用认证限流配置）
+                // 全局限流同样按真实客户端 IP 建桶（信任的代理跳数复用认证限流配置）
                 cfg.auth_rate_limit.trusted_proxies,
             ),
             crate::middleware::rate_limit_skip::rate_limit_skip_middleware,
@@ -225,7 +225,7 @@ async fn liveness() -> Json<serde_json::Value> {
 
 /// GET /ready — K8s readiness probe：并行探测所有配置的上游可达性。
 ///
-/// R10：
+///
 /// - 探测结果缓存 `health.cache_ttl`（默认 1s），避免探针风暴与上游抖动放大；
 /// - 响应体裁剪为状态摘要（不再匿名返回上游 URL/错误串，防内部拓扑泄露）。
 async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
@@ -337,7 +337,7 @@ async fn session_info(session: Session) -> Json<serde_json::Value> {
 
 /// GET/POST /pipeline/:name — 兼容旧入口，内部转为统一 Route 分发。
 ///
-/// P0-5：该显式路由不经过统一路由分发器（`route_dispatcher::dispatch`），
+/// 该显式路由不经过统一路由分发器（`route_dispatcher::dispatch`），
 /// 因此必须在此强制会话鉴权——否则任何匿名请求都可携带任意参数触发
 /// pipeline 真实执行（含其访问内网上游的步骤）。
 /// 需要匿名访问的 pipeline 应通过 `routes.yaml` 显式声明 `auth_required: false`，
@@ -348,7 +348,7 @@ async fn run_pipeline(
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
-    // P0-5 鉴权：必须有有效会话（与统一分发器的 auth_required 语义对齐）
+    // 鉴权：必须有有效会话（与统一分发器的 auth_required 语义对齐）
     crate::oidc::handlers::current_access_token(&session)
         .await
         .ok_or_else(|| AppError::unauthorized("未登录或会话已过期（/pipeline/:name 需要认证）"))?;
@@ -390,7 +390,7 @@ async fn fallback_handler(
             .unwrap_or_else(|e| e.into_response());
     }
 
-    // 2. /api 与 /admin/api 前缀 → 404（F13：业务端口不存在管理面 API，
+    // 2. /api 与 /admin/api 前缀 → 404（业务端口不存在管理面 API，
     // 原行为把 /admin/api/* 当 SPA 路由返回 200 + HTML，客户端无法区分路径错误与成功；
     // 其余 /admin/* 前端路由仍走 SPA fallback）
     if path.starts_with("/api/") || path.starts_with("/admin/api/") {
@@ -403,7 +403,7 @@ async fn fallback_handler(
 
 /// WebSocket 升级处理器：匹配路由 → 鉴权 → 建立双向隧道。
 ///
-/// S6：
+///
 /// - 仅 `type: proxy` 且 `proxy_mode: websocket|auto` 的路由允许升级
 ///   （原实现任何路径前缀命中的路由都能建 WS 隧道）；
 /// - 按 `auth_required` 强制会话鉴权；需要认证时向**上游握手**注入 Bearer。
@@ -437,7 +437,7 @@ async fn ws_upgrade_handler(
         None => return AppError::bad_request("WebSocket 路由缺少 upstream").into_response(),
     };
 
-    // S6：鉴权（与统一分发器同一语义）
+    // 鉴权（与统一分发器同一语义）
     let auth_token = if route.auth_required {
         match oidc::current_access_token(&session).await {
             Some(t) => Some(t),
@@ -493,7 +493,7 @@ async fn serve_spa(state: &AppState, req: Request<Body>) -> Response {
     }
 }
 
-/// 请求计数指标（O1：路径标签低基数化）。
+/// 请求计数指标（路径标签低基数化）。
 ///
 /// 原实现直接用原始 URL path 作为标签：任何扫描器路径（`/.env`、`/wp-login.php` …）
 /// 都会经 SPA fallback 返回并被计数 → 攻击者可用任意 URL 无界撑大标签基数。
@@ -509,7 +509,7 @@ async fn metrics_middleware(
     let start = std::time::Instant::now();
     let resp = next.run(req).await;
     let status = resp.status().as_u16().to_string();
-    // O2：全局请求延迟直方图（Prometheus 侧可算 P50/P95/P99）
+    // 全局请求延迟直方图（Prometheus 侧可算 P50/P95/P99）
     metrics::histogram!(
         "bff_http_request_duration_seconds",
         "method" => method.clone(),

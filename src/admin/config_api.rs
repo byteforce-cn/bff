@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
-/// P0-4：管理写操作的变更摘要（谁改了哪些维度，供审计追溯）。
+/// 管理写操作的变更摘要（谁改了哪些维度，供审计追溯）。
 fn summarize_change(old: &AppConfig, new: &AppConfig) -> String {
     use std::collections::HashSet;
     let old_routes: HashSet<&str> = old.routes.iter().map(|r| r.path.as_str()).collect();
@@ -55,7 +55,7 @@ pub async fn export_config(State(state): State<AppState>) -> Result<Response, Ap
 
 /// POST /admin/api/config/import — 导入配置（YAML 原文或 multipart），原子热重载
 ///
-/// R12 语义说明：导入体是**完整配置**（与 `/config/export` 同一形状），
+/// 语义说明：导入体是**完整配置**（与 `/config/export` 同一形状），
 /// 经 `serde_yaml` 解析 + `merge_sensitive_secrets` 哨兵回填后整体应用；
 /// 不再叠加 `BFF_*` 环境变量/分文件层级（那是启动加载与持久化 overlay 的职责）。
 /// 即：运行中 import 的环境相关字段以导入体为准（密钥类以哨兵回填现网值）。
@@ -128,7 +128,7 @@ async fn extract_yaml(headers: &HeaderMap, body: Bytes) -> Result<String, AppErr
     }
 }
 
-/// DELETE /admin/api/oidc/providers/{id} — 删除 provider（F5：补齐真实删除端点）
+/// DELETE /admin/api/oidc/providers/{id} — 删除 provider（补齐真实删除端点）
 pub async fn delete_provider(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -171,7 +171,7 @@ pub async fn update_provider(
     Json(mut provider): Json<OidcProviderConfig>,
 ) -> Result<Response, AppError> {
     provider.id = id.clone();
-    // P0-3：`***` 为导出哨兵 → 保留现网密钥而非覆盖（Admin UI 编辑回写场景）
+    // `***` 为导出哨兵 → 保留现网密钥而非覆盖（Admin UI 编辑回写场景）
     if provider.client_secret == SECRET_SENTINEL {
         provider.client_secret = state
             .cfg()
@@ -294,7 +294,7 @@ pub async fn update_script(
 ) -> Result<Response, AppError> {
     let script = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::bad_request("脚本必须为 UTF-8 文本"))?;
-    // P0-4：持久化开启时同步写入 config/scripts/<name>（列表接口已从该目录读取）
+    // 持久化开启时同步写入 config/scripts/<name>（列表接口已从该目录读取）
     if state.cfg().persistence.enabled {
         let dir = std::path::PathBuf::from("config/scripts");
         std::fs::create_dir_all(&dir)
@@ -449,7 +449,7 @@ pub async fn update_routes(
             )));
         }
     }
-    // P0-3：`***` 哨兵 → 按 path 保留现网 token_exchange 密钥（Admin UI 回写导出内容场景）
+    // `***` 哨兵 → 按 path 保留现网 token_exchange 密钥（Admin UI 回写导出内容场景）
     let existing_routes = state.cfg().routes.clone();
     for route in &mut routes {
         if let Some(te) = &mut route.config.token_exchange {

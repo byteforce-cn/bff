@@ -1,8 +1,8 @@
-//! OpenTelemetry（OTLP）追踪导出（O3）。
+//! OpenTelemetry（OTLP）追踪导出。
 //!
 //! 设计：
 //! - **默认关闭**：`telemetry.otlp_endpoint` 为空时不注册任何导出层，
-//!   仅保留 W3C `traceparent` 注入/传播（成本与行为与 O3 引入时一致）；
+//!   仅保留 W3C `traceparent` 注入/传播（成本与行为与未启用时一致）；
 //! - 启用后：BatchSpanProcessor + OTLP/gRPC（tonic；TLS 走 rustls，不引入 openssl）导出
 //!   `tracing` span；
 //! - **跨服务衔接**：入站 `traceparent` 经 [`context_from_traceparent`] 转成远程父上下文，

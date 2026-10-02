@@ -20,11 +20,11 @@ use std::net::SocketAddr;
 struct AdminAssets;
 
 pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
-    // P0-4：白名单不再闭包捕获，改为每请求从 `state.cfg()` 实时读取
+    // 白名单不再闭包捕获，改为每请求从 `state.cfg()` 实时读取
     // （与 auth_token 一致，热导入立即生效）；启动时仅做格式预检，尽早暴露非法配置。
     let _ = IpWhitelist::parse(&state.cfg().admin.ip_whitelist)
         .map_err(|e| anyhow::anyhow!("IP 白名单配置非法: {}", e))?;
-    // R18：管理 API 请求体上限（与业务 body_limit 独立）
+    // 管理 API 请求体上限（与业务 body_limit 独立）
     let admin_body_limit = state.cfg().admin.max_body_bytes;
 
     let api_routes = Router::new()
@@ -64,15 +64,15 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
         // 兼容旧路径（无版本前缀）
         .nest("/admin/api", api_routes)
         .fallback(admin_ui_fallback)
-        // E6：管理 UI 静态资源启用 gzip
+        // 管理 UI 静态资源启用 gzip
         .layer(tower_http::compression::CompressionLayer::new())
-        // R18：请求体上限
+        // 请求体上限
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             admin_body_limit,
         ))
-        // P0-4：管理写操作审计（操作者、来源 IP、状态）
+        // 管理写操作审计（操作者、来源 IP、状态）
         .layer(axum::middleware::from_fn(admin_audit_middleware))
-        // S3：认证（常量时间比较 + 失败限流）
+        // 认证（常量时间比较 + 失败限流）
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
@@ -81,12 +81,12 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
             state.clone(),
             test_endpoint_guard,
         ))
-        // P0-4/S13：白名单实时生效 + 统一客户端 IP 解析
+        // 白名单实时生效 + 统一客户端 IP 解析
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_ip_whitelist_live,
         ))
-        // S4：管理面安全响应头（原实现只有业务端口有）
+        // 管理面安全响应头（原实现只有业务端口有）
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_security_headers,
@@ -95,7 +95,7 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
     Ok(router)
 }
 
-/// S3：常量时间比较（防时序侧信道）。
+/// 常量时间比较（防时序侧信道）。
 ///
 /// 先哈希再比较固定长度摘要，避免长度/前缀差异直接泄漏。
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -125,7 +125,7 @@ fn extract_admin_token(req: &Request<Body>) -> Option<&str> {
 /// 管理 API 认证：auth_mode=token 时校验 X-Admin-Token / Bearer。
 /// 仅保护 /admin/api/* 路径；管理 UI 静态资源（/index.html 等）直接放行。
 ///
-/// S3：常量时间比较 + 失败次数限流（每来源 IP 每分钟）。
+/// 常量时间比较 + 失败次数限流（每来源 IP 每分钟）。
 async fn admin_auth_middleware(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -155,7 +155,7 @@ async fn admin_auth_middleware(
         return next.run(req).await;
     }
 
-    // 失败限流（S3）：按来源 IP 计数，超限后 429（auth_mode=none 时不受影响）
+    // 失败限流：按来源 IP 计数，超限后 429（auth_mode=none 时不受影响）
     let ip = resolve_client_ip(req.headers(), peer, state.cfg().admin.trusted_proxies);
     if let Some(ip) = ip {
         let limit = state.cfg().admin.auth_fail_limit_per_minute;
@@ -195,7 +195,7 @@ async fn admin_auth_middleware(
         .into_response()
 }
 
-/// P0-4/S13：管理端口 IP 白名单（每请求实时读取配置）。
+/// 管理端口 IP 白名单（每请求实时读取配置）。
 async fn admin_ip_whitelist_live(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -239,7 +239,7 @@ async fn admin_ip_whitelist_live(
     }
 }
 
-/// S4：管理面安全响应头（管理 UI 为自托管 SPA，CSP 保持同源）。
+/// 管理面安全响应头（管理 UI 为自托管 SPA，CSP 保持同源）。
 async fn admin_security_headers(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -279,7 +279,7 @@ async fn admin_security_headers(
     resp
 }
 
-/// P0-4：管理写操作审计（操作者标识、来源 IP、路径、结果状态）。
+/// 管理写操作审计（操作者标识、来源 IP、路径、结果状态）。
 ///
 /// 当前管理面只有单一 token 身份，故 `actor = "admin-token"`；
 /// 变更 diff 由各写接口在应用配置后输出（见 `config_api::audit_diff`）。
@@ -331,7 +331,7 @@ async fn test_endpoint_guard(
 
 /// 管理 UI：内嵌静态资源，未命中路径回退 index.html。
 async fn admin_ui_fallback(uri: axum::http::Uri) -> Response {
-    // F13：未匹配的 /admin/api/* 返回 404 JSON，而非 200 + 管理 UI HTML
+    // 未匹配的 /admin/api/* 返回 404 JSON，而非 200 + 管理 UI HTML
     // （原行为让 API 客户端无法区分“路径写错”与“成功”）
     if uri.path().starts_with("/admin/api/") {
         return (

@@ -2,7 +2,7 @@
 
 > 实现：`src/server/token_exchange.rs`；配置模型：`src/config.rs::TokenExchangeConfig`；
 > 接入点：代理路由 `RouteTypeConfig.token_exchange`（HTTP/SSE 生效；WS 本期不执行，配置时会告警）。
-> 本文档补齐审计 F8/E15 所引用的缺失文档。
+> 本文档补齐配置导入 / 导出此前缺失的设计说明。
 
 ## 1. 目标与语义
 
@@ -42,7 +42,7 @@ routes:
 
 | 字段 | 说明 |
 | --- | --- |
-| `token_endpoint` | 缺省时回退会话 provider 的 discovery（带 10 分钟缓存，R9） |
+| `token_endpoint` | 缺省时回退会话 provider 的 discovery（带 10 分钟缓存） |
 | `client_auth_method` | `client_secret_basic`（默认，HTTP Basic）或 `client_secret_post`（表单字段）；`client_secret` 为空按 public client 处理（不认证） |
 | `subject_token_type` | 缺省 `urn:ietf:params:oauth:token-type:access_token` |
 | `requested_token_type` | 缺省同为 access_token；响应必须匹配合法 token-type 前缀 |

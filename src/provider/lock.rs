@@ -22,7 +22,7 @@ pub trait LockGuard: Send + Sync {
 
 /// 锁表项：互斥体 + 引用计数。
 ///
-/// R14：原实现 `entry()` 后从不移除，键空间（per-IP 限流桶、刷新锁、
+/// 原实现 `entry()` 后从不移除，键空间（per-IP 限流桶、刷新锁、
 /// exchange single-flight 等）由业务量/攻击流量驱动 → 无界增长。
 /// 现在按引用计数回收：无等待者/持有者时从表中移除。
 struct LockEntry {
@@ -177,7 +177,7 @@ mod tests {
                 .unwrap();
             g.release().await;
         }
-        // R14：全部释放后锁表应回到空（引用计数回收）
+        // 全部释放后锁表应回到空（引用计数回收）
         assert_eq!(lock.tracked_keys(), 0);
     }
 

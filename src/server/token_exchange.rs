@@ -306,7 +306,7 @@ pub async fn resolve(
 
 /// 从缓存读取并解密反序列化。
 ///
-/// S11：缓存值使用 AES-256-GCM 加密（复用 `crypto` 主密钥）——
+/// 缓存值使用 AES-256-GCM 加密（复用 `crypto` 主密钥）——
 /// 缓存泄压面（内存 dump / Redis 未授权）不再直接暴露上游令牌；
 /// 无法解密的旧格式条目视为 miss（不降级为明文解析）。
 async fn read_cache(state: &AppState, key: &str) -> Option<TokenExchangeResult> {
@@ -345,7 +345,7 @@ async fn store_result(
     }
 }
 
-/// R17：会话登出/撤销时清理该会话的全部交换缓存。
+/// 会话登出/撤销时清理该会话的全部交换缓存。
 ///
 /// 已登出会话换来的上游令牌在 TTL 内仍可被复用是取证/containment 缺口，
 /// 登出必须是有效的吊销手段。返回清理条数（redis 后端乐观返回 0）。
@@ -404,7 +404,7 @@ async fn resolve_token_endpoint(
         .ok_or_else(|| {
             ExchangeError::ClientConfig(format!("provider 不存在: {}", tokens.provider))
         })?;
-    // R9：discovery 结果缓存（缺省 token_endpoint 时避免每次缓存 miss 都做一次 IdP 往返）
+    // discovery 结果缓存（缺省 token_endpoint 时避免每次缓存 miss 都做一次 IdP 往返）
     let cache_key = format!("bff:oidc:token_endpoint:{}", provider.id);
     if let Some(v) = state.cache.get(&cache_key).await {
         if let Ok(s) = String::from_utf8(v) {
@@ -412,7 +412,7 @@ async fn resolve_token_endpoint(
         }
     }
     // openidconnect 的 CoreClient 不暴露 provider metadata，缺省路径做一次 discovery
-    // R13：使用带超时的共享客户端（oauth2 5 起直传 `&reqwest::Client`）
+    // 使用带超时的共享客户端（oauth2 5 起直传 `&reqwest::Client`）
     let issuer = openidconnect::IssuerUrl::new(provider.issuer_url.clone())
         .map_err(|e| ExchangeError::ClientConfig(format!("issuer_url 非法: {}", e)))?;
     let metadata =

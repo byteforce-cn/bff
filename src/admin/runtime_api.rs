@@ -37,7 +37,7 @@ pub async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Va
     Json(serde_json::json!({ "sessions": sessions, "count": sessions.len() }))
 }
 
-/// POST /admin/api/oidc/providers/:id/verify — F5：真实连通性校验（discovery）。
+/// POST /admin/api/oidc/providers/:id/verify — 真实连通性校验（discovery）。
 ///
 /// 返回 200 + `{ok, ...}`：连通性问题作为业务结果返回（非 5xx），便于 UI 展示。
 pub async fn verify_provider(
@@ -91,7 +91,7 @@ pub async fn delete_session(
 
     // 从管理端 HashMap 中删除
     let removed = state.sessions.write().await.remove(&session_id);
-    // R17：同步清理该会话的 token exchange 缓存（交换得到的上游令牌必须随撤销失效）
+    // 同步清理该会话的 token exchange 缓存（交换得到的上游令牌必须随撤销失效）
     let cleared = crate::server::token_exchange::clear_session_cache(&state, &session_id).await;
     if cleared > 0 {
         tracing::info!(session_id = %session_id, cleared, "会话撤销清理 token exchange 缓存");

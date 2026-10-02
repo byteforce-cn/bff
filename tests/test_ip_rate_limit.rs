@@ -8,7 +8,7 @@
 //! - trusted_proxies = 0 时不信任 X-Forwarded-For（伪造头无法绕过）
 //!
 //! 说明：测试通过 HTTP 直接打到 BFF 业务端口，对端 IP 均为 127.0.0.1；
-//! 模拟「LB 后不同客户端」时设置 `X-Forwarded-For: <client>`（S13 起统一为
+//! 模拟「LB 后不同客户端」时设置 `X-Forwarded-For: <client>`（已统一为
 //! nginx `proxy_add_x_forwarded_for` 语义：每跳追加其接收到的对端地址，
 //! 因此单层 LB 后 XFF 仅含 client；`trusted_proxies` 为可信跳数，
 //! 解析时取“跳过右侧 N 个条目后的第一个条目”，左侧伪造条目自动被忽略）。

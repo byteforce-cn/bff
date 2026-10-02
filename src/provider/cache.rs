@@ -9,7 +9,7 @@ pub trait CacheProvider: Send + Sync {
     async fn set(&self, key: &str, value: Vec<u8>, ttl: Duration);
     async fn delete(&self, key: &str);
 
-    /// 删除以 `prefix` 开头的全部键（R17：登出时按 session 前缀清理交换缓存）。
+    /// 删除以 `prefix` 开头的全部键（登出时按 session 前缀清理交换缓存）。
     /// 后端不支持时返回 0。
     async fn delete_prefix(&self, _prefix: &str) -> usize {
         0
@@ -18,7 +18,7 @@ pub trait CacheProvider: Send + Sync {
 
 /// 缓存条目：值 + 条目级 TTL。
 ///
-/// R14：原实现把条目级 TTL 放在旁挂的 `HashMap` 里（moka 容量约束对它无效，
+/// 原实现把条目级 TTL 放在旁挂的 `HashMap` 里（moka 容量约束对它无效，
 /// 以非默认 TTL 写入后不再被读的 key 会永久残留）。改为把 TTL 随值存入 moka，
 /// 用 `Expiry` 策略在条目创建/更新时设定过期时间，容量约束重新生效。
 #[derive(Clone, Debug)]

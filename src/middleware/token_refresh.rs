@@ -28,7 +28,7 @@ pub async fn token_refresh_middleware(
     }
 
     if let Some(tokens) = current_tokens(&session).await {
-        // R5：更新会话索引 last_seen（内部 60s 节流，避免写放大）
+        // 更新会话索引 last_seen（内部 60s 节流，避免写放大）
         if let Some(id) = session.id() {
             state.touch_session(&id.to_string()).await;
         }

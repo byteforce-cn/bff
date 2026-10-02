@@ -37,7 +37,7 @@ pub fn merge_inputs(
     )
 }
 
-/// 完整版合并（F9：新增 `from_path` 来源）。
+/// 完整版合并（新增 `from_path` 来源）。
 ///
 /// 优先级：defaults < env < session < header < path < body < query
 pub fn merge_inputs_full(
@@ -79,7 +79,7 @@ pub fn merge_inputs_full(
     Value::Object(result)
 }
 
-/// 从实际请求路径按模板提取路径参数（F9）。
+/// 从实际请求路径按模板提取路径参数。
 ///
 /// 模板示例：`/api/users/{userId}`；实际路径 `/api/users/42` → `Some("42")`。
 /// 支持多段与多参数；`{name}` 段缺失或不匹配返回 None。
@@ -120,7 +120,7 @@ fn apply_source(
 ///
 /// `env_json` 的键是**变量名**（见 `route_dispatcher::build_env_context`），因此：
 /// - 路径写 `env.NAME`（文档推荐）或裸 `NAME`，均按变量名取值；
-/// - `"."` 通配返回整个 env 对象（S5：route_dispatcher 会对该形式告警）。
+/// - `"."` 通配返回整个 env 对象（route_dispatcher 会对该形式告警）。
 fn apply_env_source(
     result: &mut serde_json::Map<String, Value>,
     mapping: &HashMap<String, String>,
@@ -165,7 +165,7 @@ fn apply_path_source(
 
 /// 简单 JSON 路径提取：`"."` 返回整个对象，`"a.b.c"` 返回深层值。
 ///
-/// S5 注意：`"."` 为通配（返回整个来源对象）——对 `from_env` 不应使用，
+/// 注意：`"."` 为通配（返回整个来源对象）——对 `from_env` 不应使用，
 /// route_dispatcher 会在使用该形式时打印告警，并限制为显式引用。
 fn extract_json_path(source: &Value, path: &str) -> Value {
     if path == "." {
@@ -183,7 +183,7 @@ fn extract_json_path(source: &Value, path: &str) -> Value {
     current.clone()
 }
 
-/// 解析 `status_map`（F10）：按响应体中的 `status` 字段（字符串）查表，
+/// 解析 `status_map`：按响应体中的 `status` 字段（字符串）查表，
 /// 缺省回退 `"default"` 键。返回 None 表示保持原状态码。
 pub fn resolve_status(mapping: &OutputMapping, body: &Value) -> Option<u16> {
     if mapping.status_map.is_empty() {

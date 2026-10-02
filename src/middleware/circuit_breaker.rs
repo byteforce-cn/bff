@@ -1,6 +1,6 @@
 //! 轻量熔断器：按 key（建议路由 path）维度统计失败，超阈值后短路一段时间。
 //!
-//! 语义（R3/R15）：
+//! 语义：
 //! - **滚动窗口失败计数**：`failure_window` 内失败次数达到阈值即熔断（成功不清零窗口，
 //!   间歇性故障同样会触发；窗口外的失败自动衰减）；
 //! - **半开单探针**：冷却结束后仅放行一个探针请求，其余请求继续 503；
@@ -23,12 +23,12 @@ pub enum BreakerState {
 #[derive(Debug)]
 struct Breaker {
     state: BreakerState,
-    /// 滚动窗口内的失败时刻（R15：窗口内累计，而非“连续失败”——间歇性故障同样会触发）
+    /// 滚动窗口内的失败时刻（窗口内累计，而非“连续失败”——间歇性故障同样会触发）
     failures: std::collections::VecDeque<Instant>,
     /// 本熔断键的阈值（0 = 该路由不熔断；由首次 allow 时的路由级配置或全局默认决定）
     threshold: u32,
     opened_at: Option<Instant>,
-    /// R3：半开状态只放行单探针，防恢复瞬间流量全线涌入
+    /// 半开状态只放行单探针，防恢复瞬间流量全线涌入
     probe_in_flight: bool,
     probe_started_at: Option<Instant>,
 }
@@ -147,7 +147,7 @@ impl CircuitBreakerRegistry {
         if b.threshold == 0 {
             return;
         }
-        // R15：Closed 状态下成功**不清零**滚动窗口（否则退化为“连续失败”语义，
+        // Closed 状态下成功**不清零**滚动窗口（否则退化为“连续失败”语义，
         // 间歇性故障永不触发）；仅担当 Open/HalfOpen → Closed 的恢复信号。
         if b.state == BreakerState::Closed {
             return;
@@ -267,7 +267,7 @@ mod tests {
         // 冷却结束后：下一次 allow 进入 HalfOpen 并占用唯一探针
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(reg.allow("up", None).await);
-        // 第二个并发请求在半开期间必须被拒绝（R3：单探针）
+        // 第二个并发请求在半开期间必须被拒绝（单探针）
         assert!(!reg.allow("up", None).await);
         // 探针成功 → 闭合，恢复放行
         reg.record_success("up").await;

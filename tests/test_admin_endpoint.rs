@@ -61,7 +61,7 @@ async fn admin_ui_is_served() {
     assert!(resp.text().await.unwrap().contains("BFF 管理控制台"));
 }
 
-/// M2: eval 端点支持 session/env 注入。
+/// eval 端点支持 session/env 注入。
 #[tokio::test]
 async fn eval_script_with_session_and_env() {
     let cfg = common::base_config();
@@ -107,7 +107,7 @@ async fn eval_script_with_session_and_env() {
     assert_eq!(body["debug"]["env_injected"], true);
 }
 
-/// M2: eval 端点 session/env 为可选字段，不传时行为不变。
+/// eval 端点 session/env 为可选字段，不传时行为不变。
 #[tokio::test]
 async fn eval_script_without_session_env_behaves_same() {
     let cfg = common::base_config();
@@ -142,7 +142,7 @@ async fn eval_script_without_session_env_behaves_same() {
     assert_eq!(body["debug"]["env_injected"], false);
 }
 
-/// M3: pipeline test 端点 — 试运行 pipeline，返回 step 级详情。
+/// pipeline test 端点 — 试运行 pipeline，返回 step 级详情。
 #[tokio::test]
 async fn pipeline_test_endpoint_returns_step_details() {
     let yaml = r#"
@@ -203,7 +203,7 @@ steps:
     assert_eq!(body["session_injected"], true);
 }
 
-/// M3: dry_run 模式 — 跳过 HTTP，仍执行 script。
+/// dry_run 模式 — 跳过 HTTP，仍执行 script。
 #[tokio::test]
 async fn pipeline_test_dry_run_skips_http_executes_script() {
     let yaml = r#"
@@ -253,7 +253,7 @@ steps:
     assert_eq!(body["steps"][0]["dry_run"], true);
 }
 
-/// M4: enable_test_endpoints=false 时 test/eval 端点返回 403。
+/// enable_test_endpoints=false 时 test/eval 端点返回 403。
 #[tokio::test]
 async fn test_endpoints_disabled_when_config_false() {
     let mut cfg = common::base_config();

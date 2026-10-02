@@ -23,7 +23,7 @@ spec:
         # 配置指纹（变更后触发滚动更新；亦可交给 CI 注入镜像 tag）
         bff.io/config-rev: "1"
     spec:
-      # R4：BFF 优雅停机排空窗口 30s；留 15s 余量给 preStop 与摘除
+      # BFF 优雅停机排空窗口 30s；留 15s 余量给 preStop 与摘除
       terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true

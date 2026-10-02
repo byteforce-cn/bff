@@ -4,7 +4,7 @@
 
 const BASE = "/admin/api";
 
-// S4：管理 token 存 sessionStorage（关标签页即失效）而非 localStorage，
+// 管理 token 存 sessionStorage（关标签页即失效）而非 localStorage，
 // 降低持久化窃取面；cookie/localStorage 都不可用时退化为仅内存（刷新需重登）。
 const TOKEN_KEY = "bff_admin_token";
 let memoryToken = "";
@@ -107,11 +107,11 @@ export const updateProvider = (id: string, provider: Record<string, unknown>) =>
     body: JSON.stringify(provider),
   });
 
-/** F5：真实删除 provider（后端 DELETE 端点） */
+/** 真实删除 provider（后端 DELETE 端点） */
 export const deleteProvider = (id: string) =>
   request(`/oidc/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
 
-/** F5：真实连通性校验（后端执行 OIDC discovery） */
+/** 真实连通性校验（后端执行 OIDC discovery） */
 export interface ProviderVerifyResult {
   ok: boolean;
   issuer?: string;

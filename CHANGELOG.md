@@ -10,6 +10,8 @@
 - 构建体验：干净克隆可直接编译——管理端未构建时 `build.rs` 生成占位提示页；新增 `rust-toolchain.toml` 固定 1.93.0
 - 元数据：补齐 Cargo / npm 元数据（npm 版本对齐 0.1.0）；新增 `make snapshot`（git archive 快照）与 `make gitleaks`（密钥扫描，例外与理由见 `.gitleaks.toml`）
 - 开发/测试组件 Java 包名由 `com.example.*` 迁移至 `cn.byteforce.bff.dev.*`
+- 依赖升级：OpenTelemetry 栈 0.27 → 0.32（`opentelemetry_sdk` 0.32.1，含 GHSA-w9wp-h8wv-79jx 修复；otlp 0.32 / tracing-opentelemetry 0.33 / tonic 0.14）
+- 源码与测试注释移除历史内部编号，便于外部读者理解
 
 ## [0.1.0] - 2026-09-27
 
@@ -29,7 +31,7 @@
 - **SLO/容量基线标定**：压测资产（`benchmark/upstream-nginx.conf`、k6 `capacity` 场景、
   认证路径 COOKIE 与按端点子指标）；实测单实例 ≥10.4k QPS、0 错误、p95 39ms，
   数值与参数反推见 `benchmark/README.md` 与 `docs/deployment.md` §SLO
-- **OTel（OTLP/gRPC）追踪导出（O3）**：`telemetry.otlp_endpoint` 配置后启用（默认禁用）；
+- **OTel（OTLP/gRPC）追踪导出**：`telemetry.otlp_endpoint` 配置后启用（默认禁用）；
   span 遵循 OTel HTTP semconv（`http.request`/`http.*`/`otel.kind=server`），入站
   `traceparent` 作为远程父上下文（cross-service 链路在 collector 中可衔接），
   `ParentBased(TraceIdRatioBased)` 采样、TLS 走 rustls、关停时 flush；含进程内 OTLP/gRPC
@@ -64,7 +66,7 @@
   （与 rust/coverage 作业同序），CI 首度具备全绿条件
 - **映射引擎静默失效（`tests/test_route_dispatch.rs` 补测发现）**：
   `InputMapping.from_path` 从未生效（提取阶段以**目标键**产出，合并层却用模板串
-  `path./api/{id}` 当 JSON 路径查询 → 恒 Null，F9 实际未接线）；`from_env` 文档推荐写法
+  `path./api/{id}` 当 JSON 路径查询 → 恒 Null，实际未接线）；`from_env` 文档推荐写法
   `env.NAME` 恒为 Null（被拆成 `["env","NAME"]` 嵌套路径查询，仅裸变量名可用）。
   两处均改为专用合并（`apply_path_source` / `apply_env_source`），并以集成 + 单测双层锁定
 - **供应链修复**：`h2` → 0.4.19、`rustls` → 0.23.45（修复 RUSTSEC-2026-0258 /

@@ -1,4 +1,4 @@
-//! W3C Trace Context（`traceparent`）解析与传播（O3）。
+//! W3C Trace Context（`traceparent`）解析与传播。
 //!
 //! 原系统只有 `x-request-id`（UUID），**无 W3C `traceparent` 注入/透传** ——
 //! 即便后续引入 OTel，跨 BFF→上游的 span 也无法自动衔接。本模块提供：
@@ -10,7 +10,7 @@
 //!
 //! 格式：`00-<32hex trace-id>-<16hex parent-id>-<2hex flags>`
 //!
-//! O3 延伸（OTel 导出）：启用 `telemetry.otlp_endpoint` 后：
+//! OTel 导出扩展：启用 `telemetry.otlp_endpoint` 后：
 //! - 请求 span 由 [`BffMakeSpan`] 构造，并把入站 `traceparent` 设为 OTel 远程父上下文；
 //! - 注入的 `traceparent` 优先取自本跳 span 的 OTel 上下文（[`crate::telemetry::current_span_traceparent`]），
 //!   使 collector 中的 span 树与上游收到的 parent 严格一致；

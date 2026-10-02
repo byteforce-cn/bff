@@ -1,4 +1,4 @@
-//! OTel（OTLP）导出契约测试（O3 遗留项落地）。
+//! OTel（OTLP）导出契约测试。
 //!
 //! 用**进程内 OTLP/gRPC collector**（tonic；与生产导出路径完全一致）验证：
 //! 1. 未配置 `telemetry.otlp_endpoint` → 完全禁用（`None`，不产生任何出站）；

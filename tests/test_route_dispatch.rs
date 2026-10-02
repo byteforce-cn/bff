@@ -8,9 +8,9 @@
 //! - Script：内联 / 引用缺失（404）/ 两者皆缺（400）；
 //! - Proxy：缺少 upstream（400）；
 //! - 鉴权：auth_required=true 匿名 401 / 带会话放行；
-//! - 输入映射：query / body / header / path（F9）/ session / 优先级覆盖；
+//! - 输入映射：query / body / header / path / session / 优先级覆盖；
 //! - 输出映射：pick / rename / wrap / status_map（含 default 兜底）；
-//! - 匹配：段边界（F2）、方法过滤、最长前缀优先。
+//! - 匹配：段边界、方法过滤、最长前缀优先。
 
 mod common;
 
@@ -256,14 +256,14 @@ async fn script_route_extracts_inputs_across_sources() {
         },
     );
     r.input_mapping = InputMapping {
-        // F9：路径模板提取
+        // 路径模板提取
         from_path: HashMap::from([(
             "userId".to_string(),
             "path./api/dt/users/{userId}".to_string(),
         )]),
         // query 优先级高于 body
         from_query: HashMap::from([("tag".to_string(), "tag".to_string())]),
-        // session 扁平上下文（F8）
+        // session 扁平上下文
         from_session: HashMap::from([("who".to_string(), "sub".to_string())]),
         ..Default::default()
     };
@@ -280,7 +280,7 @@ async fn script_route_extracts_inputs_across_sources() {
         .expect("请求失败");
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["user"], "42", "F9：from_path 应从 URL 段提取");
+    assert_eq!(body["user"], "42", "from_path 应从 URL 段提取");
     assert_eq!(body["tag"], "blue", "from_query 应提取 query 参数");
     assert_eq!(body["from"], "test-user", "from_session 应提取会话 sub");
 }
@@ -316,7 +316,7 @@ async fn script_route_extracts_from_env_with_prefixed_path() {
     assert_eq!(body["tok"], "from-env", "env.NAME 形式必须生效");
     assert_eq!(
         body["hasOther"], false,
-        "S5：未显式引用的环境变量不得进入 inputs"
+        "未显式引用的环境变量不得进入 inputs"
     );
 }
 
@@ -468,7 +468,7 @@ async fn route_matching_respects_segment_boundary_and_longest_prefix() {
     let base = spawn_business(make_state(cfg)).await;
     let client = test_client();
 
-    // F2：/api/dt 不得命中 /api/dt-secret（段边界）
+    // /api/dt 不得命中 /api/dt-secret（段边界）
     let r1 = client
         .get(format!("{}/api/dt-secret", base))
         .send()

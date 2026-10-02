@@ -1,4 +1,4 @@
-//! Redis provider：Cache / Lock / Session 的分布式实现（P0-1：多实例共享状态）。
+//! Redis provider：Cache / Lock / Session 的分布式实现（多实例共享状态）。
 //!
 //! - **连接**：`redis::aio::ConnectionManager`（断线自动重连 + Clone 多路复用）。
 //!   经 [`RedisPool`] **惰性建立**：`AppState::new` 保持同步，连接在首次使用时创建；
@@ -129,7 +129,7 @@ impl CacheProvider for RedisCache {
         }
     }
 
-    /// R17：按前缀删除（SCAN + DEL）。
+    /// 按前缀删除（SCAN + DEL）。
     async fn delete_prefix(&self, prefix: &str) -> usize {
         let mut conn = match self.pool.conn().await {
             Ok(c) => c,
@@ -279,7 +279,7 @@ impl LockGuard for RedisLockGuard {
 
 /// Redis 会话存储（tower-sessions `SessionStore` 实现）。
 ///
-/// key 前缀 `bff:sess:`；TTL 由 `Record::expiry_date` 推导（Cookie 与服务端过期对齐见 R5）。
+/// key 前缀 `bff:sess:`；TTL 由 `Record::expiry_date` 推导（Cookie 与服务端过期对齐）。
 #[derive(Clone, Debug)]
 pub struct RedisSessionStore {
     pool: RedisPool,

@@ -53,7 +53,7 @@ impl SessionStore for DynSessionStore {
 
 /// 基于共享 store 构造 Session 层（store 同时存入 AppState 供测试/管理端访问）。
 ///
-/// R5：`session.ttl` 配置后，Cookie 与服务端存储使用同一空闲过期（`Expiry::OnInactivity`）：
+/// `session.ttl` 配置后，Cookie 与服务端存储使用同一空闲过期（`Expiry::OnInactivity`）：
 /// - Cookie 获得 `Max-Age`，不再“关浏览器即失效”而服务端留存 2 周；
 /// - 服务端 record 带 `expiry_date`，Redis 后端由此推导真实 TTL（MemoryStore 惰性过滤）。
 pub fn build_layer(

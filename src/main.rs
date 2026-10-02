@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| PathBuf::from("config"));
     let config = AppConfig::load(&config_dir)?;
 
-    // O3：OTel 追踪导出（telemetry.otlp_endpoint 为空则完全禁用）
+    // OTel 追踪导出（telemetry.otlp_endpoint 为空则完全禁用）
     let telemetry = bff::telemetry::init(&config.telemetry)?;
 
     // JSON 结构化日志（RUST_LOG 控制级别）；启用遥测时叠加 OTel span 导出层
@@ -37,14 +37,14 @@ async fn main() -> anyhow::Result<()> {
     state.verify_dependencies().await?;
     tracing::info!(business_port, admin_port, "BFF 启动中");
 
-    // R5：后台会话索引 GC（清理 store 中已过期的会话条目，防内存无界增长与列表失真）
+    // 后台会话索引 GC（清理 store 中已过期的会话条目，防内存无界增长与列表失真）
     {
         let gc_state = std::sync::Arc::new(state.clone());
         let gc_interval = state.cfg().session.gc_interval;
         tokio::spawn(async move { gc_state.run_session_gc(gc_interval).await });
     }
 
-    // P0-4：外部配置变更轮询（多副本共享存储时收敛管理端变更）
+    // 外部配置变更轮询（多副本共享存储时收敛管理端变更）
     {
         let watch_state = std::sync::Arc::new(state.clone());
         tokio::spawn(async move { watch_state.run_config_watcher().await });
@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%business_addr, "业务端口已监听");
     tracing::info!(%admin_addr, "管理端口已监听");
 
-    // R4：单一信号源（SIGTERM/SIGINT 各注册一次），经 watch 广播给两个服务。
+    // 单一信号源（SIGTERM/SIGINT 各注册一次），经 watch 广播给两个服务。
     // 原实现三处独立注册信号 + 固定 sleep(2s) 后直接退出（硬杀在途请求/WS 连接）。
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("等待在途请求排空超时（30s），强制退出");
     }
 
-    // O3：flush + 关停 OTel（导出队列中的尾部落 span），再记录最终日志。
+    // flush + 关停 OTel（导出队列中的尾部落 span），再记录最终日志。
     // shutdown_async：SDK 的阻塞式关停在 current_thread 运行时会死锁，
     // 统一放入阻塞线程池执行（详见 telemetry::TelemetryHandle::shutdown_async）。
     if let Some(handle) = telemetry {

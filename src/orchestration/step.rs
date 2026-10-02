@@ -60,7 +60,7 @@ async fn execute_http(
     let method = config.method.to_uppercase();
 
     // 缓存命中直接返回。
-    // F6：键必须包含参数指纹（身份/会话维度）——原实现仅 method+url，
+    // 键必须包含参数指纹（身份/会话维度）——原实现仅 method+url，
     // 若 URL 不含用户维度会跨用户串数据；现在调用参数不同则缓存自然隔离。
     let cache_key = if config.cache_ttl.is_some() {
         let mut entries: Vec<(&String, &String)> = params.iter().collect();

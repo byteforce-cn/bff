@@ -23,7 +23,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  // S4：token 存取走 api.ts 的 sessionStorage 实现（关标签页失效）
+  // token 存取走 api.ts 的 sessionStorage 实现（关标签页失效）
   const [token, setTokenState] = useState<string | null>(() => getToken() || null);
   const [isLoading, setIsLoading] = useState(true);
 

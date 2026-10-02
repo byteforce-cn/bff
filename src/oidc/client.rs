@@ -1,7 +1,7 @@
 //! OIDC 客户端管理：按 (provider_id, base_url) 懒加载（discovery 为异步），结果缓存。
 //! 管理端更新 provider 后调用 `invalidate` 使缓存失效。
 //!
-//! R13：discovery 使用注入的带超时共享客户端（oauth2 5 起 `reqwest::Client` 直接实现
+//! discovery 使用注入的带超时共享客户端（oauth2 5 起 `reqwest::Client` 直接实现
 //! `AsyncHttpClient`，不再需要闭包包装；带超时/禁重定向的客户端见 `state.rs::build_http_client`）。
 use crate::config::OidcProviderConfig;
 use anyhow::Context;
@@ -29,9 +29,9 @@ pub type BffCoreClient = CoreClient<
 
 pub struct OidcClientManager {
     clients: RwLock<HashMap<String, Arc<BffCoreClient>>>,
-    /// F12：discovery 元数据中的 `end_session_endpoint` 缓存（None = 已探测但不存在）
+    /// discovery 元数据中的 `end_session_endpoint` 缓存（None = 已探测但不存在）
     logout_endpoints: RwLock<HashMap<String, Option<String>>>,
-    /// R13：OIDC 出网专用客户端（bounded 超时 + 连接池复用）
+    /// OIDC 出网专用客户端（bounded 超时 + 连接池复用）
     http: reqwest::Client,
 }
 
@@ -44,7 +44,7 @@ impl OidcClientManager {
         }
     }
 
-    /// F12：发现 IdP 的 RP-Initiated Logout 端点（`end_session_endpoint`）。
+    /// 发现 IdP 的 RP-Initiated Logout 端点（`end_session_endpoint`）。
     ///
     /// 各 IdP 登出路径不同（Spring AS `/connect/logout`、Keycloak
     /// `/protocol/openid-connect/logout`、Okta `/oauth2/v1/logout` …），
@@ -78,7 +78,7 @@ impl OidcClientManager {
         endpoint
     }
 
-    /// 缓存键必须包含 base_url（P0-2）：redirect_uri 在 build_client 时烧入客户端，
+    /// 缓存键必须包含 base_url：redirect_uri 在 build_client 时烧入客户端，
     /// 若仅按 provider id 缓存，首个调用者的 base_url 会污染其余全部请求。
     fn cache_key(cfg: &OidcProviderConfig, base_url: &str) -> String {
         format!("{}|{}", cfg.id, base_url.trim_end_matches('/'))
