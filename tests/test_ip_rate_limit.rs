@@ -44,7 +44,7 @@ async fn request_with_client(base: &str, client: &str) -> u16 {
     resp.status().as_u16()
 }
 
-/// T1：默认（关闭）→ 认证端点不限制，维持现状。
+/// 默认（关闭）→ 认证端点不限制，维持现状。
 #[tokio::test]
 async fn test_auth_rate_limit_disabled_regression() {
     let mut cfg = base_config();
@@ -61,7 +61,7 @@ async fn test_auth_rate_limit_disabled_regression() {
     }
 }
 
-/// T2：命中认证路径 → 桶耗尽后 429 + Retry-After。
+/// 命中认证路径 → 桶耗尽后 429 + Retry-After。
 #[tokio::test]
 async fn test_auth_rate_limit_block_with_retry_after() {
     let mut cfg = base_config();
@@ -100,7 +100,7 @@ async fn test_auth_rate_limit_block_with_retry_after() {
     assert!(retry_after.unwrap() >= 1, "Retry-After 应 >= 1s");
 }
 
-/// T3：未命中配置路径前缀的请求不受影响。
+/// 未命中配置路径前缀的请求不受影响。
 #[tokio::test]
 async fn test_auth_rate_limit_other_paths_unaffected() {
     let mut cfg = base_config();
@@ -122,7 +122,7 @@ async fn test_auth_rate_limit_other_paths_unaffected() {
     }
 }
 
-/// T4：不同来源 IP 桶相互独立。
+/// 不同来源 IP 桶相互独立。
 #[tokio::test]
 async fn test_auth_rate_limit_per_ip_independent() {
     let mut cfg = base_config();
@@ -145,7 +145,7 @@ async fn test_auth_rate_limit_per_ip_independent() {
     assert_eq!(request_with_client(&base, "2.2.2.2").await, 429, "B 桶耗尽");
 }
 
-/// T5：trusted_proxies = 0 时不信任 X-Forwarded-For，伪造头无法绕过。
+/// trusted_proxies = 0 时不信任 X-Forwarded-For，伪造头无法绕过。
 #[tokio::test]
 async fn test_auth_rate_limit_trusted_zero_ignores_xff() {
     let mut cfg = base_config();
@@ -172,7 +172,7 @@ async fn test_auth_rate_limit_trusted_zero_ignores_xff() {
     );
 }
 
-/// T6：补液语义 —— 等待一个补液周期后桶恢复可放行。
+/// 补液语义 —— 等待一个补液周期后桶恢复可放行。
 ///
 /// 必须使用「慢补液」参数（rate=1/s）使桶在 5 个请求内确定性耗尽：
 /// 单请求净消耗 = 1 − rate × d，只要单请求时延 d < ~0.17s，

@@ -36,7 +36,7 @@ fn cfg_with_persistence(path: &std::path::Path) -> bff::config::AppConfig {
     cfg
 }
 
-/// T1：管理端导入 → 落盘（脱敏）→ 重启（重新解析文件 + 哨兵回填）不丢配置、不泄密钥。
+/// 管理端导入 → 落盘（脱敏）→ 重启（重新解析文件 + 哨兵回填）不丢配置、不泄密钥。
 #[tokio::test]
 async fn admin_import_persists_and_recovers_without_secret_leak() {
     let path = temp_path("recover");
@@ -83,7 +83,7 @@ async fn admin_import_persists_and_recovers_without_secret_leak() {
     );
 }
 
-/// T2：外部（另一副本/运维）修改持久化文件 → watcher 热重载生效。
+/// 外部（另一副本/运维）修改持久化文件 → watcher 热重载生效。
 #[tokio::test]
 async fn external_file_change_is_hot_reloaded() {
     let path = temp_path("watch");
@@ -129,7 +129,7 @@ async fn external_file_change_is_hot_reloaded() {
     assert!(applied, "外部文件变更应在 ~5s 内被热重载");
 }
 
-/// T3：持久化关闭时管理端变更不落盘（默认开发/测试行为不变）。
+/// 持久化关闭时管理端变更不落盘（默认开发/测试行为不变）。
 #[tokio::test]
 async fn persistence_disabled_writes_nothing() {
     let cfg = common::base_config(); // persistence.enabled = false

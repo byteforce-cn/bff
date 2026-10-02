@@ -106,5 +106,5 @@ scope=<可选>
 ## 7. 测试
 
 - `tests/test_token_exchange.rs`：缓存命中/回源、single-flight、`invalid_grant`
-  刷新重试、错误映射、导出打码（t10）、并发等；
+  刷新重试、错误映射、导出打码、并发等；
 - 本地手工验证：`routes.yaml` 中取消注释示例路由，指向可用授权服务器即可。

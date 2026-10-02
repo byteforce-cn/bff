@@ -3,7 +3,7 @@
 //! 用 wiremock 模拟：
 //! - 授权服务器（exchange token endpoint）：`POST /oauth2/token`
 //! - 上游 resource server：校验注入的 Bearer token
-//! - 会话刷新（T4/T6）复用 common 的 mock OIDC IdP
+//! - 会话刷新复用 common 的 mock OIDC IdP
 
 mod common;
 
@@ -101,7 +101,7 @@ async fn as_count(as_server: &MockServer) -> usize {
 }
 
 // ============================================================
-// T1: 交换后 token 注入上游
+// 交换后 token 注入上游
 // ============================================================
 #[tokio::test]
 async fn t1_exchange_token_injected_to_upstream() {
@@ -162,7 +162,7 @@ async fn t1_exchange_token_injected_to_upstream() {
 }
 
 // ============================================================
-// T2: 缓存复用（N 次请求仅 1 次交换）
+// 缓存复用（N 次请求仅 1 次交换）
 // ============================================================
 #[tokio::test]
 async fn t2_cache_reuse_single_exchange() {
@@ -207,7 +207,7 @@ async fn t2_cache_reuse_single_exchange() {
 }
 
 // ============================================================
-// T3: TTL 生效（expires_in 短于 cache_ttl → 按 expires_in 过期重交换）
+// TTL 生效（expires_in 短于 cache_ttl → 按 expires_in 过期重交换）
 // ============================================================
 #[tokio::test]
 async fn t3_ttl_expires_re_exchange() {
@@ -255,7 +255,7 @@ async fn t3_ttl_expires_re_exchange() {
 }
 
 // ============================================================
-// T4: 会话刷新后自动重交换（旧缓存不复用）
+// 会话刷新后自动重交换（旧缓存不复用）
 // ============================================================
 #[tokio::test]
 async fn t4_session_refresh_re_exchanges() {
@@ -335,7 +335,7 @@ async fn t4_session_refresh_re_exchanges() {
 }
 
 // ============================================================
-// T5: 未配置 token_exchange 的路由行为不变（回归）
+// 未配置 token_exchange 的路由行为不变（回归）
 // ============================================================
 #[tokio::test]
 async fn t5_without_exchange_injects_session_token() {
@@ -387,7 +387,7 @@ async fn t5_without_exchange_injects_session_token() {
 }
 
 // ============================================================
-// T6: invalid_grant → 刷新会话 + 重试一次（成功后正常返回）
+// invalid_grant → 刷新会话 + 重试一次（成功后正常返回）
 // ============================================================
 #[tokio::test]
 async fn t6_invalid_grant_refresh_and_retry() {
@@ -458,7 +458,7 @@ async fn t6_invalid_grant_refresh_and_retry() {
 }
 
 // ============================================================
-// T7: access_denied → 401，不重试、不刷新
+// access_denied → 401，不重试、不刷新
 // ============================================================
 #[tokio::test]
 async fn t7_access_denied_returns_401_no_retry() {
@@ -504,7 +504,7 @@ async fn t7_access_denied_returns_401_no_retry() {
 }
 
 // ============================================================
-// T8: token endpoint 5xx → 502，不触发会话刷新
+// token endpoint 5xx → 502，不触发会话刷新
 // ============================================================
 #[tokio::test]
 async fn t8_token_endpoint_5xx_returns_502() {
@@ -546,7 +546,7 @@ async fn t8_token_endpoint_5xx_returns_502() {
 }
 
 // ============================================================
-// T9: 客户端认证 basic / post
+// 客户端认证 basic / post
 // ============================================================
 #[tokio::test]
 async fn t9a_client_secret_basic() {
@@ -654,7 +654,7 @@ async fn t9b_client_secret_post() {
 }
 
 // ============================================================
-// T10: 配置导入/导出回环（client_secret 打码、round-trip 不破坏）
+// 配置导入/导出回环（client_secret 打码、round-trip 不破坏）
 // ============================================================
 #[tokio::test]
 async fn t10_config_export_import_roundtrip_masks_secret() {
