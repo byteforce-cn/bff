@@ -27,7 +27,7 @@ tower-sessions = "0.12"
 openidconnect = { version = "4.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 petgraph = "0.6"
-rquickjs = "0.13"
+rquickjs = "0.14"
 arc-swap = "1.7"
 rust-embed = "8"
 tracing = "0.1"
