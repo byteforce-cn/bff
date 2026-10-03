@@ -26,7 +26,7 @@ tower-sessions = "0.12"
 # 旧闭包式 `async_http_client` 已移除（共享客户端带超时/禁重定向，见 `state.rs::build_http_client`）。
 openidconnect = { version = "4.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-petgraph = "0.6"
+petgraph = "0.8"
 rquickjs = "0.13"
 arc-swap = "1.7"
 rust-embed = "8"
