@@ -264,9 +264,23 @@ pub async fn login_cookie(state: &AppState) -> String {
     create_session_with_tokens(state, &tokens).await
 }
 
-/// 构造临时 SPA 目录，返回路径。
+/// SPA 夹具目录序号：同一进程内每次调用生成唯一目录。
+///
+/// 必须唯一：多个 `#[tokio::test]` 并行共享同一进程、同一组临时文件；
+/// 若目录同名，某个测试重写 `index.html`/`app.js`（fs::write 先截断再写）
+/// 会截断另一个测试仍在 serve 的文件，导致响应体 `UnexpectedEof` /
+/// `IncompleteMessage`（CI 上的间歇性失败）。
+static SPA_DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// 构造临时 SPA 目录（进程内唯一），返回路径。
 pub fn make_spa_dir(tag: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("bff-test-spa-{}-{}", tag, std::process::id()));
+    let seq = SPA_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "bff-test-spa-{}-{}-{}",
+        tag,
+        std::process::id(),
+        seq
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("index.html"),
