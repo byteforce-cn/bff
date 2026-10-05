@@ -55,12 +55,12 @@ redis = { version = "1.7.1", features = ["tokio-comp", "connection-manager"] }
 time = "0.3"
 
 # OTel 分布式追踪（OTLP/gRPC 导出）。
-# 0.32/0.33 线（含 opentelemetry_sdk 0.32.1 的安全修复；升级需回归 tests/test_telemetry.rs）。
+# 0.33/0.34 线（tracing-opentelemetry 0.34 要求 opentelemetry 0.33；升级需回归 tests/test_telemetry.rs）。
 # tls 走 rustls/ring（tls-roots 读取系统证书库），不引入 openssl（保持依赖图约束）。
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls", "tls-roots"] }
-tracing-opentelemetry = { version = "0.33", default-features = false }
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-roots"] }
+tracing-opentelemetry = { version = "0.34", default-features = false }
 
 [dev-dependencies]
 wiremock = "0.6"
@@ -70,8 +70,8 @@ reqwest = { version = "0.12", default-features = false, features = ["cookies", "
 # 真实验签契约测试：进程内生成 RSA 密钥并以 RS256 签发 id_token（tests/test_oidc_signature.rs）。
 # 版本与 openidconnect 4.0 传递依赖一致（rsa 0.9 线，Marvin 审计例外维持原界定）。
 rsa = { version = "0.9", features = ["sha2"] }
-# OTel 契约测试：进程内 OTLP/gRPC collector（版本与 opentelemetry-otlp 0.32 对齐）
-opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "trace"] }
+# OTel 契约测试：进程内 OTLP/gRPC collector（版本与 opentelemetry-otlp 0.33 对齐）
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "trace"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "router"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
