@@ -46,7 +46,7 @@ jobs:
 
       # admin-ui/dist 是 RustEmbed 的编译期强依赖，必须先构建（否则 cargo test 无法编译）
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
@@ -101,7 +101,7 @@ jobs:
 
       # RustEmbed 编译期强依赖 admin-ui/dist（同 rust job）
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
@@ -151,7 +151,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 17 (Temurin)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -170,7 +170,7 @@ jobs:
       # 因此必须先安装 pnpm 再配置 Node（历史事故：顺序反置时该 job 在
       # "Set up Node 22" 步骤报 `Unable to locate executable file: pnpm`）。
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 

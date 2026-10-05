@@ -5,11 +5,14 @@
 //!
 //! 未初始化时加密/解密操作将 panic，确保不会在生产中遗漏配置。
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, Generate, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::Argon2;
 use base64::Engine;
 use std::sync::OnceLock;
+
+/// AES-GCM 标准 nonce 长度（96 bit）。
+const NONCE_LEN: usize = 12;
 
 /// 全局密钥缓存：由 `init()` 在启动时初始化一次。
 static KEY_CACHE: OnceLock<Result<Aes256Gcm, String>> = OnceLock::new();
@@ -50,7 +53,7 @@ fn cipher() -> &'static Aes256Gcm {
 /// 使用 AES-256-GCM 加密明文，返回 base64url 编码的 nonce+密文。
 pub fn encrypt(plaintext: &[u8]) -> anyhow::Result<String> {
     let c = cipher();
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::generate();
     let ct = c
         .encrypt(&nonce, plaintext)
         .map_err(|e| anyhow::anyhow!("加密失败: {}", e))?;
@@ -65,10 +68,10 @@ pub fn decrypt(encoded: &str) -> anyhow::Result<Vec<u8>> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|e| anyhow::anyhow!("base64 解码失败: {}", e))?;
-    let n = Aes256Gcm::generate_nonce(&mut OsRng).len();
+    let n = NONCE_LEN;
     anyhow::ensure!(raw.len() > n, "密文长度非法");
     let (nonce, ct) = raw.split_at(n);
-    let nonce_arr: [u8; 12] = nonce
+    let nonce_arr: [u8; NONCE_LEN] = nonce
         .try_into()
         .map_err(|_| anyhow::anyhow!("nonce 长度非法"))?;
     c.decrypt(&Nonce::from(nonce_arr), ct)
@@ -104,7 +107,7 @@ mod tests {
         let mut raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&encrypted)
             .expect("base64 decode");
-        let nonce_len = 12; // AES-GCM nonce
+        let nonce_len = NONCE_LEN; // AES-GCM nonce
         if raw.len() > nonce_len {
             raw[nonce_len] ^= 0x01;
         }
