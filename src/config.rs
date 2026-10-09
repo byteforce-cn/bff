@@ -741,6 +741,21 @@ fn is_valid_profile_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// 站点名是否匹配 `[a-z0-9-]+`（与 profile 名同规则）。
+fn is_valid_site_name(name: &str) -> bool {
+    is_valid_profile_name(name)
+}
+
+/// 归一化路由路径用于重复规格检测：去尾斜杠（与 `match_route` 的段边界一致）。
+fn normalize_route_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// 校验错误中的 profile 字段路径（`default` 归属顶层 `session`）。
 fn profile_field_path(name: &str, field: &str) -> String {
     if name == DEFAULT_SESSION_PROFILE {
@@ -1888,8 +1903,12 @@ impl AppConfig {
                 self.session.secure,
                 "生产环境（BFF_ENV=prod）必须 session.secure=true（否则会话 Cookie 明文传输）"
             );
+            // 显式多站点由每站点 public_base_url 承担防污染要求（validate_sites 校验，
+            // 且顶层 server.public_base_url / trusted_hosts 此时为 dead config）；legacy 语义不变。
             anyhow::ensure!(
-                self.server.public_base_url.is_some() || !self.server.trusted_hosts.is_empty(),
+                !self.sites.is_empty()
+                    || self.server.public_base_url.is_some()
+                    || !self.server.trusted_hosts.is_empty(),
                 "生产环境（BFF_ENV=prod）必须配置 server.public_base_url 或 server.trusted_hosts（防止 Host 头污染 redirect_uri）"
             );
             anyhow::ensure!(
@@ -2116,10 +2135,11 @@ impl AppConfig {
             "health.probe_timeout 必须 >= 100ms"
         );
 
-        // 会话 profile 卫生与 Cookie 策略（§5.4 第 3–5 条）：
-        // 在现有 legacy 全局校验之后执行；Task 3/4 的站点级校验后续加入。
+        // 会话 profile 卫生与 Cookie 策略（§5.4 第 3–5 条）与站点字段/Host 白名单
+        // （§5.4 第 1/2/6/7/11 条）：在现有 legacy 全局校验之后执行。
         let sites = self.effective_sites();
         self.validate_session_profiles(is_prod, &sites)?;
+        self.validate_sites(is_prod, &sites)?;
 
         Ok(())
     }
@@ -2277,6 +2297,218 @@ impl AppConfig {
         }
 
         Ok(())
+    }
+
+    /// 站点字段与 Host 白名单校验（§5.4 第 1/2/6/7/11 条 + §5.3 重复路由告警）。
+    ///
+    /// - 规则 1/2/3：站点名合法（`[a-z0-9-]+`）且唯一、保留名 `admin` 禁止；端口非 0、
+    ///   唯一、≠ `admin_port`；`bind` 必须为可解析 IP；`session_profile` 必须已定义；
+    /// - 规则 6（prod）：每站点 `public_base_url` 必填、`server_names` 配置时必须包含 public 主机、
+    ///   站点间归一化后唯一；显式多站点下顶层 `server.public_base_url` / `trusted_hosts` 为
+    ///   dead config（error）；`server.business_port` 被忽略（≠ 8080 时 warn）；
+    /// - 规则 7：`server_names` 仅主机名（复用 `normalize_host`，读原始值以免非法项被静默丢弃），
+    ///   归一化后站点内唯一；
+    /// - 规则 11：prod 下多站点复用同一 `spa.dir` 仅告警；
+    /// - legacy 冻结：无 `sites` 定义时禁止 `routes[].sites` 注解（路由会静默不可命中）。
+    fn validate_sites(&self, is_prod: bool, sites: &[ResolvedSite]) -> anyhow::Result<()> {
+        // legacy 分支：合成 default 站点，站点级字段无显式配置；仅冻结 routes[].sites 语义。
+        if self.sites.is_empty() {
+            for (i, route) in self.routes.iter().enumerate() {
+                anyhow::ensure!(
+                    route.sites.is_empty(),
+                    "routes[{}].sites 在未定义 sites 的 legacy 配置中不可用（路由将不可命中；请定义 sites 或移除注解）",
+                    i
+                );
+            }
+            self.warn_duplicate_routes(&["default".to_string()]);
+            return Ok(());
+        }
+
+        // 显式多站点下顶层 Host 配置不再生效（dead config），避免“配置了但行为不变”。
+        anyhow::ensure!(
+            self.server.public_base_url.is_none(),
+            "显式多站点下 server.public_base_url 为 dead config（每站点改用 sites[i].public_base_url）"
+        );
+        anyhow::ensure!(
+            self.server.trusted_hosts.is_empty(),
+            "显式多站点下 server.trusted_hosts 为 dead config（每站点改用 sites[i].server_names）"
+        );
+        if self.server.business_port != default_business_port() {
+            tracing::warn!(
+                "显式多站点下 server.business_port={} 被忽略（每站点使用 sites[].port）",
+                self.server.business_port
+            );
+        }
+
+        let profiles = self.resolved_session_profiles();
+        let mut seen_names: HashMap<&str, usize> = HashMap::new();
+        let mut seen_ports: HashMap<u16, usize> = HashMap::new();
+        let mut seen_public_urls: HashMap<String, usize> = HashMap::new();
+
+        for (i, raw) in self.sites.iter().enumerate() {
+            // 规则 1：站点名非空、非保留名、字符集、唯一。
+            anyhow::ensure!(!raw.name.is_empty(), "sites[{}].name 不能为空", i);
+            anyhow::ensure!(
+                raw.name != "admin",
+                "sites[{}].name 为保留名 admin（禁止与指标/日志/管理面命名空间混淆）",
+                i
+            );
+            anyhow::ensure!(
+                is_valid_site_name(&raw.name),
+                "sites[{}].name 非法（须匹配 [a-z0-9-]+）: {}",
+                i,
+                raw.name
+            );
+            if let Some(prev) = seen_names.insert(raw.name.as_str(), i) {
+                anyhow::bail!(
+                    "sites[{}].name 重复，与 sites[{}] 冲突: {}",
+                    i,
+                    prev,
+                    raw.name
+                );
+            }
+
+            // 规则 2：端口非 0、≠ admin_port、唯一。
+            anyhow::ensure!(raw.port != 0, "sites[{}].port 不能为 0", i);
+            anyhow::ensure!(
+                raw.port != self.server.admin_port,
+                "sites[{}].port 不能等于 server.admin_port（{}）",
+                i,
+                self.server.admin_port
+            );
+            if let Some(prev) = seen_ports.insert(raw.port, i) {
+                anyhow::bail!(
+                    "sites[{}].port 重复，与 sites[{}] 冲突: {}",
+                    i,
+                    prev,
+                    raw.port
+                );
+            }
+
+            // bind 仅用于监听，必须是可解析 IP（主机名/通配域不参与 bind）。
+            anyhow::ensure!(
+                raw.bind.parse::<std::net::IpAddr>().is_ok(),
+                "sites[{}].bind 必须为可解析的 IP 地址: {}",
+                i,
+                raw.bind
+            );
+
+            // 规则 7：server_names 仅主机名——校验原始条目，非法值不得被 effective_sites 静默丢弃。
+            let mut server_names: Vec<String> = Vec::new();
+            for name in &raw.server_names {
+                let host = normalize_host(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "sites[{}].server_names 条目非法（仅允许主机名，拒绝协议/端口/通配符/路径）: {}",
+                        i,
+                        name
+                    )
+                })?;
+                anyhow::ensure!(
+                    !server_names.contains(&host),
+                    "sites[{}].server_names 条目重复（归一化后）: {}",
+                    i,
+                    host
+                );
+                server_names.push(host);
+            }
+
+            // 规则 6：public_base_url 合法性（http/https、无 path/query）与站点间归一化唯一。
+            let public_host = match &raw.public_base_url {
+                Some(raw_url) => {
+                    let (normalized, host) = normalize_public_base_url(raw_url)
+                        .map_err(|e| anyhow::anyhow!("sites[{}].public_base_url 非法: {}", i, e))?;
+                    if let Some(prev) = seen_public_urls.insert(normalized.clone(), i) {
+                        anyhow::bail!(
+                            "sites[{}].public_base_url 与 sites[{}] 归一化后重复: {}",
+                            i,
+                            prev,
+                            normalized
+                        );
+                    }
+                    Some(host)
+                }
+                None => None,
+            };
+
+            // 规则 3：session_profile 必须引用已解析的 profile（`default` = 顶层 `session`）。
+            anyhow::ensure!(
+                profiles.contains_key(&raw.session_profile),
+                "sites[{}].session_profile 引用未定义的 profile: {}",
+                i,
+                raw.session_profile
+            );
+
+            // 规则 6（prod）：每站点 public_base_url 必填；server_names 配置时必须包含 public 主机。
+            if is_prod {
+                let host = public_host.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "生产环境（BFF_ENV=prod）下 sites[{}].public_base_url 必填（redirect_uri 一律由此推导）",
+                        i
+                    )
+                })?;
+                if !server_names.is_empty() {
+                    anyhow::ensure!(
+                        server_names.iter().any(|h| h == host),
+                        "sites[{}].server_names 必须包含 public_base_url 主机 {}",
+                        i,
+                        host
+                    );
+                }
+            }
+        }
+
+        // 规则 11：prod 下多站点复用同一 spa.dir 仅告警（可能误配，也可能有意复用）。
+        if is_prod {
+            let mut seen_spa: HashMap<&str, usize> = HashMap::new();
+            for (i, site) in sites.iter().enumerate() {
+                if let Some(prev) = seen_spa.insert(site.spa_dir.as_str(), i) {
+                    tracing::warn!(
+                        "sites[{}].spa.dir 与 sites[{}] 相同（{}）：prod 下多站点复用同一 SPA 目录可能误配",
+                        i,
+                        prev,
+                        site.spa_dir
+                    );
+                }
+            }
+        }
+
+        let site_names: Vec<String> = self.sites.iter().map(|s| s.name.clone()).collect();
+        self.warn_duplicate_routes(&site_names);
+        Ok(())
+    }
+
+    /// §5.3：对同一站点可命中的完全同规格路由（相同归一化 path + methods + 站点范围）告警。
+    ///
+    /// 仅 warn 不 fail（保持 legacy 兼容）；重复路由在运行期仍按配置顺序 last-wins。
+    /// `all_sites` 为全部已定义站点名，用于把「未标注 sites = 全部站点」展开为可比较集合。
+    fn warn_duplicate_routes(&self, all_sites: &[String]) {
+        let mut seen: HashMap<(String, Vec<String>, Vec<String>), usize> = HashMap::new();
+        for (i, route) in self.routes.iter().enumerate() {
+            let mut methods: Vec<String> = route
+                .methods
+                .iter()
+                .map(|m| m.to_ascii_uppercase())
+                .collect();
+            methods.sort();
+            methods.dedup();
+
+            let mut scope: Vec<String> = if route.sites.is_empty() {
+                all_sites.to_vec()
+            } else {
+                route.sites.clone()
+            };
+            scope.sort();
+            scope.dedup();
+
+            let key = (normalize_route_path(&route.path), methods, scope);
+            if let Some(prev) = seen.insert(key, i) {
+                tracing::warn!(
+                    "routes[{}] 与 routes[{}] 规格相同且对同一组站点生效，后者按配置顺序 last-wins",
+                    i,
+                    prev
+                );
+            }
+        }
     }
 
     /// 脱敏副本：隐藏 bff_secret 主密钥、各 client_secret、管理 token、
@@ -2760,6 +2992,29 @@ server:
         format!("{PROD_BASE}\n{extra}")
     }
 
+    /// prod 下显式多站点用的基础配置：不含顶层 `server.public_base_url` / `trusted_hosts`
+    /// （显式多站点下为 dead config，由站点级校验拒绝，改由每站点 `public_base_url` 承担）。
+    const PROD_MULTISITE_BASE: &str = r#"
+bff_secret:
+  secret: "prod-real-secret"
+  salt: "prod-real-salt-16b"
+provider:
+  session_store: redis
+  cache: redis
+  lock: redis
+  redis_url: "redis://127.0.0.1:6379"
+admin:
+  auth_mode: token
+  auth_token: "0123456789abcdef0123456789abcdef"
+  enable_test_endpoints: false
+session:
+  secure: true
+"#;
+
+    fn prod_multisite_yaml(extra: &str) -> String {
+        format!("{PROD_MULTISITE_BASE}\n{extra}")
+    }
+
     fn expect_err(yaml: &str, need: &str) {
         let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
         let err = cfg
@@ -2971,15 +3226,17 @@ session_profiles:
 
     #[test]
     fn shared_profile_without_domain_fails_prod() {
-        let yaml = prod_yaml(
+        let yaml = prod_multisite_yaml(
             r#"
 sites:
   - name: app1
     port: 8081
+    public_base_url: "https://app1.example.com"
     server_names: ["app1.example.com"]
     session_profile: isolated
   - name: app2
     port: 8082
+    public_base_url: "https://app2.example.com"
     server_names: ["app2.example.com"]
     session_profile: isolated
 session_profiles:
@@ -2994,15 +3251,17 @@ session_profiles:
 
     #[test]
     fn shared_profile_with_domain_passes_prod() {
-        let cfg: AppConfig = serde_yaml::from_str(&prod_yaml(
+        let cfg: AppConfig = serde_yaml::from_str(&prod_multisite_yaml(
             r#"
 sites:
   - name: app1
     port: 8081
+    public_base_url: "https://app1.example.com"
     server_names: ["app1.example.com"]
     session_profile: isolated
   - name: app2
     port: 8082
+    public_base_url: "https://app2.example.com"
     server_names: ["app2.example.com"]
     session_profile: isolated
 session_profiles:
@@ -3069,6 +3328,508 @@ session:
             r#"
 session:
   cookie_domain: "example.com"
+"#,
+        );
+    }
+}
+
+// ── 站点字段与 Host 白名单校验测试（§5.4 第 1/2/6/7/11 条 + §5.3 重复路由告警）──
+
+#[cfg(test)]
+mod site_validation_tests {
+    use super::*;
+
+    fn expect_err(yaml: &str, need: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        let err = cfg
+            .validate_with_env(false)
+            .expect_err("dev 应校验失败")
+            .to_string();
+        assert!(err.contains(need), "错误应含 {need}，实际: {err}");
+    }
+
+    fn expect_ok(yaml: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        cfg.validate_with_env(false)
+            .unwrap_or_else(|e| panic!("dev 应校验通过，实际: {e}"));
+    }
+
+    fn expect_prod_err(yaml: &str, need: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        let err = cfg
+            .validate_with_env(true)
+            .expect_err("prod 应校验失败")
+            .to_string();
+        assert!(err.contains(need), "错误应含 {need}，实际: {err}");
+    }
+
+    fn expect_prod_ok(yaml: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        cfg.validate_with_env(true)
+            .unwrap_or_else(|e| panic!("prod 应校验通过，实际: {e}"));
+    }
+
+    /// prod 下显式多站点最小配置。不含顶层 `server.public_base_url` / `trusted_hosts`
+    /// （显式多站点下属 dead config，由站点级校验拒绝）。
+    const PROD_BASE: &str = r#"
+bff_secret:
+  secret: "prod-real-secret"
+  salt: "prod-real-salt-16b"
+provider:
+  session_store: redis
+  cache: redis
+  lock: redis
+  redis_url: "redis://127.0.0.1:6379"
+admin:
+  auth_mode: token
+  auth_token: "0123456789abcdef0123456789abcdef"
+  enable_test_endpoints: false
+session:
+  secure: true
+"#;
+
+    fn prod_yaml(extra: &str) -> String {
+        format!("{PROD_BASE}\n{extra}")
+    }
+
+    /// `server_names` 大小写与尾点归一，且与 public 主机去重后仅剩一个白名单条目。
+    const MULTIDOT_YAML: &str = r#"
+sites:
+  - name: app1
+    port: 8081
+    server_names: ["App1.EXAMPLE.com."]
+    public_base_url: "https://app1.example.com"
+"#;
+
+    // 规则 1：站点名非空、唯一、匹配 [a-z0-9-]+；保留名 admin 禁止。
+
+    #[test]
+    fn rejects_empty_site_name() {
+        expect_err(
+            r#"
+sites:
+  - name: ""
+    port: 8081
+"#,
+            "sites[0].name",
+        );
+    }
+
+    #[test]
+    fn rejects_uppercase_site_name() {
+        expect_err(
+            r#"
+sites:
+  - name: "App1"
+    port: 8081
+"#,
+            "sites[0].name",
+        );
+    }
+
+    #[test]
+    fn rejects_underscore_site_name() {
+        expect_err(
+            r#"
+sites:
+  - name: "bad_name"
+    port: 8081
+"#,
+            "sites[0].name",
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_admin_site_name() {
+        expect_err(
+            r#"
+sites:
+  - name: "admin"
+    port: 8081
+"#,
+            "sites[0].name",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_site_name() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+  - name: "app1"
+    port: 8082
+"#,
+            "sites[1].name",
+        );
+    }
+
+    #[test]
+    fn accepts_valid_site_names_and_binds() {
+        expect_ok(
+            r#"
+sites:
+  - name: "default"
+    port: 8081
+    bind: "127.0.0.1"
+  - name: "app-2"
+    port: 8082
+    bind: "::1"
+"#,
+        );
+    }
+
+    // 规则 2：端口非 0、唯一、≠ admin_port。
+
+    #[test]
+    fn rejects_zero_site_port() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 0
+"#,
+            "sites[0].port",
+        );
+    }
+
+    #[test]
+    fn rejects_site_port_equal_to_admin_port() {
+        expect_err(
+            r#"
+server:
+  admin_port: 8443
+sites:
+  - name: "app1"
+    port: 8443
+"#,
+            "sites[0].port",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_site_port() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+  - name: "app2"
+    port: 8081
+"#,
+            "sites[1].port",
+        );
+    }
+
+    // 规则 3：bind 必须是可解析 IP。
+
+    #[test]
+    fn rejects_unparseable_site_bind() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    bind: "not-an-ip"
+"#,
+            "sites[0].bind",
+        );
+    }
+
+    // 规则 6（prod）：每站点 public_base_url 必填、与 server_names 一致、站点间唯一。
+
+    #[test]
+    fn prod_requires_site_public_base_url() {
+        expect_prod_err(
+            &prod_yaml(
+                r#"
+sites:
+  - name: "app1"
+    port: 8081
+"#,
+            ),
+            "sites[0].public_base_url",
+        );
+    }
+
+    #[test]
+    fn prod_rejects_server_names_without_public_host() {
+        expect_prod_err(
+            &prod_yaml(
+                r#"
+sites:
+  - name: "app1"
+    port: 8081
+    public_base_url: "https://app1.example.com"
+    server_names: ["other.example.com"]
+"#,
+            ),
+            "sites[0].server_names",
+        );
+    }
+
+    #[test]
+    fn prod_rejects_duplicate_public_base_url_across_sites() {
+        expect_prod_err(
+            &prod_yaml(
+                r#"
+sites:
+  - name: "app1"
+    port: 8081
+    public_base_url: "https://app1.example.com"
+  - name: "app2"
+    port: 8082
+    public_base_url: "https://app1.example.com"
+"#,
+            ),
+            "sites[1].public_base_url",
+        );
+    }
+
+    #[test]
+    fn prod_accepts_unique_public_base_urls() {
+        expect_prod_ok(&prod_yaml(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    public_base_url: "https://app1.example.com"
+    session_profile: app1
+  - name: "app2"
+    port: 8082
+    public_base_url: "https://app2.example.com"
+    session_profile: app2
+session_profiles:
+  app1: { cookie_name: "S1" }
+  app2: { cookie_name: "S2" }
+"#,
+        ));
+    }
+
+    // 规则 6：显式多站点下顶层 server.public_base_url / trusted_hosts 为 dead config。
+
+    #[test]
+    fn rejects_server_public_base_url_with_explicit_sites() {
+        expect_err(
+            r#"
+server:
+  public_base_url: "https://bff.example.com"
+sites:
+  - name: "app1"
+    port: 8081
+"#,
+            "server.public_base_url",
+        );
+    }
+
+    #[test]
+    fn rejects_server_trusted_hosts_with_explicit_sites() {
+        expect_err(
+            r#"
+server:
+  trusted_hosts: ["bff.example.com"]
+sites:
+  - name: "app1"
+    port: 8081
+"#,
+            "server.trusted_hosts",
+        );
+    }
+
+    #[test]
+    fn accepts_non_default_business_port_with_explicit_sites() {
+        expect_ok(
+            r#"
+server:
+  business_port: 9090
+sites:
+  - name: "app1"
+    port: 8081
+"#,
+        );
+    }
+
+    // 规则 7：server_names 仅主机名，站点内归一化后唯一。
+
+    #[test]
+    fn rejects_server_name_with_scheme() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    server_names: ["https://x"]
+"#,
+            "sites[0].server_names",
+        );
+    }
+
+    #[test]
+    fn rejects_server_name_with_port() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    server_names: ["x:8080"]
+"#,
+            "sites[0].server_names",
+        );
+    }
+
+    #[test]
+    fn rejects_wildcard_server_name() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    server_names: ["*"]
+"#,
+            "sites[0].server_names",
+        );
+    }
+
+    #[test]
+    fn rejects_server_name_with_path() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    server_names: ["a/b"]
+"#,
+            "sites[0].server_names",
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_server_names_after_normalization() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    server_names: ["app1.example.com", "App1.EXAMPLE.com."]
+"#,
+            "sites[0].server_names",
+        );
+    }
+
+    #[test]
+    fn normalizes_server_names_case_and_trailing_dot() {
+        let cfg: AppConfig = serde_yaml::from_str(MULTIDOT_YAML).unwrap();
+        let s = &cfg.effective_sites()[0];
+        assert_eq!(s.allowed_hosts, vec!["app1.example.com"]);
+        cfg.validate_with_env(false)
+            .unwrap_or_else(|e| panic!("归一化后的 server_names 应通过校验，实际: {e}"));
+    }
+
+    // 规则 11：prod 下多站点复用同一 spa.dir 仅告警（不 fail）。
+
+    #[test]
+    fn prod_accepts_shared_spa_dir_with_warning() {
+        expect_prod_ok(&prod_yaml(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    public_base_url: "https://app1.example.com"
+    session_profile: app1
+    spa: { dir: "shared/dist" }
+  - name: "app2"
+    port: 8082
+    public_base_url: "https://app2.example.com"
+    session_profile: app2
+    spa: { dir: "shared/dist" }
+session_profiles:
+  app1: { cookie_name: "S1" }
+  app2: { cookie_name: "S2" }
+"#,
+        ));
+    }
+
+    // 规则 8：legacy 冻结——无 sites 定义时 routes[].sites 注解导致路由不可命中，必须拒绝。
+
+    #[test]
+    fn rejects_route_sites_without_sites_definition() {
+        expect_err(
+            r#"
+routes:
+  - path: "/api/x"
+    sites: ["app1"]
+    type: static
+    config: { status: 200 }
+"#,
+            "routes[0].sites",
+        );
+    }
+
+    // 规则 3（§5.4）：session_profile 必须引用已存在的 profile。
+
+    #[test]
+    fn rejects_unknown_session_profile_reference() {
+        expect_err(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    session_profile: "missing"
+"#,
+            "sites[0].session_profile",
+        );
+    }
+
+    #[test]
+    fn accepts_existing_extra_session_profile_reference() {
+        expect_ok(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+    session_profile: "isolated"
+session_profiles:
+  isolated: { cookie_name: "B1" }
+"#,
+        );
+    }
+
+    // §5.3：同站点可命中的完全同规格路由仅告警，不 fail。
+
+    #[test]
+    fn dev_accepts_duplicate_route_specs() {
+        expect_ok(
+            r#"
+sites:
+  - name: "app1"
+    port: 8081
+routes:
+  - path: "/api/x"
+    sites: ["app1"]
+    methods: ["GET"]
+    type: static
+    config: { status: 200 }
+  - path: "/api/x"
+    sites: ["app1"]
+    methods: ["GET"]
+    type: static
+    config: { status: 200 }
+"#,
+        );
+    }
+
+    #[test]
+    fn legacy_accepts_duplicate_route_specs() {
+        expect_ok(
+            r#"
+routes:
+  - path: "/api/x"
+    type: static
+    config: { status: 200 }
+  - path: "/api/x"
+    type: static
+    config: { status: 200 }
 "#,
         );
     }
