@@ -2140,6 +2140,7 @@ impl AppConfig {
         let sites = self.effective_sites();
         self.validate_session_profiles(is_prod, &sites)?;
         self.validate_sites(is_prod, &sites)?;
+        self.validate_site_providers(&sites)?;
 
         Ok(())
     }
@@ -2474,6 +2475,124 @@ impl AppConfig {
 
         let site_names: Vec<String> = self.sites.iter().map(|s| s.name.clone()).collect();
         self.warn_duplicate_routes(&site_names);
+        Ok(())
+    }
+
+    /// 站点 provider 绑定、回调路径与令牌隔离校验（§5.4 第 8/9/10 条）。
+    ///
+    /// - 规则 8：站点绑定的 provider 必须存在于 `oidc.providers`；`default_provider ∈ allowed_providers`
+    ///   （`allowed_providers` 先去重）；同一站点绑定的 provider `callback_path` 必须唯一
+    ///   （回调路由仅按路径分发，重复时无法区分 provider）；
+    /// - 规则 9：仅显式多站点校验 `routes[].sites` 引用存在性（legacy 禁令在 `validate_sites` 冻结）；
+    /// - 规则 10：同一 profile 内被 >1 个站点引用的 provider 必须显式
+    ///   `shared_across_sites: true`（跨 profile 的令牌命名空间独立，不在限制内）。
+    fn validate_site_providers(&self, sites: &[ResolvedSite]) -> anyhow::Result<()> {
+        let providers: HashMap<&str, &OidcProviderConfig> = self
+            .oidc
+            .providers
+            .iter()
+            .map(|p| (p.id.as_str(), p))
+            .collect();
+
+        // 规则 9：显式多站点下 routes[].sites 必须引用已定义站点（legacy 分支见 validate_sites）。
+        if !self.sites.is_empty() {
+            for (i, route) in self.routes.iter().enumerate() {
+                for name in &route.sites {
+                    anyhow::ensure!(
+                        self.sites.iter().any(|s| s.name == *name),
+                        "routes[{}].sites 引用未定义的站点: {}",
+                        i,
+                        name
+                    );
+                }
+            }
+        }
+
+        // 规则 8：逐站点校验绑定关系，并登记 (profile, provider) → 引用站点（站点内先去重）。
+        let mut referenced: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+        for (i, site) in sites.iter().enumerate() {
+            let mut allowed: Vec<&str> = Vec::new();
+            for id in &site.allowed_providers {
+                if !allowed.contains(&id.as_str()) {
+                    allowed.push(id.as_str());
+                }
+            }
+
+            if !site.default_provider.is_empty() {
+                anyhow::ensure!(
+                    providers.contains_key(site.default_provider.as_str()),
+                    "sites[{}].oidc.default_provider 引用未定义的 provider: {}",
+                    i,
+                    site.default_provider
+                );
+                anyhow::ensure!(
+                    allowed.contains(&site.default_provider.as_str()),
+                    "sites[{}].oidc.allowed_providers 必须包含 default_provider: {}",
+                    i,
+                    site.default_provider
+                );
+            }
+
+            let mut callback_paths: HashMap<&str, &str> = HashMap::new();
+            for id in allowed {
+                let provider = providers.get(id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "sites[{}].oidc.allowed_providers 引用未定义的 provider: {}",
+                        i,
+                        id
+                    )
+                })?;
+                // legacy 冻结：合成站点绑定全部 provider，多 provider 共享 callback_path 时
+                // 仍按 `?provider=` 选择 provider（§5.4 第 12 条 / §14“现有单站点配置原样启动”）；
+                // 该唯一性规则仅约束显式多站点。
+                if !site.legacy {
+                    if let Some(prev) =
+                        callback_paths.insert(provider.callback_path.as_str(), provider.id.as_str())
+                    {
+                        anyhow::bail!(
+                            "sites[{}].oidc.allowed_providers 绑定的 provider callback_path 重复: {}（provider [{}] 与 [{}]），同一站点的回调无法区分 provider",
+                            i,
+                            provider.callback_path,
+                            prev,
+                            provider.id
+                        );
+                    }
+                }
+                referenced
+                    .entry((site.session_profile.as_str(), provider.id.as_str()))
+                    .or_default()
+                    .push(site.name.as_str());
+            }
+        }
+
+        // 规则 10：按站点声明顺序报告第一个共享冲突，保证错误可复现。
+        for site in sites {
+            let mut seen: Vec<&str> = Vec::new();
+            for id in &site.allowed_providers {
+                if seen.contains(&id.as_str()) {
+                    continue;
+                }
+                seen.push(id.as_str());
+                let sharing = referenced
+                    .get(&(site.session_profile.as_str(), id.as_str()))
+                    .expect("引用关系在上方逐站点遍历中已登记");
+                if sharing.len() <= 1 {
+                    continue;
+                }
+                let provider = providers
+                    .get(id.as_str())
+                    .expect("allowed 存在性校验已保证 provider 存在");
+                anyhow::ensure!(
+                    provider.shared_across_sites,
+                    "provider [{}] 被 profile [{}] 下多个站点共享（{}），须显式 oidc.providers[{}].shared_across_sites: true 确认站点间令牌隔离边界",
+                    provider.id,
+                    site.session_profile,
+                    sharing.join(", "),
+                    provider.id
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -3830,6 +3949,347 @@ routes:
   - path: "/api/x"
     type: static
     config: { status: 200 }
+"#,
+        );
+    }
+}
+
+// ── provider 绑定 / 回调路径 / 令牌隔离校验测试（§5.4 第 8/9/10 条）──
+
+#[cfg(test)]
+mod provider_binding_validation_tests {
+    use super::*;
+
+    fn expect_err(yaml: &str, need: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        let err = cfg
+            .validate_with_env(false)
+            .expect_err("dev 应校验失败")
+            .to_string();
+        assert!(err.contains(need), "错误应含 {need}，实际: {err}");
+    }
+
+    fn expect_ok(yaml: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        cfg.validate_with_env(false)
+            .unwrap_or_else(|e| panic!("dev 应校验通过，实际: {e}"));
+    }
+
+    /// 两个站点（同 `default` profile）共享 provider `p1` 且未显式 opt-in（§5.4 第 10 条）。
+    const MULTISITE_SHARED_PROVIDER_YAML: &str = r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc: { default_provider: p1 }
+  - name: app2
+    port: 8082
+    oidc: { default_provider: p1 }
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+"#;
+
+    /// 同上，但显式声明该 provider 允许跨站点共享。
+    const MULTISITE_SHARED_PROVIDER_OPTED_IN_YAML: &str = r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc: { default_provider: p1 }
+  - name: app2
+    port: 8082
+    oidc: { default_provider: p1 }
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+      shared_across_sites: true
+"#;
+
+    // 规则 8：default_provider 必须存在于 oidc.providers。
+
+    #[test]
+    fn rejects_unknown_default_provider() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc: { default_provider: "ghost" }
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+"#,
+            "sites[0].oidc.default_provider",
+        );
+    }
+
+    #[test]
+    fn accepts_known_default_provider() {
+        expect_ok(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc: { default_provider: "p1" }
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+"#,
+        );
+    }
+
+    // 规则 8：default_provider 必须 ∈ allowed_providers。
+
+    #[test]
+    fn rejects_default_provider_not_in_allowed_providers() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc:
+      default_provider: p1
+      allowed_providers: [p2]
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+      callback_path: "/cb/p1"
+    - id: p2
+      issuer_url: "https://idp.example.com"
+      client_id: "c2"
+      callback_path: "/cb/p2"
+"#,
+            "sites[0].oidc.allowed_providers",
+        );
+    }
+
+    #[test]
+    fn accepts_default_provider_in_allowed_providers() {
+        expect_ok(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc:
+      default_provider: p1
+      allowed_providers: [p1, p2]
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+      callback_path: "/cb/p1"
+    - id: p2
+      issuer_url: "https://idp.example.com"
+      client_id: "c2"
+      callback_path: "/cb/p2"
+"#,
+        );
+    }
+
+    // 规则 8：同一站点绑定的两个 provider callback_path 相同 → 回调无法区分，必须拒绝。
+
+    #[test]
+    fn rejects_duplicate_callback_path_within_site() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc:
+      default_provider: p1
+      allowed_providers: [p1, p2]
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+    - id: p2
+      issuer_url: "https://idp.example.com"
+      client_id: "c2"
+"#,
+            "callback_path",
+        );
+    }
+
+    #[test]
+    fn accepts_distinct_callback_paths_within_site() {
+        expect_ok(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc:
+      default_provider: p1
+      allowed_providers: [p1, p2]
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+      callback_path: "/cb/p1"
+    - id: p2
+      issuer_url: "https://idp.example.com"
+      client_id: "c2"
+      callback_path: "/cb/p2"
+"#,
+        );
+    }
+
+    // 规则 8：allowed_providers 必须引用已定义 provider；重复项先去重。
+
+    #[test]
+    fn rejects_unknown_allowed_provider() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc:
+      default_provider: p1
+      allowed_providers: [p1, "ghost"]
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+"#,
+            "sites[0].oidc.allowed_providers",
+        );
+    }
+
+    #[test]
+    fn accepts_duplicate_allowed_providers_after_dedup() {
+        expect_ok(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    oidc:
+      default_provider: p1
+      allowed_providers: [p1, p1]
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+"#,
+        );
+    }
+
+    // 规则 9：显式多站点下 routes[].sites 必须引用已定义站点（legacy 分支在 validate_sites 冻结）。
+
+    #[test]
+    fn rejects_route_sites_reference_to_undefined_site() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+routes:
+  - path: "/api/x"
+    sites: ["ghost"]
+    type: static
+    config: { status: 200 }
+"#,
+            "routes[0].sites",
+        );
+    }
+
+    #[test]
+    fn accepts_route_sites_reference_to_defined_site() {
+        expect_ok(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+routes:
+  - path: "/api/x"
+    sites: ["app1"]
+    type: static
+    config: { status: 200 }
+"#,
+        );
+    }
+
+    // 规则 10：同 profile 内跨站点共享 provider 必须显式 opt-in。
+
+    #[test]
+    fn rejects_shared_provider_without_opt_in() {
+        expect_err(MULTISITE_SHARED_PROVIDER_YAML, "shared_across_sites");
+    }
+
+    #[test]
+    fn accepts_shared_provider_with_opt_in() {
+        expect_ok(MULTISITE_SHARED_PROVIDER_OPTED_IN_YAML);
+    }
+
+    /// 不同 profile 的站点各自持有令牌命名空间，共享 provider 无需 opt-in。
+    #[test]
+    fn accepts_provider_shared_across_different_profiles() {
+        expect_ok(
+            r#"
+session_profiles:
+  isolated: { cookie_name: "B1" }
+sites:
+  - name: app1
+    port: 8081
+    oidc: { default_provider: p1 }
+  - name: app2
+    port: 8082
+    session_profile: isolated
+    oidc: { default_provider: p1 }
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+"#,
+        );
+    }
+
+    // legacy 冻结：合成站点绑定全部 provider，多 provider 共享 callback_path 时按 `?provider=` 区分，
+    // 既有配置原样启动（显式多站点的同站点重复 callback_path 仍失败）。
+
+    #[test]
+    fn legacy_multi_provider_with_shared_callback_path_stays_valid() {
+        expect_ok(
+            r#"
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+    - id: p2
+      issuer_url: "https://idp.example.com"
+      client_id: "c2"
+"#,
+        );
+    }
+
+    #[test]
+    fn legacy_multi_provider_with_distinct_callback_paths_still_passes() {
+        expect_ok(
+            r#"
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "c1"
+      callback_path: "/cb/p1"
+    - id: p2
+      issuer_url: "https://idp.example.com"
+      client_id: "c2"
+      callback_path: "/cb/p2"
 "#,
         );
     }
