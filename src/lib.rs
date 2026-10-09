@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod config;
+pub mod config_fingerprint;
 pub mod middleware;
 pub mod oidc;
 pub mod orchestration;
