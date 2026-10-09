@@ -3,6 +3,7 @@ use crate::config::{RouteDef, RouteType};
 use crate::oidc::handlers::{current_access_token, current_tokens};
 use crate::server::mapping;
 use crate::server::proxy;
+use crate::site::{SiteCtx, SiteView};
 use crate::state::AppState;
 use crate::utils::AppError;
 use axum::body::Body;
@@ -19,7 +20,8 @@ use tower_sessions::Session;
 /// 2. 段边界最长前缀 + 方法过滤（前缀匹配必须停在路径段边界——原实现 `starts_with`
 ///    会让 `/api` 命中 `/api-secret`，可能把越权请求转发到错误上游）；
 /// 3. 同长度时显式带 `sites` 的路由优先于全局路由；
-/// 4. 再相同则配置顺序 last-wins（`max_by_key` 对相等键返回最后一个）。
+/// 4. 再相同则按原始 path 长度（Task 8 裁定：legacy tie-break 顺序，`/api/` 胜 `/api`）；
+/// 5. 仍相同则配置顺序 last-wins（`max_by_key` 对相等键返回最后一个）。
 ///
 /// 返回匹配到的 RouteDef 引用，或 None。
 pub fn match_route<'a>(
@@ -43,19 +45,26 @@ pub fn match_route<'a>(
                         || r.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
             }
         })
-        .max_by_key(|r| (r.path.trim_end_matches('/').len(), !r.sites.is_empty()))
+        .max_by_key(|r| {
+            (
+                r.path.trim_end_matches('/').len(),
+                !r.sites.is_empty(),
+                r.path.len(),
+            )
+        })
 }
 
-/// 统一路由入口：匹配 → 鉴权 → 分发 → 映射。
+/// 统一路由入口：匹配 → 鉴权 → 分发 → 映射（站点上下文显式传参，§6.1）。
 pub async fn dispatch(
     state: &AppState,
+    site: &SiteCtx<'_>,
     route: &RouteDef,
     session: &Session,
     req: Request<Body>,
 ) -> Result<Response, AppError> {
-    // 鉴权检查
+    // 鉴权检查（站点维度：本站点当前 provider 有令牌即视为已登录）
     if route.auth_required {
-        let _token = current_access_token(session)
+        let _token = current_access_token(&site.view, session)
             .await
             .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
     }
@@ -65,13 +74,14 @@ pub async fn dispatch(
 
     // 按类型分发
     match &route.route_type {
-        RouteType::Proxy => execute_proxy(state, route, session, req).await,
+        RouteType::Proxy => execute_proxy(state, site, route, session, req).await,
         RouteType::Pipeline => {
             let (parts, body) = req.into_parts();
             let body_bytes = axum::body::to_bytes(body, max_body)
                 .await
                 .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
-            let (session_json, env_json) = build_context_json(session, &route.input_mapping).await;
+            let (session_json, env_json) =
+                build_context_json(session, &site.view, &route.input_mapping).await;
             let inputs =
                 extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
             execute_pipeline(state, route, inputs).await
@@ -81,7 +91,8 @@ pub async fn dispatch(
             let body_bytes = axum::body::to_bytes(body, max_body)
                 .await
                 .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
-            let (session_json, env_json) = build_context_json(session, &route.input_mapping).await;
+            let (session_json, env_json) =
+                build_context_json(session, &site.view, &route.input_mapping).await;
             let inputs =
                 extract_inputs_from_parts(&parts, &body_bytes, route, &session_json, &env_json);
             execute_script(state, route, inputs).await
@@ -99,10 +110,11 @@ pub async fn dispatch(
 /// - 显式写 `env: { ... : "." }` 通配时打印告警（保留逃生舱，但可审计）。
 async fn build_context_json(
     session: &Session,
+    site: &SiteView,
     input_mapping: &crate::config::InputMapping,
 ) -> (Value, Value) {
-    // session_json: sub, provider, access_token
-    let session_json = if let Some(tokens) = current_tokens(session).await {
+    // session_json: sub, provider, access_token（站点维度，§7.2）
+    let session_json = if let Some(tokens) = current_tokens(site, session).await {
         let mut map = serde_json::Map::new();
         map.insert("sub".into(), Value::String(tokens.sub.clone()));
         map.insert("provider".into(), Value::String(tokens.provider.clone()));
@@ -217,6 +229,7 @@ fn extract_inputs_from_parts(
 /// Proxy 执行：委托给现有 proxy_handler 逻辑。
 async fn execute_proxy(
     state: &AppState,
+    site: &SiteCtx<'_>,
     route: &RouteDef,
     session: &Session,
     req: Request<Body>,
@@ -227,7 +240,7 @@ async fn execute_proxy(
         .as_deref()
         .ok_or_else(|| AppError::bad_request("proxy 路由缺少 upstream"))?;
 
-    proxy::forward_request(state, session, route, upstream, req).await
+    proxy::forward_request(state, site, session, route, upstream, req).await
 }
 
 /// Pipeline 执行：引用 pipeline 注册表或内联执行。
@@ -496,6 +509,23 @@ mod tests {
                 .unwrap()
                 .description,
             "last"
+        );
+    }
+
+    #[test]
+    fn equal_boundary_global_tie_prefers_longer_raw_path() {
+        // Task 8 裁定：等长边界 + 同为全局路由时按原始 path 长度比较——
+        // 配置顺序为 `/api/` 在前时，`/api/`（原始更长）必须胜出（legacy 顺序语义）。
+        let routes = vec![r("/api/", &[]), r("/api", &[])];
+        assert_eq!(
+            match_route(&routes, "default", "GET", "/api/x")
+                .unwrap()
+                .path,
+            "/api/"
+        );
+        assert_eq!(
+            match_route(&routes, "default", "GET", "/api").unwrap().path,
+            "/api/"
         );
     }
 

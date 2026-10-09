@@ -1,9 +1,17 @@
 //! 场景 5/6：编排 DAG 并行聚合 + 脚本合并；超时与 fail_fast。
 mod common;
 
+use bff::config::AppConfig;
 use std::time::{Duration, Instant};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// 带合成 provider 声明的配置：站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）。
+fn authed_config() -> AppConfig {
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    cfg
+}
 
 fn pipeline_yaml(users_url: &str, orders_url: &str, timeout: &str) -> String {
     format!(
@@ -57,7 +65,7 @@ async fn orchestration_parallel_aggregation_with_script() {
         .mount(&orders)
         .await;
 
-    let mut cfg = common::base_config();
+    let mut cfg = authed_config();
     cfg.pipelines.insert(
         "user-orders".into(),
         serde_yaml::from_str(&pipeline_yaml(&users.uri(), &orders.uri(), "10s")).unwrap(),
@@ -121,7 +129,7 @@ steps:
 "#,
         slow.uri()
     );
-    let mut cfg = common::base_config();
+    let mut cfg = authed_config();
     cfg.pipelines
         .insert("slow".into(), serde_yaml::from_str(&yaml).unwrap());
     let state = common::make_state(cfg);
@@ -162,7 +170,7 @@ steps:
         const stage = inputs["stage"];
         ({ user: user_id, env: stage })
 "#;
-    let mut cfg = common::base_config();
+    let mut cfg = authed_config();
     cfg.pipelines
         .insert("params-test".into(), serde_yaml::from_str(yaml).unwrap());
     let state = common::make_state(cfg);
@@ -226,7 +234,7 @@ steps:
         svc.uri()
     );
 
-    let mut cfg = common::base_config();
+    let mut cfg = authed_config();
     cfg.pipelines
         .insert("both-test".into(), serde_yaml::from_str(&yaml).unwrap());
     let state = common::make_state(cfg);
@@ -266,7 +274,7 @@ steps:
       script: |
         ({ ok: true, count: 42 })
 "#;
-    let mut cfg = common::base_config();
+    let mut cfg = authed_config();
     cfg.pipelines
         .insert("no-params".into(), serde_yaml::from_str(yaml).unwrap());
     let state = common::make_state(cfg);

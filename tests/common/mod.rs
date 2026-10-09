@@ -223,6 +223,24 @@ pub fn mock_provider_cfg(idp: &MockIdp) -> OidcProviderConfig {
     }
 }
 
+/// 合成 provider 配置（不发起任何真实 OIDC 调用）：
+/// 供仅需“已登录会话”（`login_cookie` / `create_session_with_tokens`）的测试声明
+/// provider 白名单——站点化后 current_provider 必须 ∈ 站点 allowed_providers（§7.2）。
+pub fn synthetic_provider_cfg() -> OidcProviderConfig {
+    OidcProviderConfig {
+        id: "mock".into(),
+        display_name: "Mock".into(),
+        issuer_url: "http://127.0.0.1:1".into(),
+        client_id: "client".into(),
+        client_secret: String::new(),
+        callback_path: "/auth/callback".into(),
+        scopes: vec!["openid".into()],
+        insecure_skip_id_token_verification: true,
+        refresh_skew_secs: 60,
+        shared_across_sites: false,
+    }
+}
+
 /// 直接在 Session store 中写入令牌，返回 Cookie 头值。
 pub async fn create_session_with_tokens(
     state: &AppState,

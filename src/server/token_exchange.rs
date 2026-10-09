@@ -10,6 +10,7 @@
 
 use crate::config::{TokenExchangeAuthMethod, TokenExchangeConfig};
 use crate::oidc::handlers::{current_access_token, current_tokens, force_refresh};
+use crate::site::SiteView;
 use crate::state::AppState;
 use crate::utils::AppError;
 use axum::http::StatusCode;
@@ -250,10 +251,11 @@ fn effective_ttl(cache_ttl: Duration, expires_in: Option<u64>) -> Duration {
 /// `invalid_grant`/`invalid_token` 时刷新会话 token 后重试**一次**（§7.2），仍失败 → 401。
 pub async fn resolve(
     state: &AppState,
+    site: &SiteView,
     session: &Session,
     cfg: &TokenExchangeConfig,
 ) -> Result<TokenExchangeResult, AppError> {
-    let subject_token = current_access_token(session)
+    let subject_token = current_access_token(site, session)
         .await
         .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
     let session_id = session
@@ -285,7 +287,7 @@ pub async fn resolve(
             guard.release().await;
             return Ok(res);
         }
-        let outcome = do_exchange_with_retry(state, session, cfg, &subject_token).await;
+        let outcome = do_exchange_with_retry(state, site, session, cfg, &subject_token).await;
         store_result(state, &key, cfg.cache_ttl, &outcome).await;
         guard.release().await;
         return outcome.map_err(ExchangeError::into_app_error);
@@ -299,7 +301,7 @@ pub async fn resolve(
             return Ok(res);
         }
     }
-    let outcome = do_exchange_with_retry(state, session, cfg, &subject_token).await;
+    let outcome = do_exchange_with_retry(state, site, session, cfg, &subject_token).await;
     store_result(state, &key, cfg.cache_ttl, &outcome).await;
     outcome.map_err(ExchangeError::into_app_error)
 }
@@ -357,11 +359,12 @@ pub async fn clear_session_cache(state: &AppState, session_id: &str) -> usize {
 /// 执行交换；`invalid_grant`/`invalid_token` 时刷新会话 token 后重试一次（§7.2）。
 async fn do_exchange_with_retry(
     state: &AppState,
+    site: &SiteView,
     session: &Session,
     cfg: &TokenExchangeConfig,
     subject_token: &str,
 ) -> Result<TokenExchangeResult, ExchangeError> {
-    let endpoint = resolve_token_endpoint(state, session, cfg).await?;
+    let endpoint = resolve_token_endpoint(state, site, session, cfg).await?;
     match exchange(state, cfg, &endpoint, subject_token).await {
         Ok(res) => Ok(res),
         Err(ExchangeError::InvalidSubject) => {
@@ -369,9 +372,9 @@ async fn do_exchange_with_retry(
                 route_token_exchange = true,
                 "token exchange 收到 invalid_grant/invalid_token，刷新会话 token 后重试一次"
             );
-            if let Some(tokens) = current_tokens(session).await {
-                if force_refresh(state, session, &tokens).await.is_ok() {
-                    if let Some(new_subject) = current_access_token(session).await {
+            if let Some(tokens) = current_tokens(site, session).await {
+                if force_refresh(state, site, session, &tokens).await.is_ok() {
+                    if let Some(new_subject) = current_access_token(site, session).await {
                         // 刷新后 subject 变化 → 缓存键自动失效（§6.3），直接用新 subject 交换
                         return exchange(state, cfg, &endpoint, &new_subject).await;
                     }
@@ -383,16 +386,18 @@ async fn do_exchange_with_retry(
     }
 }
 
-/// 解析 token endpoint：优先配置值，缺省回退会话 provider discovery（§4.4）。
+/// 解析 token endpoint：优先配置值，缺省回退会话 provider discovery（§4.4；站点感知）。
 async fn resolve_token_endpoint(
     state: &AppState,
+    site: &SiteView,
     session: &Session,
     cfg: &TokenExchangeConfig,
 ) -> Result<String, ExchangeError> {
     if let Some(ep) = &cfg.token_endpoint {
         return Ok(ep.clone());
     }
-    let tokens = current_tokens(session)
+    let tokens = site
+        .current_tokens(session)
         .await
         .ok_or_else(|| ExchangeError::ClientConfig("无法解析会话 provider".into()))?;
     let cfg_snap = state.cfg();

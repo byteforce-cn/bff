@@ -316,6 +316,8 @@ async fn ws_echo_relay_and_clean_close() {
 async fn ws_auth_required_rejects_anonymous_and_injects_bearer() {
     let (upstream, st) = spawn_ws_upstream().await;
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes.push(ws_route(&upstream, true, "websocket"));
     let state = make_state(cfg);
     let cookie = login_cookie(&state).await;

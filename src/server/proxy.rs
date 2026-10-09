@@ -11,6 +11,7 @@
 use crate::config::RouteDef;
 use crate::oidc::handlers::{current_access_token, current_tokens, force_refresh};
 use crate::server::sse_proxy;
+use crate::site::SiteCtx;
 use crate::state::AppState;
 use crate::utils::AppError;
 use axum::body::Body;
@@ -25,6 +26,7 @@ use tower_sessions::Session;
 /// - 配置 `token_exchange`：经 RFC 8693 交换面向上游资源的 token（含缓存与失败语义）。
 async fn resolve_auth_token(
     state: &AppState,
+    site: &SiteCtx<'_>,
     session: &Session,
     route: &RouteDef,
 ) -> Result<Option<String>, AppError> {
@@ -32,10 +34,10 @@ async fn resolve_auth_token(
         return Ok(None);
     }
     if let Some(te) = &route.config.token_exchange {
-        let result = crate::server::token_exchange::resolve(state, session, te).await?;
+        let result = crate::server::token_exchange::resolve(state, &site.view, session, te).await?;
         Ok(Some(result.access_token))
     } else {
-        let token = current_access_token(session)
+        let token = current_access_token(&site.view, session)
             .await
             .ok_or_else(|| AppError::unauthorized("未登录或会话已过期"))?;
         Ok(Some(token))
@@ -45,6 +47,7 @@ async fn resolve_auth_token(
 /// 使用 RouteDef 的转发（统一路由 v2）—— 按 proxy_mode 分发。
 pub async fn forward_request(
     state: &AppState,
+    site: &SiteCtx<'_>,
     session: &Session,
     route: &RouteDef,
     upstream: &str,
@@ -96,7 +99,7 @@ pub async fn forward_request(
         .await
         .map_err(|e| AppError::bad_request(format!("读取请求体失败: {}", e)))?;
 
-    let auth_token = resolve_auth_token(state, session, route).await?;
+    let auth_token = resolve_auth_token(state, site, session, route).await?;
 
     let proxy_mode = route.config.proxy_mode.as_str();
     let forward_set_cookie = route.config.forward_set_cookie;
@@ -169,9 +172,13 @@ pub async fn forward_request(
             // 必须复用 resolve_auth_token：exchange 路由会因 subject token 指纹变化
             // 自动重交换（§5.3/§6.3），普通路由则重新注入新的会话 access token。
             if resp.status() == StatusCode::UNAUTHORIZED && auth_token.is_some() {
-                if let Some(tokens) = current_tokens(session).await {
-                    if force_refresh(state, session, &tokens).await.is_ok() {
-                        if let Ok(Some(new_token)) = resolve_auth_token(state, session, route).await
+                if let Some(tokens) = current_tokens(&site.view, session).await {
+                    if force_refresh(state, &site.view, session, &tokens)
+                        .await
+                        .is_ok()
+                    {
+                        if let Ok(Some(new_token)) =
+                            resolve_auth_token(state, site, session, route).await
                         {
                             let retry_resp = proxy_http(
                                 state,

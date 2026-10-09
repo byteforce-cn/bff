@@ -4,19 +4,23 @@
 //! - token 临期（skew 窗口内，但仍有效）：用当前 token 放行，后台 spawn 异步刷新。
 //! - token 已过期：阻塞等待 try_refresh 完成后再放行。
 //!
+//! 站点感知（§8.3）：只刷新“站点当前 provider”的 token；站点视图取不到 → 500。
 //! 后台刷新使用 LockProvider 的 0ms try-lock 防止重复 spawn。
 use crate::oidc::handlers::{current_tokens, try_refresh};
+use crate::site::SiteHandle;
 use crate::state::AppState;
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::Request;
+use axum::extract::{Extension, State};
+use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Json, Response};
+use std::sync::Arc;
 use std::time::Duration;
 use tower_sessions::Session;
 
 pub async fn token_refresh_middleware(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     req: Request<Body>,
     next: Next,
@@ -27,7 +31,16 @@ pub async fn token_refresh_middleware(
         return next.run(req).await;
     }
 
-    if let Some(tokens) = current_tokens(&session).await {
+    // §6.1：按 Extension handle 解析站点视图；取不到视为站点配置缺失（500）
+    let Some(view) = state.site_view(&handle.name) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "站点配置缺失" })),
+        )
+            .into_response();
+    };
+
+    if let Some(tokens) = current_tokens(&view, &session).await {
         // 更新会话索引 last_seen（内部 60s 节流，避免写放大）
         if let Some(id) = session.id() {
             state.touch_session(&id.to_string()).await;
@@ -47,7 +60,7 @@ pub async fn token_refresh_middleware(
             // ============================================================
             // token 已过期：必须阻塞等待刷新
             // ============================================================
-            match try_refresh(&state, &session, &tokens).await {
+            match try_refresh(&state, &view, &session, &tokens).await {
                 Ok(Some(_)) => tracing::debug!("过期 access token 已刷新"),
                 Ok(None) => tracing::debug!("过期 token 无可刷新令牌"),
                 Err(e) => tracing::warn!(error = %e, "过期令牌刷新失败"),
@@ -68,6 +81,7 @@ pub async fn token_refresh_middleware(
             let state = state.clone();
             let session = session.clone();
             let tokens = tokens.clone();
+            let view = view.clone();
 
             tokio::spawn(async move {
                 // try-lock(0ms) 仅作为防重复 spawn 的启发式检查
@@ -81,7 +95,7 @@ pub async fn token_refresh_middleware(
                 // 立即释放，让 try_refresh 自行管理锁
                 guard.unwrap().release().await;
 
-                match try_refresh(&state, &session, &tokens).await {
+                match try_refresh(&state, &view, &session, &tokens).await {
                     Ok(Some(_)) => tracing::debug!("后台 access token 刷新成功"),
                     Ok(None) => tracing::debug!("后台刷新无可刷新令牌"),
                     Err(e) => tracing::warn!(error = %e, "后台令牌刷新失败"),

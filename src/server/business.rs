@@ -3,16 +3,18 @@ use crate::middleware::token_refresh::token_refresh_middleware;
 use crate::oidc::handlers as oidc;
 use crate::server::route_dispatcher;
 use crate::server::tunnel;
+use crate::site::{SiteCtx, SiteHandle, SiteView};
 use crate::state::AppState;
 use crate::utils::AppError;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tower::ServiceExt;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
@@ -30,6 +32,13 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .get("default")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("缺少 default 会话 profile 的 Session 层"))?;
+    // §6.1：legacy 便利入口注入 default 站点句柄，Extension 作为最外层
+    // （TraceLayer / 中间件 / handler 均能读到站点上下文）。
+    let handle = state
+        .site_handles()?
+        .into_iter()
+        .find(|h| h.legacy)
+        .ok_or_else(|| anyhow::anyhow!("缺少 legacy default 站点句柄"))?;
 
     // Trace ID: 为每个请求生成 UUID 并传播到响应头
     let request_id_layer = SetRequestIdLayer::new(
@@ -219,7 +228,8 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
             cfg.body_limit.max_bytes,
         ))
         .with_state(state);
-    Ok(app)
+    // 站点句柄 Extension：最后调用 `.layer` → 最外层
+    Ok(app.layer(axum::Extension(handle)))
 }
 
 /// GET /live — K8s liveness probe：仅检查进程存活
@@ -326,14 +336,15 @@ async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
     (status, Json(body))
 }
 
-/// GET /api/session — 返回当前会话状态（供前端 JS 读取，因为 cookie 是 HttpOnly）
-async fn session_info(session: Session) -> Json<serde_json::Value> {
-    let logged_in = session
-        .get::<String>("oidc:current_provider")
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+/// GET /api/session — 返回当前会话状态（供前端 JS 读取，因为 cookie 是 HttpOnly）。
+/// 站点感知（§7.2）：logged_in = 站点当前 provider 有令牌。
+async fn session_info(
+    State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
+    session: Session,
+) -> Json<serde_json::Value> {
+    let view = state.site_view(&handle.name).expect("site view");
+    let logged_in = view.current_provider(&session).await.is_some();
     Json(serde_json::json!({
         "logged_in": logged_in,
     }))
@@ -348,12 +359,14 @@ async fn session_info(session: Session) -> Json<serde_json::Value> {
 /// 经统一分发器执行。
 async fn run_pipeline(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     Path(name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
     // 鉴权：必须有有效会话（与统一分发器的 auth_required 语义对齐）
-    crate::oidc::handlers::current_access_token(&session)
+    let view = state.site_view(&handle.name).expect("site view");
+    crate::oidc::handlers::current_access_token(&view, &session)
         .await
         .ok_or_else(|| AppError::unauthorized("未登录或会话已过期（/pipeline/:name 需要认证）"))?;
 
@@ -376,20 +389,26 @@ async fn run_pipeline(
 /// fallback：统一路由匹配 → 按 RouteType 分发；/api 前缀 404；其余走 SPA。
 async fn fallback_handler(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     req: Request<Body>,
 ) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().to_string();
+    // §6.1：显式站点上下文（legacy 路由固定为 default 句柄）
+    let ctx = SiteCtx {
+        handle: &handle,
+        view: state.site_view(&handle.name).expect("site view"),
+    };
 
     // 1. 统一路由匹配（routes）—— clone route 以释放 cfg borrow
     let matched_route = {
         let cfg = state.cfg();
-        route_dispatcher::match_route(&cfg.routes, "default", &method, &path).cloned()
+        route_dispatcher::match_route(&cfg.routes, &ctx.handle.name, &method, &path).cloned()
     };
 
     if let Some(route) = matched_route {
-        return route_dispatcher::dispatch(&state, &route, &session, req)
+        return route_dispatcher::dispatch(&state, &ctx, &route, &session, req)
             .await
             .unwrap_or_else(|e| e.into_response());
     }
@@ -401,8 +420,8 @@ async fn fallback_handler(
         return AppError::not_found("无匹配 API 路由").into_response();
     }
 
-    // 3. SPA fallback
-    serve_spa(&state, req).await
+    // 3. SPA fallback（使用站点 spa.dir，§9）
+    serve_spa(&ctx.view, req).await
 }
 
 /// WebSocket 升级处理器：匹配路由 → 鉴权 → 建立双向隧道。
@@ -413,15 +432,21 @@ async fn fallback_handler(
 /// - 按 `auth_required` 强制会话鉴权；需要认证时向**上游握手**注入 Bearer。
 async fn ws_upgrade_handler(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     ws: WebSocketUpgrade,
     req: Request<Body>,
 ) -> Response {
     let path = req.uri().path().to_string();
+    // §6.1：显式站点上下文（legacy 路由固定为 default 句柄）
+    let ctx = SiteCtx {
+        handle: &handle,
+        view: state.site_view(&handle.name).expect("site view"),
+    };
 
     let route = {
         let cfg = state.cfg();
-        route_dispatcher::match_route(&cfg.routes, "default", "GET", &path).cloned()
+        route_dispatcher::match_route(&cfg.routes, &ctx.handle.name, "GET", &path).cloned()
     };
 
     let route = match route {
@@ -441,9 +466,9 @@ async fn ws_upgrade_handler(
         None => return AppError::bad_request("WebSocket 路由缺少 upstream").into_response(),
     };
 
-    // 鉴权（与统一分发器同一语义）
+    // 鉴权（与统一分发器同一语义，站点维度）
     let auth_token = if route.auth_required {
-        match oidc::current_access_token(&session).await {
+        match oidc::current_access_token(&ctx.view, &session).await {
             Some(t) => Some(t),
             None => {
                 return AppError::unauthorized("未登录或会话已过期").into_response();
@@ -479,9 +504,9 @@ async fn ws_upgrade_handler(
     ws.on_upgrade(move |client_ws| tunnel::ws_tunnel(client_ws, url, auth_token, tunnel_cfg))
 }
 
-/// SPA 静态资源 + 前端路由 fallback 到 index.html。
-async fn serve_spa(state: &AppState, req: Request<Body>) -> Response {
-    let dir = state.cfg().spa.dir.clone();
+/// SPA 静态资源 + 前端路由 fallback 到 index.html（使用站点 spa.dir，§9）。
+async fn serve_spa(view: &SiteView, req: Request<Body>) -> Response {
+    let dir = view.spa_dir.clone();
     let index = format!("{}/index.html", dir.trim_end_matches('/'));
     if !std::path::Path::new(&index).is_file() {
         return (
@@ -505,11 +530,12 @@ async fn serve_spa(state: &AppState, req: Request<Body>) -> Response {
 /// `/assets/*` → 常量；其余 → `other`。
 async fn metrics_middleware(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     req: Request<Body>,
     next: axum::middleware::Next,
 ) -> Response {
     let method = req.method().to_string();
-    let path = metrics_path_label(&state, req.uri().path());
+    let path = metrics_path_label(&state, &handle.name, req.uri().path());
     let start = std::time::Instant::now();
     let resp = next.run(req).await;
     let status = resp.status().as_u16().to_string();
@@ -531,10 +557,9 @@ async fn metrics_middleware(
 }
 
 /// 将请求路径归一化为有限标签集（含路由模板与固定路径），防止基数爆炸。
-fn metrics_path_label(state: &AppState, path: &str) -> String {
-    // 1) 命中配置路由 → 用路由模板（路由数量由配置固定）
-    if let Some(route) = route_dispatcher::match_route(&state.cfg().routes, "default", "GET", path)
-    {
+fn metrics_path_label(state: &AppState, site: &str, path: &str) -> String {
+    // 1) 命中配置路由 → 用路由模板（路由数量由配置固定；站点过滤 §5.3）
+    if let Some(route) = route_dispatcher::match_route(&state.cfg().routes, site, "GET", path) {
         return route.path.clone();
     }
     // 2) 固定路径
