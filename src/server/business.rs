@@ -385,7 +385,7 @@ async fn fallback_handler(
     // 1. 统一路由匹配（routes）—— clone route 以释放 cfg borrow
     let matched_route = {
         let cfg = state.cfg();
-        route_dispatcher::match_route(&cfg.routes, &method, &path).cloned()
+        route_dispatcher::match_route(&cfg.routes, "default", &method, &path).cloned()
     };
 
     if let Some(route) = matched_route {
@@ -421,7 +421,7 @@ async fn ws_upgrade_handler(
 
     let route = {
         let cfg = state.cfg();
-        route_dispatcher::match_route(&cfg.routes, "GET", &path).cloned()
+        route_dispatcher::match_route(&cfg.routes, "default", "GET", &path).cloned()
     };
 
     let route = match route {
@@ -533,7 +533,8 @@ async fn metrics_middleware(
 /// 将请求路径归一化为有限标签集（含路由模板与固定路径），防止基数爆炸。
 fn metrics_path_label(state: &AppState, path: &str) -> String {
     // 1) 命中配置路由 → 用路由模板（路由数量由配置固定）
-    if let Some(route) = route_dispatcher::match_route(&state.cfg().routes, "GET", path) {
+    if let Some(route) = route_dispatcher::match_route(&state.cfg().routes, "default", "GET", path)
+    {
         return route.path.clone();
     }
     // 2) 固定路径

@@ -12,27 +12,38 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tower_sessions::Session;
 
-/// 在 routes 中匹配请求（最长 path 前缀 + 段边界 + method 过滤）。
+/// 在 routes 中按站点归属 + 最长 path 前缀 + 段边界 + method 过滤匹配请求。
 ///
-/// 前缀匹配必须停在路径段边界——原实现 `starts_with` 会让 `/api` 命中 `/api-secret`，
-/// 可能把越权请求转发到错误上游。
+/// 优先级（§5.3）：
+/// 1. 站点过滤：`r.sites` 缺省/空 = 全部站点，否则须包含 `site`；
+/// 2. 段边界最长前缀 + 方法过滤（前缀匹配必须停在路径段边界——原实现 `starts_with`
+///    会让 `/api` 命中 `/api-secret`，可能把越权请求转发到错误上游）；
+/// 3. 同长度时显式带 `sites` 的路由优先于全局路由；
+/// 4. 再相同则配置顺序 last-wins（`max_by_key` 对相等键返回最后一个）。
 ///
 /// 返回匹配到的 RouteDef 引用，或 None。
-pub fn match_route<'a>(routes: &'a [RouteDef], method: &str, path: &str) -> Option<&'a RouteDef> {
+pub fn match_route<'a>(
+    routes: &'a [RouteDef],
+    site: &str,
+    method: &str,
+    path: &str,
+) -> Option<&'a RouteDef> {
     routes
         .iter()
         .filter(|r| {
-            let boundary = r.path.trim_end_matches('/');
-            let matched = if boundary.is_empty() {
-                path.starts_with('/')
-            } else {
-                path == boundary || path.starts_with(&format!("{}/", boundary))
-            };
-            matched
-                && (r.methods.is_empty()
-                    || r.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
+            (r.sites.is_empty() || r.sites.iter().any(|s| s == site)) && {
+                let boundary = r.path.trim_end_matches('/');
+                let matched = if boundary.is_empty() {
+                    path.starts_with('/')
+                } else {
+                    path == boundary || path.starts_with(&format!("{}/", boundary))
+                };
+                matched
+                    && (r.methods.is_empty()
+                        || r.methods.iter().any(|m| m.eq_ignore_ascii_case(method)))
+            }
         })
-        .max_by_key(|r| r.path.len())
+        .max_by_key(|r| (r.path.trim_end_matches('/').len(), !r.sites.is_empty()))
 }
 
 /// 统一路由入口：匹配 → 鉴权 → 分发 → 映射。
@@ -384,30 +395,40 @@ mod tests {
     fn match_route_exact_and_boundary() {
         let routes = vec![r("/api/dt", &[]), r("/api/dt-secret", &[])];
         assert_eq!(
-            match_route(&routes, "GET", "/api/dt").unwrap().path,
+            match_route(&routes, "default", "GET", "/api/dt")
+                .unwrap()
+                .path,
             "/api/dt"
         );
         assert_eq!(
-            match_route(&routes, "GET", "/api/dt/1").unwrap().path,
+            match_route(&routes, "default", "GET", "/api/dt/1")
+                .unwrap()
+                .path,
             "/api/dt"
         );
         // 段边界——/api/dt 不得命中 /api/dt-secret
         assert_eq!(
-            match_route(&routes, "GET", "/api/dt-secret").unwrap().path,
+            match_route(&routes, "default", "GET", "/api/dt-secret")
+                .unwrap()
+                .path,
             "/api/dt-secret"
         );
-        assert!(match_route(&routes, "GET", "/api/dt-secretx").is_none());
+        assert!(match_route(&routes, "default", "GET", "/api/dt-secretx").is_none());
     }
 
     #[test]
     fn match_route_longest_prefix_wins() {
         let routes = vec![r("/api", &[]), r("/api/users", &[])];
         assert_eq!(
-            match_route(&routes, "GET", "/api/users/1").unwrap().path,
+            match_route(&routes, "default", "GET", "/api/users/1")
+                .unwrap()
+                .path,
             "/api/users"
         );
         assert_eq!(
-            match_route(&routes, "GET", "/api/orders").unwrap().path,
+            match_route(&routes, "default", "GET", "/api/orders")
+                .unwrap()
+                .path,
             "/api"
         );
     }
@@ -415,14 +436,14 @@ mod tests {
     #[test]
     fn match_route_method_filter_is_case_insensitive() {
         let routes = vec![r("/api/only-post", &["POST"])];
-        assert!(match_route(&routes, "GET", "/api/only-post").is_none());
+        assert!(match_route(&routes, "default", "GET", "/api/only-post").is_none());
         assert!(
-            match_route(&routes, "post", "/api/only-post").is_some(),
+            match_route(&routes, "default", "post", "/api/only-post").is_some(),
             "方法匹配应大小写不敏感"
         );
         let any = vec![r("/api/any", &[])];
         assert!(
-            match_route(&any, "DELETE", "/api/any").is_some(),
+            match_route(&any, "default", "DELETE", "/api/any").is_some(),
             "空 methods = 全部放行"
         );
     }
@@ -431,10 +452,51 @@ mod tests {
     fn match_route_trailing_slash_config_normalized() {
         let routes = vec![r("/api/", &[])];
         assert!(
-            match_route(&routes, "GET", "/api").is_some(),
+            match_route(&routes, "default", "GET", "/api").is_some(),
             "配置尾部斜杠应归一"
         );
-        assert!(match_route(&routes, "GET", "/api/x").is_some());
+        assert!(match_route(&routes, "default", "GET", "/api/x").is_some());
+    }
+
+    #[test]
+    fn site_filter_and_specialization_priority() {
+        let global = r("/api/x", &[]);
+        let mut app1 = r("/api/x", &[]);
+        app1.sites = vec!["app1".into()];
+        let routes = vec![global, app1];
+        assert_eq!(
+            match_route(&routes, "app1", "GET", "/api/x").unwrap().sites,
+            vec!["app1"]
+        );
+        assert!(match_route(&routes, "app2", "GET", "/api/x")
+            .unwrap()
+            .sites
+            .is_empty());
+    }
+
+    #[test]
+    fn site_filtered_route_is_invisible_elsewhere() {
+        let mut only = r("/api/only", &[]);
+        only.sites = vec!["app2".into()];
+        assert!(match_route(&[only], "app1", "GET", "/api/only").is_none());
+    }
+
+    #[test]
+    fn site_tie_falls_back_to_config_order_last_wins() {
+        // 等长同优先级时按配置顺序 last-wins（两条路由用 description 区分）
+        let mut a = r("/api/tie", &[]);
+        a.sites = vec!["app1".into()];
+        a.description = "first".into();
+        let mut b = r("/api/tie", &[]);
+        b.sites = vec!["app1".into()];
+        b.description = "last".into();
+        let routes = vec![a, b];
+        assert_eq!(
+            match_route(&routes, "app1", "GET", "/api/tie")
+                .unwrap()
+                .description,
+            "last"
+        );
     }
 
     #[test]
