@@ -169,13 +169,20 @@ pub async fn delete_provider(
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let before = state.cfg().as_ref().clone();
-    let mut cfg = before.clone();
-    let len = cfg.oidc.providers.len();
-    cfg.oidc.providers.retain(|p| p.id != id);
-    if cfg.oidc.providers.len() == len {
+    // 读取与删除必须在同一临界区：否则并发写基于同一旧快照各自存储，
+    // 后一个 store 会静默覆盖先一个的变更。
+    let mut found = false;
+    state
+        .apply_config_mut(|cfg| {
+            let len = cfg.oidc.providers.len();
+            cfg.oidc.providers.retain(|p| p.id != id);
+            found = cfg.oidc.providers.len() != len;
+        })
+        .await
+        .map_err(map_apply_error)?;
+    if !found {
         return Err(AppError::not_found(format!("OIDC provider 不存在: {}", id)));
     }
-    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "delete_provider",
@@ -203,24 +210,27 @@ pub async fn update_provider(
     Json(mut provider): Json<OidcProviderConfig>,
 ) -> Result<Response, AppError> {
     provider.id = id.clone();
-    // `***` 为导出哨兵 → 保留现网密钥而非覆盖（Admin UI 编辑回写场景）
-    if provider.client_secret == SECRET_SENTINEL {
-        provider.client_secret = state
-            .cfg()
-            .oidc
-            .providers
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.client_secret.clone())
-            .unwrap_or_default();
-    }
-    let mut cfg = state.cfg().as_ref().clone();
-    match cfg.oidc.providers.iter_mut().find(|p| p.id == id) {
-        Some(p) => *p = provider,
-        None => cfg.oidc.providers.push(provider),
-    }
     let before = state.cfg().clone();
-    state.apply_config(cfg).await.map_err(map_apply_error)?;
+    state
+        .apply_config_mut(|cfg| {
+            // `***` 为导出哨兵 → 保留现网密钥而非覆盖（Admin UI 编辑回写场景）。
+            // 必须在临界区内读当前快照，否则并发写会基于旧快照回填/覆盖密钥。
+            if provider.client_secret == SECRET_SENTINEL {
+                provider.client_secret = cfg
+                    .oidc
+                    .providers
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.client_secret.clone())
+                    .unwrap_or_default();
+            }
+            match cfg.oidc.providers.iter_mut().find(|p| p.id == id) {
+                Some(p) => *p = provider,
+                None => cfg.oidc.providers.push(provider),
+            }
+        })
+        .await
+        .map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "update_provider",
@@ -251,10 +261,13 @@ pub async fn create_pipeline(
         .map_err(|e| AppError::unprocessable(format!("pipeline 解析失败: {}", e)))?;
     crate::orchestration::dag::validate_pipeline(&name, &def)
         .map_err(|e| AppError::unprocessable(e.to_string()))?;
-    let mut cfg = state.cfg().as_ref().clone();
-    cfg.pipelines.insert(name.clone(), def);
     let before = state.cfg().clone();
-    state.apply_config(cfg).await.map_err(map_apply_error)?;
+    state
+        .apply_config_mut(|cfg| {
+            cfg.pipelines.insert(name.clone(), def);
+        })
+        .await
+        .map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "create_pipeline",
@@ -274,12 +287,18 @@ pub async fn delete_pipeline(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Response, AppError> {
-    let mut cfg = state.cfg().as_ref().clone();
-    if cfg.pipelines.remove(&name).is_none() {
+    let before = state.cfg().clone();
+    // 读取与删除必须在同一临界区（同 delete_provider 的丢更新竞态）。
+    let mut found = false;
+    state
+        .apply_config_mut(|cfg| {
+            found = cfg.pipelines.remove(&name).is_some();
+        })
+        .await
+        .map_err(map_apply_error)?;
+    if !found {
         return Err(AppError::not_found(format!("pipeline 不存在: {}", name)));
     }
-    let before = state.cfg().clone();
-    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "delete_pipeline",
@@ -474,25 +493,29 @@ pub async fn update_routes(
             )));
         }
     }
-    // `***` 哨兵 → 按 path 保留现网 token_exchange 密钥（Admin UI 回写导出内容场景）
-    let existing_routes = state.cfg().routes.clone();
-    for route in &mut routes {
-        if let Some(te) = &mut route.config.token_exchange {
-            if te.client_secret == SECRET_SENTINEL {
-                if let Some(ex) = existing_routes
-                    .iter()
-                    .find(|r| r.path == route.path)
-                    .and_then(|r| r.config.token_exchange.as_ref())
-                {
-                    te.client_secret = ex.client_secret.clone();
+    // `***` 哨兵 → 按 path 保留现网 token_exchange 密钥（Admin UI 回写导出内容场景）。
+    // 必须在临界区内读当前路由，否则并发写会基于旧快照回填/覆盖密钥。
+    let before = state.cfg().as_ref().clone();
+    state
+        .apply_config_mut(|cfg| {
+            let existing_routes = cfg.routes.clone();
+            for route in &mut routes {
+                if let Some(te) = &mut route.config.token_exchange {
+                    if te.client_secret == SECRET_SENTINEL {
+                        if let Some(ex) = existing_routes
+                            .iter()
+                            .find(|r| r.path == route.path)
+                            .and_then(|r| r.config.token_exchange.as_ref())
+                        {
+                            te.client_secret = ex.client_secret.clone();
+                        }
+                    }
                 }
             }
-        }
-    }
-    let mut cfg = state.cfg().as_ref().clone();
-    cfg.routes = routes;
-    let before = state.cfg().as_ref().clone();
-    state.apply_config(cfg).await.map_err(map_apply_error)?;
+            cfg.routes = routes;
+        })
+        .await
+        .map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "update_routes",

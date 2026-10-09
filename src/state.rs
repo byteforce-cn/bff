@@ -18,7 +18,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_sessions::SessionManagerLayer;
 use tower_sessions::{MemoryStore, SessionStore};
 
@@ -84,6 +84,9 @@ pub struct AppState {
     site_views: Arc<ArcSwap<HashMap<String, Arc<SiteView>>>>,
     /// 最近一次由本进程写入持久化文件的 sha256（避免 watcher 自触发）
     last_config_hash: Arc<std::sync::RwLock<Option<String>>>,
+    /// 管理写接口的读-改-写串行化锁：读快照 → 变更 → 应用必须原子完成，
+    /// 否则两个并发请求基于同一旧快照各自存储，后者静默覆盖前者（200 但行为不变）。
+    apply_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// 按上游分组的并发信号量（舱壁），隔离慢上游对全局连接/任务的耗尽。
@@ -241,6 +244,7 @@ impl AppState {
             session_layers,
             site_views,
             last_config_hash: Arc::new(std::sync::RwLock::new(None)),
+            apply_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -289,6 +293,23 @@ impl AppState {
     /// 结构指纹非空 → `RequiresRestart`（不替换快照、不落盘、不动视图）；
     /// 否则预构建站点视图 → 落盘（启用时）→ 原子替换 → provider 缓存集中失效。
     pub async fn apply_config(&self, cfg: AppConfig) -> Result<ConfigDiff, ConfigApplyError> {
+        let _guard = self.apply_lock.lock().await;
+        self.apply_inner(cfg, true).await
+    }
+
+    /// 管理端细粒度写接口（provider / pipeline / routes 增删改）共用的
+    /// 读-改-写原子应用：在 `apply_lock` 内读取当前快照 → 执行变更闭包 →
+    /// 走完整 `apply_inner` 管线（校验 → diff → 预构建 → 落盘 → 存储 → 失效）。
+    ///
+    /// 闭包必须基于传入的最新快照做变更（不要在闭包外再读 `self.cfg()`），
+    /// 否则仍会基于过期快照决策，重新引入丢更新竞态。
+    pub async fn apply_config_mut(
+        &self,
+        mutate: impl FnOnce(&mut AppConfig) + Send,
+    ) -> Result<ConfigDiff, ConfigApplyError> {
+        let _guard = self.apply_lock.lock().await;
+        let mut cfg = self.config.load().as_ref().clone();
+        mutate(&mut cfg);
         self.apply_inner(cfg, true).await
     }
 
@@ -506,6 +527,7 @@ impl AppState {
         cfg: AppConfig,
         file_hash: String,
     ) -> anyhow::Result<()> {
+        let _guard = self.apply_lock.lock().await;
         match self.apply_inner(cfg, false).await {
             Ok(_) => {}
             Err(ConfigApplyError::RequiresRestart(d)) => {
@@ -701,7 +723,7 @@ mod upstream_limits_tests {
 #[cfg(test)]
 mod apply_config_tests {
     use super::*;
-    use crate::config::{AppConfig, RouteDef, SpaConfig};
+    use crate::config::{AppConfig, PipelineDef, RouteDef, SpaConfig};
 
     /// 本地双站点配置（Task 10 前测试不可用 common::multisite_config；dev 语义：
     /// 无 public_base_url，loopback 兜底；fake issuer URL 不发起真实网络请求）。
@@ -823,5 +845,62 @@ config: { status: 200 }
         assert_eq!(view.spa_dir, "apps/app1-new/dist", "视图应按新配置重建");
         assert_eq!(state.cfg().routes.len(), 1);
         assert!(state.site_view("app2").is_some(), "app2 视图仍应存在");
+    }
+
+    fn pipeline_def(step_id: &str) -> PipelineDef {
+        serde_yaml::from_str(&format!(
+            r#"
+strategy:
+  timeout: 10s
+steps:
+  - id: {step_id}
+    type: script
+    config:
+      script: "return {{}};"
+"#
+        ))
+        .expect("测试 pipeline 解析失败")
+    }
+
+    /// 并发读-改-写串行化：两个并发 `apply_config_mut` 各插入不同 pipeline，
+    /// 两者都必须保留。主任务先持有 `scripts` 写锁——`apply_inner` 的第一步
+    /// 就是读 `scripts`，两个写任务因此都会在「已各自克隆旧快照、尚未存储」
+    /// 的窗口上被挡住；主任务统一放行后，未串行化时两个 store 竞速必丢其一
+    /// （后写的覆盖先写的，200 但行为不变），串行化后第二个任务在锁内读到
+    /// 第一个任务的结果，两者都保留。
+    #[tokio::test]
+    async fn apply_config_mut_serializes_concurrent_writes() {
+        let state = AppState::new(multisite_cfg()).unwrap();
+        let scripts_guard = state.scripts.write().await;
+        let s1 = state.clone();
+        let s2 = state.clone();
+        let t1 = tokio::spawn(async move {
+            s1.apply_config_mut(|cfg| {
+                cfg.pipelines.insert("p1".into(), pipeline_def("s1"));
+            })
+            .await
+        });
+        let t2 = tokio::spawn(async move {
+            s2.apply_config_mut(|cfg| {
+                cfg.pipelines.insert("p2".into(), pipeline_def("s2"));
+            })
+            .await
+        });
+        // 给两个任务足够时间推进到 `scripts` 读锁处（各自已持旧快照），再统一放行。
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(scripts_guard);
+        let (r1, r2) = tokio::join!(t1, t2);
+        r1.unwrap().unwrap();
+        r2.unwrap().unwrap();
+        let cfg = state.cfg();
+        let keys: Vec<&String> = cfg.pipelines.keys().collect();
+        assert!(
+            cfg.pipelines.contains_key("p1"),
+            "并发写丢失 p1，现存: {keys:?}"
+        );
+        assert!(
+            cfg.pipelines.contains_key("p2"),
+            "并发写丢失 p2，现存: {keys:?}"
+        );
     }
 }
