@@ -18,7 +18,7 @@ use crate::config::{
     PipelineDef, ResolvedSite, RouteDef, RouteTypeConfig, StepConfig, StepDef, TokenExchangeConfig,
     WebSocketTunnelConfig,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// 配置差异：`hot_applied` 为粗粒度热生效组名，`requires_restart` 为结构字段路径。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -255,11 +255,27 @@ pub fn requires_restart_fields(old: &AppConfig, new: &AppConfig) -> Vec<String> 
 }
 
 /// 热生效变更：粗粒度组名清单（固定顺序）。
-pub fn hot_applied_fields(old: &AppConfig, new: &AppConfig) -> Vec<String> {
+///
+/// `old_scripts` / `new_scripts` 为运行期脚本注册表（`AppState.scripts`）快照——
+/// 脚本不随配置快照变化（admin API 直写内存注册表），但同属 §5.6 热组 `scripts`。
+pub fn hot_applied_fields(
+    old: &AppConfig,
+    new: &AppConfig,
+    old_scripts: &HashMap<String, String>,
+    new_scripts: &HashMap<String, String>,
+) -> Vec<String> {
     let mut groups: Vec<String> = Vec::new();
 
     if !routes_equivalent(&old.routes, &new.routes) {
         groups.push("routes".into());
+    }
+
+    if !pipelines_equivalent(&old.pipelines, &new.pipelines) {
+        groups.push("pipelines".into());
+    }
+
+    if old_scripts != new_scripts {
+        groups.push("scripts".into());
     }
 
     // provider 内容（除 callback_path 集合外的字段；callback 集合变化归结构指纹）
@@ -305,9 +321,14 @@ pub fn hot_applied_fields(old: &AppConfig, new: &AppConfig) -> Vec<String> {
 }
 
 /// 统一差异入口：§5.6 判定依据。
-pub fn diff(old: &AppConfig, new: &AppConfig) -> ConfigDiff {
+pub fn diff(
+    old: &AppConfig,
+    new: &AppConfig,
+    old_scripts: &HashMap<String, String>,
+    new_scripts: &HashMap<String, String>,
+) -> ConfigDiff {
     ConfigDiff {
-        hot_applied: hot_applied_fields(old, new),
+        hot_applied: hot_applied_fields(old, new, old_scripts, new_scripts),
         requires_restart: requires_restart_fields(old, new),
     }
 }
@@ -397,6 +418,19 @@ fn admin_equivalent(a: &AdminConfig, b: &AdminConfig) -> bool {
         && a.max_body_bytes == b.max_body_bytes
         && a.auth_fail_limit_per_minute == b.auth_fail_limit_per_minute
         && a.trusted_proxies == b.trusted_proxies
+}
+
+/// pipelines 注册表等价：按名字对齐，逐定义比较（复用 `pipeline_equivalent`）。
+fn pipelines_equivalent(
+    a: &HashMap<String, PipelineDef>,
+    b: &HashMap<String, PipelineDef>,
+) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(name, def)| {
+            b.get(name)
+                .map(|other| pipeline_equivalent(Some(def), Some(other)))
+                .unwrap_or(false)
+        })
 }
 
 /// 路由等价：逐字段手写比较（顺序敏感——最长前缀优先依赖顺序）。
@@ -582,6 +616,12 @@ oidc:
         let mut new = old.clone();
         mutate(&mut new);
         (old, new)
+    }
+
+    /// 测试用差异入口：脚本注册表不参与（配置级用例）。
+    fn diff_cfg(old: &AppConfig, new: &AppConfig) -> ConfigDiff {
+        let scripts = HashMap::new();
+        diff(old, new, &scripts, &scripts)
     }
 
     fn static_route(path: &str) -> RouteDef {
@@ -878,8 +918,9 @@ oidc:
         new.oidc.providers[0].client_id = "new".into();
         let fields = requires_restart_fields(&old, &new);
         assert!(fields.is_empty(), "热字段不应要求重启: {fields:?}");
-        assert!(hot_applied_fields(&old, &new).contains(&"routes".to_string()));
-        assert!(hot_applied_fields(&old, &new).contains(&"oidc.providers".to_string()));
+        let hot = hot_applied_fields(&old, &new, &HashMap::new(), &HashMap::new());
+        assert!(hot.contains(&"routes".to_string()));
+        assert!(hot.contains(&"oidc.providers".to_string()));
     }
 
     /// 每个热生效组名都必须能被检出（且不触发结构差异）。
@@ -889,6 +930,13 @@ oidc:
             (
                 "routes",
                 Box::new(|c| c.routes.push(static_route("/api/hot"))),
+            ),
+            (
+                "pipelines",
+                Box::new(|c| {
+                    c.pipelines
+                        .insert("p-hot".into(), serde_yaml::from_str("steps: []\n").unwrap());
+                }),
             ),
             (
                 "oidc.providers",
@@ -918,7 +966,7 @@ oidc:
             let (old, new) = changed(m);
             let restart = requires_restart_fields(&old, &new);
             assert!(restart.is_empty(), "{group} 变更不应要求重启: {restart:?}");
-            let hot = hot_applied_fields(&old, &new);
+            let hot = hot_applied_fields(&old, &new, &HashMap::new(), &HashMap::new());
             assert!(hot.contains(&group.to_string()), "{group} 未检出: {hot:?}");
         }
     }
@@ -928,7 +976,7 @@ oidc:
     fn diff_combines_hot_and_structural() {
         let (old, mut new) = changed(|c| c.server.admin_port = 9443);
         new.oidc.providers[0].client_id = "rotated".into();
-        let d = diff(&old, &new);
+        let d = diff_cfg(&old, &new);
         assert!(d
             .requires_restart
             .contains(&"server.admin_port".to_string()));
@@ -946,7 +994,7 @@ oidc:
         new.sites[0].server_names = vec!["APP1.EXAMPLE.COM.".into()];
         new.session.allow_unmanaged_subdomains = false;
         assert!(requires_restart_fields(&old, &new).is_empty());
-        assert!(hot_applied_fields(&old, &new).is_empty());
+        assert!(hot_applied_fields(&old, &new, &HashMap::new(), &HashMap::new()).is_empty());
     }
 
     /// legacy（无 sites）→ 显式多站点：站点增删属结构变更（§5.6）。
@@ -967,5 +1015,48 @@ oidc:
         assert!(fields.iter().any(|f| f == "sites[default]"), "{fields:?}");
         assert!(fields.iter().any(|f| f == "sites[app1]"), "{fields:?}");
         assert!(fields.iter().any(|f| f == "sites[app2]"), "{fields:?}");
+    }
+
+    /// §5.6 热表：pipelines 变更属热生效——报 `pipelines` 组、不要求重启。
+    #[test]
+    fn pipelines_only_change_is_hot() {
+        let (old, mut new) = changed(|_| {});
+        new.pipelines.insert(
+            "p1".into(),
+            serde_yaml::from_str(
+                r#"
+strategy: {}
+steps:
+  - id: s
+    type: script
+    config: { script: "1" }
+"#,
+            )
+            .unwrap(),
+        );
+        let d = diff_cfg(&old, &new);
+        assert!(d.requires_restart.is_empty(), "{:?}", d.requires_restart);
+        assert!(
+            d.hot_applied.iter().any(|g| g == "pipelines"),
+            "{:?}",
+            d.hot_applied
+        );
+    }
+
+    /// §5.6 热表：scripts 注册表变化报 `scripts` 组、不要求重启（注册表为运行期状态，
+    /// 不随配置快照变化，经差异入口显式传入）。
+    #[test]
+    fn scripts_only_change_is_hot() {
+        let (old, new) = changed(|_| {});
+        let old_scripts: HashMap<String, String> = HashMap::new();
+        let mut new_scripts: HashMap<String, String> = HashMap::new();
+        new_scripts.insert("s.js".into(), "1".into());
+        let d = diff(&old, &new, &old_scripts, &new_scripts);
+        assert!(d.requires_restart.is_empty(), "{:?}", d.requires_restart);
+        assert!(
+            d.hot_applied.iter().any(|g| g == "scripts"),
+            "{:?}",
+            d.hot_applied
+        );
     }
 }

@@ -2821,7 +2821,7 @@ routes:
         );
     }
 
-    /// 非哨兵值（真实新密钥）不得被回填覆盖——是否可用由 replace_config 决定。
+    /// 非哨兵值（真实新密钥）不得被回填覆盖——是否可用由 apply_config 决定。
     #[test]
     fn merge_leaves_non_sentinel_values_intact() {
         let original = config_with_secrets();

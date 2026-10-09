@@ -1,7 +1,6 @@
 //! 业务端口（8080）路由：OIDC、统一路由分发、SPA 发布、WebSocket 升级。
 use crate::middleware::token_refresh::token_refresh_middleware;
 use crate::oidc::handlers as oidc;
-use crate::provider::session::build_layer;
 use crate::server::route_dispatcher;
 use crate::server::tunnel;
 use crate::state::AppState;
@@ -25,7 +24,12 @@ use tower_sessions::Session;
 
 pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
     let cfg = state.cfg().clone();
-    let session_layer = build_layer(state.session_store.clone(), &cfg.session)?;
+    // §5.2：会话层启动时按 profile 预构建（legacy 路径取 default profile）
+    let session_layer = state
+        .session_layers
+        .get("default")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("缺少 default 会话 profile 的 Session 层"))?;
 
     // Trace ID: 为每个请求生成 UUID 并传播到响应头
     let request_id_layer = SetRequestIdLayer::new(

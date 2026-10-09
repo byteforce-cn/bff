@@ -1,6 +1,6 @@
 //! 配置管理 API：导出 / 导入（热重载）、OIDC provider、pipeline、脚本。
 use crate::config::{AppConfig, OidcProviderConfig, PipelineDef, SECRET_SENTINEL};
-use crate::state::AppState;
+use crate::state::{AppState, ConfigApplyError};
 use crate::utils::AppError;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -41,6 +41,20 @@ fn summarize_change(old: &AppConfig, new: &AppConfig) -> String {
     )
 }
 
+/// 把 `apply_config` 的失败映射为管理 API 错误（import 之外的写接口共用）：
+/// 校验/构建拒绝 → 422；需重启的结构变更 → 422 且明确列出字段（配置未应用）。
+fn map_apply_error(e: ConfigApplyError) -> AppError {
+    match e {
+        ConfigApplyError::Rejected(err) => {
+            AppError::unprocessable(format!("配置应用失败: {}", err))
+        }
+        ConfigApplyError::RequiresRestart(d) => AppError::unprocessable(format!(
+            "配置应用失败: 变更涉及需重启的结构配置（{}），未应用",
+            d.requires_restart.join(", ")
+        )),
+    }
+}
+
 /// GET /admin/api/config/export — 导出脱敏配置（YAML）
 pub async fn export_config(State(state): State<AppState>) -> Result<Response, AppError> {
     let cfg = state.cfg().sanitized();
@@ -70,25 +84,46 @@ pub async fn import_config(
         .map_err(|e| AppError::unprocessable(format!("配置解析失败: {}", e)))?;
     // 识别 `***` 哨兵并跳过覆盖（保留当前已注入的环境值，§4.3）
     cfg.merge_sensitive_secrets(&state.cfg());
-    cfg.validate()
-        .map_err(|e| AppError::unprocessable(format!("配置校验失败: {}", e)))?;
-    state
-        .replace_config(cfg)
-        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
-    // provider 可能变化，清空 OIDC 客户端缓存
-    for p in &state.cfg().oidc.providers {
-        state.oidc_clients.invalidate(&p.id).await;
-    }
+    // 校验 / bff_secret 拒绝 / 结构门禁 / 视图预构建 / provider 缓存失效
+    // 统一由 apply_config 完成（§5.6）
+    let diff = match state.apply_config(cfg).await {
+        Ok(d) => d,
+        Err(ConfigApplyError::RequiresRestart(d)) => {
+            let after = state.cfg().clone();
+            tracing::info!(
+                event = "admin.config.changed",
+                kind = "import_config",
+                summary = %summarize_change(&before, &after),
+                requires_restart = ?d.requires_restart,
+                "配置导入含需重启的结构差异，未应用"
+            );
+            return Ok((
+                StatusCode::OK,
+                Json(serde_json::json!(
+                    {
+                        "status": "requires_restart",
+                        "hot_applied": d.hot_applied,
+                        "requires_restart": d.requires_restart,
+                    }
+                )),
+            )
+                .into_response());
+        }
+        Err(ConfigApplyError::Rejected(e)) => {
+            return Err(AppError::unprocessable(format!("配置应用失败: {}", e)));
+        }
+    };
     let after = state.cfg().clone();
     tracing::info!(
         event = "admin.config.changed",
         kind = "import_config",
         summary = %summarize_change(&before, &after),
+        hot_applied = ?diff.hot_applied,
         "配置热重载"
     );
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({"status": "applied"})),
+        Json(serde_json::json!({ "status": "applied", "hot_applied": diff.hot_applied })),
     )
         .into_response())
 }
@@ -140,10 +175,7 @@ pub async fn delete_provider(
     if cfg.oidc.providers.len() == len {
         return Err(AppError::not_found(format!("OIDC provider 不存在: {}", id)));
     }
-    state
-        .replace_config(cfg)
-        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
-    state.oidc_clients.invalidate(&id).await;
+    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "delete_provider",
@@ -188,10 +220,7 @@ pub async fn update_provider(
         None => cfg.oidc.providers.push(provider),
     }
     let before = state.cfg().clone();
-    state
-        .replace_config(cfg)
-        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
-    state.oidc_clients.invalidate(&id).await;
+    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "update_provider",
@@ -225,9 +254,7 @@ pub async fn create_pipeline(
     let mut cfg = state.cfg().as_ref().clone();
     cfg.pipelines.insert(name.clone(), def);
     let before = state.cfg().clone();
-    state
-        .replace_config(cfg)
-        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "create_pipeline",
@@ -252,9 +279,7 @@ pub async fn delete_pipeline(
         return Err(AppError::not_found(format!("pipeline 不存在: {}", name)));
     }
     let before = state.cfg().clone();
-    state
-        .replace_config(cfg)
-        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "delete_pipeline",
@@ -467,9 +492,7 @@ pub async fn update_routes(
     let mut cfg = state.cfg().as_ref().clone();
     cfg.routes = routes;
     let before = state.cfg().as_ref().clone();
-    state
-        .replace_config(cfg)
-        .map_err(|e| AppError::unprocessable(format!("配置应用失败: {}", e)))?;
+    state.apply_config(cfg).await.map_err(map_apply_error)?;
     tracing::info!(
         event = "admin.config.changed",
         kind = "update_routes",
