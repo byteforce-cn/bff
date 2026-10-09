@@ -219,6 +219,7 @@ pub fn mock_provider_cfg(idp: &MockIdp) -> OidcProviderConfig {
         scopes: vec!["openid".into()],
         insecure_skip_id_token_verification: true,
         refresh_skew_secs: 60,
+        shared_across_sites: false,
     }
 }
 

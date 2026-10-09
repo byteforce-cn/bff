@@ -25,6 +25,7 @@ async fn test_valid_token_passes_through_no_refresh() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: String::new(),
@@ -83,6 +84,7 @@ async fn test_stale_while_revalidate_background_refresh() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: String::new(),
@@ -169,6 +171,7 @@ async fn test_expired_token_blocks_until_refreshed() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: String::new(),
@@ -240,6 +243,7 @@ async fn concurrent_requests_trigger_single_refresh() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: String::new(),
@@ -345,6 +349,7 @@ async fn test_proxy_401_triggers_refresh_and_retry() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: "test".into(),
@@ -409,6 +414,7 @@ async fn test_proxy_401_without_refresh_token_returns_401() {
 
     let mut cfg = common::base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: "test".into(),
@@ -470,6 +476,7 @@ async fn test_legacy_route_proxy_401_retry() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/legacy".into(),
         methods: vec![],
         description: String::new(),

@@ -26,6 +26,7 @@ const AS_PATH: &str = "/oauth2/token";
 
 fn exchange_route(upstream: &str, te: TokenExchangeConfig) -> RouteDef {
     RouteDef {
+        sites: vec![],
         path: "/ex".into(),
         methods: vec![],
         description: "token exchange 代理".into(),
@@ -352,6 +353,7 @@ async fn t5_without_exchange_injects_session_token() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/plain".into(),
         methods: vec![],
         description: "普通代理".into(),

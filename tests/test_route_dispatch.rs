@@ -22,6 +22,7 @@ use std::collections::HashMap;
 /// 构造测试路由（默认 auth_required=false，空映射，无方法限制）。
 fn route(path: &str, route_type: RouteType, config: RouteTypeConfig) -> RouteDef {
     RouteDef {
+        sites: vec![],
         path: path.into(),
         methods: vec![],
         description: String::new(),

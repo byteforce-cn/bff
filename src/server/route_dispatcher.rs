@@ -368,6 +368,7 @@ mod tests {
 
     fn r(path: &str, methods: &[&str]) -> RouteDef {
         RouteDef {
+            sites: vec![],
             path: path.into(),
             methods: methods.iter().map(|s| s.to_string()).collect(),
             description: String::new(),

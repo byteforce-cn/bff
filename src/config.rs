@@ -138,6 +138,12 @@ pub struct AppConfig {
     pub pipelines: HashMap<String, PipelineDef>,
     #[serde(default)]
     pub routes: Vec<RouteDef>,
+    /// 显式多站点定义（空 = legacy 单站点，按 §5.5 合成 `default` 站点）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sites: Vec<SiteConfig>,
+    /// 额外会话 profile（`default` 由顶层 `session` 定义，不得在此重复声明）
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_profiles: HashMap<String, SessionProfileOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +161,9 @@ pub struct ServerConfig {
     /// 非空时：Host 必须命中白名单，否则拒绝；为空时仅允许 loopback Host。
     #[serde(default)]
     pub trusted_hosts: Vec<String>,
+    /// 是否对全部业务路径强制 Host 白名单校验（legacy opt-in；显式多站点始终启用）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enforce_host: bool,
 }
 
 impl Default for ServerConfig {
@@ -164,6 +173,7 @@ impl Default for ServerConfig {
             admin_port: default_admin_port(),
             public_base_url: None,
             trusted_hosts: Vec::new(),
+            enforce_host: false,
         }
     }
 }
@@ -427,6 +437,431 @@ fn default_hsts_max_age() -> u32 {
 }
 fn default_referrer_policy() -> String {
     "strict-origin-when-cross-origin".into()
+}
+
+// ── 多站点（multi-site）配置 ──
+
+const DEFAULT_BIND: &str = "0.0.0.0";
+const DEFAULT_SESSION_PROFILE: &str = "default";
+
+fn default_bind() -> String {
+    DEFAULT_BIND.to_string()
+}
+
+fn is_default_bind(v: &str) -> bool {
+    v == DEFAULT_BIND
+}
+
+fn default_session_profile() -> String {
+    DEFAULT_SESSION_PROFILE.to_string()
+}
+
+fn is_default_session_profile(v: &str) -> bool {
+    v == DEFAULT_SESSION_PROFILE
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// 显式站点定义（§5.1）。`sites` 为空时按 §5.5 合成 legacy `default` 站点。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteConfig {
+    /// 站点名（唯一，`[a-z0-9-]+`，保留名 `admin` 禁止）
+    pub name: String,
+    /// 监听端口（必填、唯一、≠ `admin_port`、禁用 0）
+    pub port: u16,
+    /// 监听地址（可选，默认 `0.0.0.0`）
+    #[serde(default = "default_bind", skip_serializing_if = "is_default_bind")]
+    pub bind: String,
+    /// Host 白名单（可选；有效白名单 = `server_names ∪ {public_base_url 主机}`）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_names: Vec<String>,
+    /// 对外基础 URL（prod 必填；`redirect_uri` 一律由此推导）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_base_url: Option<String>,
+    /// 引用的会话 profile（默认 `default`，即顶层 `session`）
+    #[serde(
+        default = "default_session_profile",
+        skip_serializing_if = "is_default_session_profile"
+    )]
+    pub session_profile: String,
+    /// 站点级 SPA 目录（缺省继承顶层 `spa.dir`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spa: Option<SpaConfig>,
+    /// 站点 OIDC 绑定
+    #[serde(default, skip_serializing_if = "SiteOidcConfig::is_default")]
+    pub oidc: SiteOidcConfig,
+    /// 登出作用域（默认 `global`）
+    #[serde(default, skip_serializing_if = "LogoutScope::is_global")]
+    pub logout_scope: LogoutScope,
+    /// 站点级安全响应头覆盖（未指定字段继承全局，CSP 一旦指定即整体替换）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_headers: Option<SiteSecurityHeadersOverride>,
+}
+
+/// 站点 OIDC 绑定（§5.1）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SiteOidcConfig {
+    /// 默认 provider（引用 `oidc.providers[].id`；无 OIDC 站点为空）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_provider: String,
+    /// 允许的 provider 集合（缺省 = `[default_provider]`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_providers: Option<Vec<String>>,
+}
+
+impl SiteOidcConfig {
+    fn is_default(&self) -> bool {
+        self.default_provider.is_empty() && self.allowed_providers.is_none()
+    }
+}
+
+/// 登出作用域：`global` = 登出全部站点；`site` = 仅本站点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogoutScope {
+    #[default]
+    Global,
+    Site,
+}
+
+impl LogoutScope {
+    fn is_global(&self) -> bool {
+        matches!(self, LogoutScope::Global)
+    }
+}
+
+/// 会话 profile 覆盖（未指定字段继承顶层 `session`，§5.2）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionProfileOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_name: Option<String>,
+    /// `Some("")` 显式强制 host-only；`None` 继承顶层
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
+    #[serde(
+        default,
+        with = "humantime_serde::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ttl: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_unmanaged_subdomains: Option<bool>,
+}
+
+/// 站点级安全响应头覆盖（Partial；未指定字段继承全局）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteSecurityHeadersOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_security_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_frame_options: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_content_type_options: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsts_max_age: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referrer_policy: Option<String>,
+}
+
+/// 继承 + 覆盖后的会话 profile（启动时构建 `SessionManagerLayer` 的依据）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSessionProfile {
+    pub name: String,
+    pub cookie_name: String,
+    pub cookie_domain: Option<String>,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: String,
+    pub ttl: Option<Duration>,
+    pub allow_unmanaged_subdomains: bool,
+}
+
+/// 归一化 + 合成后的站点（运行时按名解析）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSite {
+    pub name: String,
+    pub port: u16,
+    pub bind: String,
+    pub server_names: Vec<String>,
+    pub public_base_url: Option<String>,
+    pub public_host: Option<String>,
+    pub allowed_hosts: Vec<String>,
+    pub spa_dir: String,
+    pub session_profile: String,
+    pub default_provider: String,
+    pub allowed_providers: Vec<String>,
+    pub logout_scope: LogoutScope,
+    pub security_headers: Option<SiteSecurityHeadersOverride>,
+    pub legacy: bool,
+}
+
+/// 归一化主机名：trim、小写、去尾点、`[::1]` 去方括号。
+///
+/// 含 `://`、`/`、`*`、`:`（端口/裸 IPv6）、空白/控制字符或为空 → `None`。
+pub fn normalize_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    if trimmed.contains("://") || trimmed.contains('/') || trimmed.contains('*') {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let stripped = lower.trim_end_matches('.');
+    if stripped.is_empty() {
+        return None;
+    }
+    let host = if stripped.starts_with('[') && stripped.ends_with(']') {
+        let inner = &stripped[1..stripped.len() - 1];
+        if inner.is_empty() {
+            return None;
+        }
+        inner
+    } else if stripped.contains(':') {
+        return None;
+    } else {
+        stripped
+    };
+    Some(host.to_string())
+}
+
+/// 归一化 cookie 域：小写、去前导点；空串 → `Some("")`（host-only）；非法字符 → `None`。
+pub fn normalize_cookie_domain(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return Some(String::new());
+    }
+    let domain = lower.trim_start_matches('.');
+    if domain.is_empty() {
+        return None; // 仅含点的非法域
+    }
+    if domain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        Some(domain.to_string())
+    } else {
+        None
+    }
+}
+
+/// Domain cookie 与主机是否匹配（`domain` 非空且 host 等于它或为其子域）。
+pub fn cookie_domain_matches(domain: &str, host: &str) -> bool {
+    !domain.is_empty() && (host == domain || host.ends_with(&format!(".{}", domain)))
+}
+
+/// 归一化 `public_base_url`，返回 `(去尾斜杠 URL, 归一化主机)`。
+///
+/// 仅接受 http(s)、必须有主机、path 仅允许空或 `/`、无 query/fragment。
+pub fn normalize_public_base_url(raw: &str) -> anyhow::Result<(String, String)> {
+    let parsed =
+        url::Url::parse(raw).map_err(|e| anyhow::anyhow!("public_base_url 非法: {}", e))?;
+    anyhow::ensure!(
+        parsed.scheme() == "http" || parsed.scheme() == "https",
+        "public_base_url 必须为 http(s) URL: {}",
+        raw
+    );
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("public_base_url 缺少主机名: {}", raw))?;
+    anyhow::ensure!(
+        parsed.query().is_none(),
+        "public_base_url 不允许 query: {}",
+        raw
+    );
+    anyhow::ensure!(
+        parsed.fragment().is_none(),
+        "public_base_url 不允许 fragment: {}",
+        raw
+    );
+    let path = parsed.path();
+    anyhow::ensure!(
+        path.is_empty() || path == "/",
+        "public_base_url 不允许 path: {}",
+        raw
+    );
+    let host = normalize_host(host)
+        .ok_or_else(|| anyhow::anyhow!("public_base_url 主机名非法: {}", raw))?;
+    let mut normalized = parsed;
+    normalized.set_path("");
+    normalized.set_query(None);
+    normalized.set_fragment(None);
+    Ok((normalized.as_str().trim_end_matches('/').to_string(), host))
+}
+
+/// 归一化可选 `public_base_url`：非法值保留原文（由启动期校验报错），不返回主机。
+fn resolve_public_base_url(raw: Option<&str>) -> (Option<String>, Option<String>) {
+    match raw {
+        Some(raw) => match normalize_public_base_url(raw) {
+            Ok((url, host)) => (Some(url), Some(host)),
+            Err(_) => (Some(raw.to_string()), None),
+        },
+        None => (None, None),
+    }
+}
+
+/// 顶层 `cookie_domain`：缺省/空串 → host-only（`None`）；非空归一化（非法 → `None`）。
+fn resolve_cookie_domain(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some("") => None,
+        Some(s) => normalize_cookie_domain(s).filter(|d| !d.is_empty()),
+    }
+}
+
+fn push_unique_host(hosts: &mut Vec<String>, host: &str) {
+    if !hosts.iter().any(|h| h == host) {
+        hosts.push(host.to_string());
+    }
+}
+
+impl AppConfig {
+    /// 合成站点列表（§5.5）：无 `sites` 时合成 legacy `default` 站点。
+    ///
+    /// 归一化与并集在此集中完成（`server_names` 过滤非法项并归一化；
+    /// `allowed_hosts = server_names ∪ {public_host}` 去重保序）；非法值的报错由启动期校验负责。
+    pub fn effective_sites(&self) -> Vec<ResolvedSite> {
+        if self.sites.is_empty() {
+            let default_provider = self
+                .oidc
+                .providers
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_default();
+            let allowed_providers = self.oidc.providers.iter().map(|p| p.id.clone()).collect();
+            let server_names: Vec<String> = self
+                .server
+                .trusted_hosts
+                .iter()
+                .filter_map(|h| normalize_host(h))
+                .collect();
+            let (public_base_url, public_host) =
+                resolve_public_base_url(self.server.public_base_url.as_deref());
+            let mut allowed_hosts = server_names.clone();
+            if let Some(host) = &public_host {
+                push_unique_host(&mut allowed_hosts, host);
+            }
+            vec![ResolvedSite {
+                name: "default".into(),
+                port: self.server.business_port,
+                bind: default_bind(),
+                server_names,
+                public_base_url,
+                public_host,
+                allowed_hosts,
+                spa_dir: self.spa.dir.clone(),
+                session_profile: default_session_profile(),
+                default_provider,
+                allowed_providers,
+                logout_scope: LogoutScope::Global,
+                security_headers: None,
+                legacy: true,
+            }]
+        } else {
+            self.sites
+                .iter()
+                .map(|site| {
+                    let server_names: Vec<String> = site
+                        .server_names
+                        .iter()
+                        .filter_map(|h| normalize_host(h))
+                        .collect();
+                    let (public_base_url, public_host) =
+                        resolve_public_base_url(site.public_base_url.as_deref());
+                    let mut allowed_hosts = server_names.clone();
+                    if let Some(host) = &public_host {
+                        push_unique_host(&mut allowed_hosts, host);
+                    }
+                    let allowed_providers =
+                        site.oidc.allowed_providers.clone().unwrap_or_else(|| {
+                            if site.oidc.default_provider.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![site.oidc.default_provider.clone()]
+                            }
+                        });
+                    ResolvedSite {
+                        name: site.name.clone(),
+                        port: site.port,
+                        bind: site.bind.clone(),
+                        server_names,
+                        public_base_url,
+                        public_host,
+                        allowed_hosts,
+                        spa_dir: site
+                            .spa
+                            .as_ref()
+                            .map(|s| s.dir.clone())
+                            .unwrap_or_else(|| self.spa.dir.clone()),
+                        session_profile: site.session_profile.clone(),
+                        default_provider: site.oidc.default_provider.clone(),
+                        allowed_providers,
+                        logout_scope: site.logout_scope,
+                        security_headers: site.security_headers.clone(),
+                        legacy: false,
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// 解析全部会话 profile（§5.2）：`default` = 顶层 `session`，其余逐字段继承 + 覆盖。
+    pub fn resolved_session_profiles(&self) -> HashMap<String, ResolvedSessionProfile> {
+        let default = ResolvedSessionProfile {
+            name: "default".into(),
+            cookie_name: self.session.cookie_name.clone(),
+            cookie_domain: resolve_cookie_domain(self.session.cookie_domain.as_deref()),
+            secure: self.session.secure,
+            http_only: self.session.http_only,
+            same_site: self.session.same_site.clone(),
+            ttl: self.session.ttl,
+            allow_unmanaged_subdomains: self.session.allow_unmanaged_subdomains,
+        };
+        let mut profiles = HashMap::new();
+        profiles.insert("default".to_string(), default.clone());
+        for (name, over) in &self.session_profiles {
+            // `default` 只能由顶层 `session` 定义（重复定义由启动期校验拒绝）
+            if name == "default" {
+                continue;
+            }
+            profiles.insert(
+                name.clone(),
+                ResolvedSessionProfile {
+                    name: name.clone(),
+                    cookie_name: over
+                        .cookie_name
+                        .clone()
+                        .unwrap_or_else(|| default.cookie_name.clone()),
+                    cookie_domain: match &over.cookie_domain {
+                        None => default.cookie_domain.clone(),
+                        Some(raw) => resolve_cookie_domain(Some(raw.as_str())),
+                    },
+                    secure: over.secure.unwrap_or(default.secure),
+                    http_only: over.http_only.unwrap_or(default.http_only),
+                    same_site: over
+                        .same_site
+                        .clone()
+                        .unwrap_or_else(|| default.same_site.clone()),
+                    ttl: over.ttl.or(default.ttl),
+                    allow_unmanaged_subdomains: over
+                        .allow_unmanaged_subdomains
+                        .unwrap_or(default.allow_unmanaged_subdomains),
+                },
+            );
+        }
+        profiles
+    }
 }
 
 // ── 请求体大小限制 ──
@@ -707,6 +1142,9 @@ fn default_provider_kind() -> String {
 pub struct SessionConfig {
     #[serde(default = "default_cookie_name")]
     pub cookie_name: String,
+    /// Cookie 作用域：非空 = Domain cookie（跨子域共享）；缺省/空串 = host-only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_domain: Option<String>,
     #[serde(default)]
     pub secure: bool,
     #[serde(default = "default_true")]
@@ -720,17 +1158,22 @@ pub struct SessionConfig {
     /// `sessions` 索引（管理端列表）GC 周期：按会话存储实际存在性清理，默认 10 分钟。
     #[serde(default = "default_session_gc_interval", with = "humantime_serde")]
     pub gc_interval: Duration,
+    /// 共享域信任边界显式确认（prod 下 cookie_domain 非空时必须为 true）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_unmanaged_subdomains: bool,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             cookie_name: default_cookie_name(),
+            cookie_domain: None,
             secure: true, // 默认安全
             http_only: true,
             same_site: default_same_site(),
             ttl: default_session_ttl(),
             gc_interval: default_session_gc_interval(),
+            allow_unmanaged_subdomains: false,
         }
     }
 }
@@ -859,6 +1302,9 @@ pub struct OidcProviderConfig {
     /// 令牌提前刷新的余量秒数
     #[serde(default = "default_refresh_skew")]
     pub refresh_skew_secs: u64,
+    /// 允许该 provider 被多个站点共享（默认 false = 站点间令牌隔离的结构性约束）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shared_across_sites: bool,
 }
 
 fn default_callback_path() -> String {
@@ -1078,6 +1524,10 @@ impl TokenExchangeConfig {
 pub struct RouteDef {
     /// 路由匹配路径前缀，如 "/api/users"、"/api/dashboard"
     pub path: String,
+
+    /// 站点归属（缺省/空 = 全部站点，兼容旧配置）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sites: Vec<String>,
 
     /// HTTP 方法过滤（空 = 全部）
     #[serde(default)]
@@ -1848,5 +2298,249 @@ bff_secret:
         imported.merge_sensitive_secrets(&original);
         assert_eq!(imported.bff_secret.secret, "brand-new-secret");
         assert_eq!(imported.bff_secret.salt, "brand-new-salt-value");
+    }
+}
+
+// ── 多站点配置测试（模型 / 归一化 / legacy 合成）──
+
+#[cfg(test)]
+mod multi_site_config_tests {
+    use super::*;
+
+    /// §5.1 / 附录 B 两站点样例。
+    const MULTISITE_YAML: &str = r#"
+server:
+  admin_port: 8443
+sites:
+  - name: app1
+    port: 8081
+    bind: "0.0.0.0"
+    server_names: ["app1.example.com"]
+    public_base_url: "https://app1.example.com"
+    session_profile: default
+    spa: { dir: "apps/app1/dist" }
+    oidc:
+      default_provider: app1
+      allowed_providers: [app1]
+    logout_scope: global
+  - name: app2
+    port: 8082
+    server_names: ["app2.example.com"]
+    public_base_url: "https://app2.example.com"
+    session_profile: default
+    spa: { dir: "apps/app2/dist" }
+    oidc:
+      default_provider: app2
+      allowed_providers: [app2]
+    logout_scope: global
+session:
+  cookie_name: "BFF_SESSION_V2"
+  cookie_domain: ".example.com"
+  secure: true
+  http_only: true
+  same_site: "Lax"
+  ttl: "336h"
+  allow_unmanaged_subdomains: true
+oidc:
+  providers:
+    - id: app1
+      display_name: "App1"
+      issuer_url: "https://idp.example.com"
+      client_id: "app1-client"
+      client_secret: "${APP1_SECRET}"
+      callback_path: "/auth/callback"
+      shared_across_sites: false
+    - id: app2
+      display_name: "App2"
+      issuer_url: "https://idp.example.com"
+      client_id: "app2-client"
+      client_secret: "${APP2_SECRET}"
+      callback_path: "/auth/callback"
+      shared_across_sites: false
+"#;
+
+    #[test]
+    fn parses_explicit_multisite_and_resolves_paths() {
+        let cfg: AppConfig = serde_yaml::from_str(MULTISITE_YAML).unwrap();
+        let sites = cfg.effective_sites();
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].name, "app1");
+        assert_eq!(sites[0].port, 8081);
+        assert_eq!(sites[0].allowed_hosts, vec!["app1.example.com"]);
+        assert_eq!(sites[0].session_profile, "default");
+        assert_eq!(sites[0].spa_dir, "apps/app1/dist");
+        assert_eq!(sites[0].allowed_providers, vec!["app1"]);
+        assert!(!sites[0].legacy);
+    }
+
+    #[test]
+    fn legacy_config_synthesizes_default_site() {
+        let cfg = AppConfig::default();
+        let sites = cfg.effective_sites();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].name, "default");
+        assert_eq!(sites[0].port, cfg.server.business_port);
+        assert!(sites[0].legacy);
+    }
+
+    #[test]
+    fn session_profile_inheritance_and_explicit_empty_domain() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+session:
+  cookie_name: "A"
+  cookie_domain: ".Example.com"
+  secure: true
+  same_site: "Lax"
+session_profiles:
+  isolated:
+    cookie_name: "B"
+    cookie_domain: ""
+"#,
+        )
+        .unwrap();
+        let p = cfg.resolved_session_profiles();
+        assert_eq!(p["default"].cookie_domain.as_deref(), Some("example.com"));
+        assert_eq!(p["isolated"].cookie_domain, None); // 显式空串 = 强制 host-only
+        assert!(p["isolated"].secure); // 继承顶层
+    }
+
+    #[test]
+    fn normalizes_hosts() {
+        assert_eq!(
+            normalize_host(" App1.EXAMPLE.com. "),
+            Some("app1.example.com".to_string())
+        );
+        assert_eq!(normalize_host("[::1]"), Some("::1".to_string()));
+        assert_eq!(normalize_host("example.com:8080"), None);
+        assert_eq!(normalize_host("https://example.com"), None);
+        assert_eq!(normalize_host("*.example.com"), None);
+        assert_eq!(normalize_host("a/b"), None);
+        assert_eq!(normalize_host("   "), None);
+        assert_eq!(normalize_host(""), None);
+        assert_eq!(normalize_host("bad host"), None);
+    }
+
+    #[test]
+    fn normalizes_cookie_domains() {
+        assert_eq!(
+            normalize_cookie_domain(".Example.com"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(normalize_cookie_domain(""), Some(String::new()));
+        assert_eq!(normalize_cookie_domain("bad domain"), None);
+    }
+
+    #[test]
+    fn matches_cookie_domains_only_on_label_boundaries() {
+        assert!(cookie_domain_matches("example.com", "example.com"));
+        assert!(cookie_domain_matches("example.com", "app1.example.com"));
+        assert!(!cookie_domain_matches("example.com", "evilexample.com"));
+        assert!(!cookie_domain_matches("example.com", "example.com.evil"));
+        assert!(!cookie_domain_matches("", "example.com"));
+    }
+
+    #[test]
+    fn normalizes_public_base_url() {
+        assert_eq!(
+            normalize_public_base_url("https://app1.example.com/").unwrap(),
+            (
+                "https://app1.example.com".to_string(),
+                "app1.example.com".to_string()
+            )
+        );
+        assert_eq!(
+            normalize_public_base_url("http://127.0.0.1:8081")
+                .unwrap()
+                .1,
+            "127.0.0.1"
+        );
+        assert!(normalize_public_base_url("https://app1.example.com/path").is_err());
+        assert!(normalize_public_base_url("https://app1.example.com/?a=1").is_err());
+        assert!(normalize_public_base_url("https://app1.example.com/#frag").is_err());
+        assert!(normalize_public_base_url("ftp://app1.example.com").is_err());
+        assert!(normalize_public_base_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn explicit_site_inherits_global_spa_and_provider_defaults() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+spa: { dir: "global/dist" }
+sites:
+  - name: app1
+    port: 8081
+    oidc: { default_provider: p1 }
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "cid"
+"#,
+        )
+        .unwrap();
+        let sites = cfg.effective_sites();
+        assert_eq!(sites[0].spa_dir, "global/dist");
+        assert_eq!(sites[0].session_profile, "default");
+        assert_eq!(sites[0].bind, "0.0.0.0");
+        assert_eq!(sites[0].allowed_providers, vec!["p1"]);
+        assert!(sites[0].allowed_hosts.is_empty());
+        assert_eq!(sites[0].public_base_url, None);
+        assert_eq!(
+            cfg.resolved_session_profiles()["default"].cookie_domain,
+            None
+        );
+    }
+
+    /// legacy 配置导出必须与升级前完全一致：新增字段在默认值下不出现。
+    #[test]
+    fn legacy_serialization_omits_new_fields() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+session:
+  secure: true
+oidc:
+  providers:
+    - id: p1
+      issuer_url: "https://idp.example.com"
+      client_id: "cid"
+routes:
+  - path: "/api/x"
+    type: static
+    config: { status: 200 }
+"#,
+        )
+        .unwrap();
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        for key in [
+            "sites",
+            "session_profiles",
+            "enforce_host",
+            "cookie_domain",
+            "allow_unmanaged_subdomains",
+            "shared_across_sites",
+        ] {
+            assert!(
+                !yaml.contains(key),
+                "legacy 导出不应包含新增字段 {key}:\n{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_sites_field_roundtrips_when_present() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+routes:
+  - path: "/api/x"
+    sites: ["app1", "app2"]
+    type: static
+    config: { status: 200 }
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.routes[0].sites, vec!["app1", "app2"]);
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(yaml.contains("sites"), "带 sites 注解的路由应序列化该字段");
     }
 }

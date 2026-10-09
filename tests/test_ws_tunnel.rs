@@ -151,6 +151,7 @@ async fn spawn_blackhole() -> SocketAddr {
 
 fn ws_route(upstream: &str, auth_required: bool, proxy_mode: &str) -> RouteDef {
     RouteDef {
+        sites: vec![],
         path: "/ws".into(),
         methods: vec![],
         description: "WS 隧道".into(),

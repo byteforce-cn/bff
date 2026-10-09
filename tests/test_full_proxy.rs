@@ -37,6 +37,7 @@ async fn test_http_proxy_with_mock_upstream() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/users".into(),
         methods: vec![],
         description: "用户列表".into(),
@@ -87,6 +88,7 @@ async fn test_http_proxy_preserves_content_type_for_body_requests() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/obs/changes".into(),
         methods: vec![],
         description: "带 body 的 JSON POST".into(),
@@ -135,6 +137,7 @@ async fn test_http_proxy_with_auth_token_injection() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/users".into(),
         methods: vec![],
         description: "认证用户列表".into(),
@@ -205,6 +208,7 @@ async fn test_sse_stream_proxy() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/sse".into(),
         methods: vec![],
         description: "SSE 时钟".into(),
@@ -252,6 +256,7 @@ async fn test_proxy_mode_defaults_to_http() {
     let mut cfg = base_config();
     // proxy_mode 未指定时应默认为 "http"
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/data".into(),
         methods: vec![],
         description: "默认 HTTP 代理".into(),
@@ -299,6 +304,7 @@ async fn test_sse_mode_with_streaming_response() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/sse".into(),
         methods: vec![],
         description: "SSE 大数据".into(),
@@ -345,6 +351,7 @@ async fn test_circuit_breaker_opens_on_repeated_failures() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/failing".into(),
         methods: vec![],
         description: "会失败的路由".into(),
@@ -453,6 +460,7 @@ async fn test_e2e_frontend_simulates_rest_request() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/users".into(),
         methods: vec![],
         description: "用户 API".into(),
@@ -503,6 +511,7 @@ async fn test_e2e_frontend_simulates_sse_request() {
 
     let mut cfg = base_config();
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/sse".into(),
         methods: vec![],
         description: "SSE 流".into(),

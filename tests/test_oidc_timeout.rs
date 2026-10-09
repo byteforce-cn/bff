@@ -31,6 +31,7 @@ async fn login_fails_fast_when_idp_hangs() {
         scopes: vec!["openid".into()],
         insecure_skip_id_token_verification: false,
         refresh_skew_secs: 60,
+        shared_across_sites: false,
     });
     let bff = common::spawn_business(common::make_state(cfg)).await;
 
