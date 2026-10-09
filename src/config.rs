@@ -726,6 +726,30 @@ fn push_unique_host(hosts: &mut Vec<String>, host: &str) {
     }
 }
 
+/// 是否生产环境（`BFF_ENV=prod`）。prod 判定通过 `validate_with_env` 注入，测试无需改环境变量。
+pub(crate) fn is_prod_env() -> bool {
+    std::env::var("BFF_ENV")
+        .map(|v| v == "prod")
+        .unwrap_or(false)
+}
+
+/// profile 名是否匹配 `[a-z0-9-]+`。
+fn is_valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// 校验错误中的 profile 字段路径（`default` 归属顶层 `session`）。
+fn profile_field_path(name: &str, field: &str) -> String {
+    if name == DEFAULT_SESSION_PROFILE {
+        format!("session.{}", field)
+    } else {
+        format!("session_profiles[{}].{}", name, field)
+    }
+}
+
 impl AppConfig {
     /// 合成站点列表（§5.5）：无 `sites` 时合成 legacy `default` 站点。
     ///
@@ -1740,7 +1764,13 @@ impl AppConfig {
         Ok(cfg)
     }
 
+    /// 使用进程环境（`BFF_ENV=prod`）判定是否执行生产环境校验。
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_with_env(is_prod_env())
+    }
+
+    /// 校验入口：`is_prod` 由调用方注入（测试可并行安全地传 `true`/`false`）。
+    pub fn validate_with_env(&self, is_prod: bool) -> anyhow::Result<()> {
         // bff_secret 校验（必须最先，因为后续 crypto::init 依赖它）
         anyhow::ensure!(
             !self.bff_secret.secret.is_empty(),
@@ -1823,9 +1853,6 @@ impl AppConfig {
         }
 
         // 生产环境防呆（BFF_ENV=prod 时拒绝 POC 配置）
-        let is_prod = std::env::var("BFF_ENV")
-            .map(|v| v == "prod")
-            .unwrap_or(false);
         if is_prod {
             for (label, kind) in [
                 ("session_store", &self.provider.session_store),
@@ -2088,6 +2115,166 @@ impl AppConfig {
             self.health.probe_timeout >= Duration::from_millis(100),
             "health.probe_timeout 必须 >= 100ms"
         );
+
+        // 会话 profile 卫生与 Cookie 策略（§5.4 第 3–5 条）：
+        // 在现有 legacy 全局校验之后执行；Task 3/4 的站点级校验后续加入。
+        let sites = self.effective_sites();
+        self.validate_session_profiles(is_prod, &sites)?;
+
+        Ok(())
+    }
+
+    /// 会话 profile 卫生与 Cookie 策略校验（§5.4 第 3–5 条）。
+    ///
+    /// - 规则 3（无条件）：profile 名合法且非 `default`；`cookie_name` 全局唯一；
+    ///   `same_site ∈ {Strict, Lax, None}` 且 `None ⇒ secure`；prod 逐 profile 校验 `secure`；
+    /// - 规则 4（仅被站点引用的 profile）：`cookie_domain` 非空必须 domain-match
+    ///   引用它的全部站点主机；被 ≥2 个不同主机站点引用且为空 → prod 失败、dev 告警；
+    /// - 规则 5：prod 下任一 profile `cookie_domain` 非空且未显式
+    ///   `allow_unmanaged_subdomains: true` → 失败；dev 告警。
+    fn validate_session_profiles(
+        &self,
+        is_prod: bool,
+        sites: &[ResolvedSite],
+    ) -> anyhow::Result<()> {
+        // 规则 1：`resolved_session_profiles` 会跳过 `default` 键，故直接检查原始键。
+        for name in self.session_profiles.keys() {
+            anyhow::ensure!(
+                is_valid_profile_name(name),
+                "session_profiles[{}] 名称非法（须匹配 [a-z0-9-]+）",
+                name
+            );
+            anyhow::ensure!(
+                name != DEFAULT_SESSION_PROFILE,
+                "session_profiles[{}] 不得定义：`default` 只能由顶层 `session` 定义",
+                name
+            );
+        }
+
+        // 解析后的 profile 按固定顺序处理（default 优先 + 其余字典序），保证错误可复现。
+        let profiles = self.resolved_session_profiles();
+        let mut names = vec![DEFAULT_SESSION_PROFILE.to_string()];
+        let mut extras: Vec<String> = profiles
+            .keys()
+            .filter(|n| n.as_str() != DEFAULT_SESSION_PROFILE)
+            .cloned()
+            .collect();
+        extras.sort();
+        names.extend(extras);
+
+        // 规则 2/3/4：cookie_name 唯一、same_site 取值、prod 逐 profile secure。
+        let valid_same_site = ["Strict", "Lax", "None"];
+        let mut seen_cookie_names: HashMap<&str, &str> = HashMap::new();
+        for name in &names {
+            let profile = profiles
+                .get(name)
+                .expect("default 与 session_profiles 解析后必存在");
+
+            if let Some(prev) = seen_cookie_names.insert(&profile.cookie_name, name) {
+                anyhow::bail!(
+                    "{} 必须全局唯一，与 profile [{}] 冲突: {}",
+                    profile_field_path(name, "cookie_name"),
+                    prev,
+                    profile.cookie_name
+                );
+            }
+            anyhow::ensure!(
+                valid_same_site.contains(&profile.same_site.as_str()),
+                "{} 无效: {}（期望 Strict/Lax/None）",
+                profile_field_path(name, "same_site"),
+                profile.same_site
+            );
+            anyhow::ensure!(
+                profile.same_site != "None" || profile.secure,
+                "{} 为 None 时必须 secure: true（否则浏览器拒绝发送跨站 Cookie）",
+                profile_field_path(name, "same_site")
+            );
+            if is_prod {
+                anyhow::ensure!(
+                    profile.secure,
+                    "生产环境（BFF_ENV=prod）必须 {} 为 true（否则会话 Cookie 明文传输）",
+                    profile_field_path(name, "secure")
+                );
+            }
+
+            // 规则 5：共享域信任边界显式确认（与是否被站点引用无关）。
+            let has_domain = profile
+                .cookie_domain
+                .as_deref()
+                .filter(|d| !d.is_empty())
+                .is_some();
+            if has_domain && !profile.allow_unmanaged_subdomains {
+                if is_prod {
+                    anyhow::bail!(
+                        "生产环境（BFF_ENV=prod）下 {} 非空必须显式 {}: true（确认该域内未托管子域也会收到会话 Cookie）",
+                        profile_field_path(name, "cookie_domain"),
+                        profile_field_path(name, "allow_unmanaged_subdomains")
+                    );
+                }
+                tracing::warn!(
+                    "{} 非空但未确认 {}: 该域内未托管子域也会收到会话 Cookie（dev 仅告警）",
+                    profile_field_path(name, "cookie_domain"),
+                    profile_field_path(name, "allow_unmanaged_subdomains")
+                );
+            }
+        }
+
+        // 规则 4/5：cookie_domain 与引用站点主机的匹配、共享域确认。
+        for name in &names {
+            let profile = profiles
+                .get(name)
+                .expect("default 与 session_profiles 解析后必存在");
+            let referencing: Vec<&ResolvedSite> = sites
+                .iter()
+                .filter(|s| s.session_profile == name.as_str())
+                .collect();
+            if referencing.is_empty() {
+                continue;
+            }
+
+            match profile.cookie_domain.as_deref().filter(|d| !d.is_empty()) {
+                Some(domain) => {
+                    // 规则 4：正向 domain-match 引用该 profile 的每个站点主机。
+                    for site in &referencing {
+                        for host in &site.allowed_hosts {
+                            anyhow::ensure!(
+                                cookie_domain_matches(domain, host),
+                                "{} ({}) 不匹配引用站点 [{}] 的主机 {}（须为该主机的父域）",
+                                profile_field_path(name, "cookie_domain"),
+                                domain,
+                                site.name,
+                                host
+                            );
+                        }
+                    }
+                }
+                None => {
+                    // cookie_domain 为空（host-only）时无法跨主机共享会话。
+                    let mut hosts: Vec<&str> = Vec::new();
+                    for site in &referencing {
+                        for host in &site.allowed_hosts {
+                            if !hosts.contains(&host.as_str()) {
+                                hosts.push(host);
+                            }
+                        }
+                    }
+                    if referencing.len() >= 2 && hosts.len() > 1 {
+                        if is_prod {
+                            anyhow::bail!(
+                                "{} 为空但被 {} 个不同主机站点引用（无法跨主机共享会话，须配置 Domain cookie）",
+                                profile_field_path(name, "cookie_domain"),
+                                hosts.len()
+                            );
+                        }
+                        tracing::warn!(
+                            "{} 为空但被 {} 个不同主机站点引用（无法跨主机共享会话，prod 将拒绝启动）",
+                            profile_field_path(name, "cookie_domain"),
+                            hosts.len()
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -2542,5 +2729,347 @@ routes:
         assert_eq!(cfg.routes[0].sites, vec!["app1", "app2"]);
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         assert!(yaml.contains("sites"), "带 sites 注解的路由应序列化该字段");
+    }
+}
+
+// ── session profile 校验测试（§5.4 第 3–5 条）──
+
+#[cfg(test)]
+mod session_profile_validation_tests {
+    use super::*;
+
+    /// prod 下满足既有防呆校验的最小配置（让新增 profile 校验错误可稳定复现）。
+    const PROD_BASE: &str = r#"
+bff_secret:
+  secret: "prod-real-secret"
+  salt: "prod-real-salt-16b"
+provider:
+  session_store: redis
+  cache: redis
+  lock: redis
+  redis_url: "redis://127.0.0.1:6379"
+admin:
+  auth_mode: token
+  auth_token: "0123456789abcdef0123456789abcdef"
+  enable_test_endpoints: false
+server:
+  public_base_url: "https://bff.example.com"
+"#;
+
+    fn prod_yaml(extra: &str) -> String {
+        format!("{PROD_BASE}\n{extra}")
+    }
+
+    fn expect_err(yaml: &str, need: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        let err = cfg
+            .validate_with_env(false)
+            .expect_err("dev 应校验失败")
+            .to_string();
+        assert!(err.contains(need), "错误应含 {need}，实际: {err}");
+    }
+
+    fn expect_ok(yaml: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        cfg.validate_with_env(false)
+            .unwrap_or_else(|e| panic!("dev 应校验通过，实际: {e}"));
+    }
+
+    fn expect_prod_err(yaml: &str, need: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        let err = cfg
+            .validate_with_env(true)
+            .expect_err("prod 应校验失败")
+            .to_string();
+        assert!(err.contains(need), "错误应含 {need}，实际: {err}");
+    }
+
+    // 规则 1：profile 名 [a-z0-9-]+，且不得为 default。
+
+    #[test]
+    fn rejects_invalid_profile_name() {
+        expect_err(
+            r#"
+session_profiles:
+  "Bad_Name":
+    cookie_name: "B1"
+"#,
+            "session_profiles[Bad_Name]",
+        );
+    }
+
+    #[test]
+    fn rejects_default_profile_redefinition() {
+        expect_err(
+            r#"
+session_profiles:
+  "default":
+    cookie_name: "B1"
+"#,
+            "session_profiles[default]",
+        );
+    }
+
+    #[test]
+    fn accepts_valid_profile_name() {
+        expect_ok(
+            r#"
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+"#,
+        );
+    }
+
+    // 规则 2：cookie_name 跨全部 profile（含 default）全局唯一。
+
+    #[test]
+    fn rejects_duplicate_cookie_name_across_profiles() {
+        expect_err(
+            r#"
+session:
+  cookie_name: "BFF_SESSION"
+session_profiles:
+  isolated:
+    cookie_name: "BFF_SESSION"
+"#,
+            "session_profiles[isolated].cookie_name",
+        );
+    }
+
+    #[test]
+    fn accepts_unique_cookie_names_across_profiles() {
+        expect_ok(
+            r#"
+session:
+  cookie_name: "BFF_SESSION"
+session_profiles:
+  isolated:
+    cookie_name: "BFF_SESSION_ISOLATED"
+"#,
+        );
+    }
+
+    // 规则 3：same_site ∈ {Strict, Lax, None}，且 None ⇒ secure: true。
+
+    #[test]
+    fn rejects_unknown_same_site_on_extra_profile() {
+        expect_err(
+            r#"
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    same_site: "Bogus"
+"#,
+            "session_profiles[isolated].same_site",
+        );
+    }
+
+    #[test]
+    fn rejects_same_site_none_without_secure() {
+        expect_err(
+            r#"
+session:
+  secure: false
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    same_site: "None"
+"#,
+            "same_site",
+        );
+    }
+
+    #[test]
+    fn accepts_same_site_none_with_secure() {
+        expect_ok(
+            r#"
+session:
+  secure: true
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    same_site: "None"
+"#,
+        );
+    }
+
+    // 规则 4：prod 逐 profile 校验 secure。
+
+    #[test]
+    fn prod_rejects_insecure_extra_profile() {
+        expect_prod_err(
+            &prod_yaml(
+                r#"
+session:
+  secure: true
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    secure: false
+"#,
+            ),
+            "session_profiles[isolated].secure",
+        );
+    }
+
+    #[test]
+    fn prod_accepts_secure_extra_profile() {
+        let cfg: AppConfig = serde_yaml::from_str(&prod_yaml(
+            r#"
+session:
+  secure: true
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    secure: true
+"#,
+        ))
+        .unwrap();
+        cfg.validate_with_env(true)
+            .unwrap_or_else(|e| panic!("prod 下 secure profile 应通过，实际: {e}"));
+    }
+
+    // 规则 4（domain-match）：cookie_domain 非空必须匹配引用该 profile 的全部站点主机。
+
+    #[test]
+    fn rejects_cookie_domain_not_matching_referencing_hosts() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    server_names: ["app1.example.com"]
+    session_profile: isolated
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    cookie_domain: ".other.example"
+"#,
+            "cookie_domain",
+        );
+    }
+
+    #[test]
+    fn accepts_cookie_domain_matching_referencing_hosts() {
+        expect_ok(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    server_names: ["app1.example.com"]
+    session_profile: isolated
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    cookie_domain: "example.com"
+"#,
+        );
+    }
+
+    // 规则 4/5：被 ≥2 个不同主机站点引用且 cookie_domain 为空 → prod 失败、dev 仅告警。
+
+    #[test]
+    fn shared_profile_without_domain_fails_prod() {
+        let yaml = prod_yaml(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    server_names: ["app1.example.com"]
+    session_profile: isolated
+  - name: app2
+    port: 8082
+    server_names: ["app2.example.com"]
+    session_profile: isolated
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+"#,
+        );
+        expect_prod_err(&yaml, "cookie_domain");
+        let cfg: AppConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(cfg.validate_with_env(false).is_ok(), "dev 仅告警");
+    }
+
+    #[test]
+    fn shared_profile_with_domain_passes_prod() {
+        let cfg: AppConfig = serde_yaml::from_str(&prod_yaml(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    server_names: ["app1.example.com"]
+    session_profile: isolated
+  - name: app2
+    port: 8082
+    server_names: ["app2.example.com"]
+    session_profile: isolated
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    cookie_domain: "example.com"
+    allow_unmanaged_subdomains: true
+"#,
+        ))
+        .unwrap();
+        cfg.validate_with_env(true)
+            .unwrap_or_else(|e| panic!("共享 profile 配 domain + ack 应通过，实际: {e}"));
+    }
+
+    // 规则 5：prod 下 cookie_domain 非空必须显式 allow_unmanaged_subdomains: true。
+
+    #[test]
+    fn prod_requires_allow_unmanaged_for_domain_cookie() {
+        expect_prod_err(
+            &prod_yaml(
+                r#"
+session:
+  secure: true
+  cookie_domain: "example.com"
+"#,
+            ),
+            "allow_unmanaged_subdomains",
+        );
+    }
+
+    #[test]
+    fn prod_requires_ack_for_unreferenced_domain_profile() {
+        expect_prod_err(
+            &prod_yaml(
+                r#"
+session_profiles:
+  isolated:
+    cookie_name: "B1"
+    cookie_domain: "example.com"
+"#,
+            ),
+            "session_profiles[isolated].allow_unmanaged_subdomains",
+        );
+    }
+
+    #[test]
+    fn prod_accepts_acknowledged_domain_cookie() {
+        let cfg: AppConfig = serde_yaml::from_str(&prod_yaml(
+            r#"
+session:
+  secure: true
+  cookie_domain: "example.com"
+  allow_unmanaged_subdomains: true
+"#,
+        ))
+        .unwrap();
+        cfg.validate_with_env(true)
+            .unwrap_or_else(|e| panic!("显式 ack 的 Domain cookie 应通过，实际: {e}"));
+    }
+
+    #[test]
+    fn dev_warns_but_accepts_unacknowledged_domain_cookie() {
+        expect_ok(
+            r#"
+session:
+  cookie_domain: "example.com"
+"#,
+        );
     }
 }
