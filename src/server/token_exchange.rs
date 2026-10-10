@@ -216,7 +216,7 @@ fn classify_error(
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::utils::hex_lower(&hasher.finalize())
 }
 
 /// 缓存键 = `session_id + 配置指纹 + subject token 指纹`（§6.1）。

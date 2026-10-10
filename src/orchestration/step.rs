@@ -73,7 +73,7 @@ async fn execute_http(
             hasher.update(v.as_bytes());
             hasher.update(b"\x1e");
         }
-        let fp = format!("{:x}", hasher.finalize());
+        let fp = crate::utils::hex_lower(&hasher.finalize());
         format!("pipeline:http:{}:{}:{}", method, url, &fp[..16])
     } else {
         format!("pipeline:http:{}:{}", method, url)
