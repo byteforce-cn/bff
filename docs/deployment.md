@@ -298,7 +298,9 @@ kubectl -n bff apply -k deploy/k8s/
 默认迁移路径（设计 §11.3）：
 
 1. **行为中立发布**：先部署多站点能力二进制，配置保持**无 `sites`**（legacy 模式）→ 行为与升级前
-   完全一致，验证回归；
+   完全一致，验证回归。该步必须沿用**迁移前**的探针/Service 布局：探针与 Service 指向
+   `server.business_port`（8080）；`deploy/k8s/` 中的 `app1:8081` / `app2:8082` 站点端口布局
+   自第 2 步（切换 `sites`）起才生效（NetworkPolicy 已放行 8080 供第 1 步使用）。
 2. **切换配置**：新增 `sites`（原站点建议沿用名 `default` 与原业务端口）、把 `session.cookie_name`
    轮换为 `BFF_SESSION_V2`、设置 `session.cookie_domain: .example.com`、每站点 `public_base_url` /
    `server_names`，并按 §5.4 第 5 条显式 `session.allow_unmanaged_subdomains: true`。

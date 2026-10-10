@@ -87,6 +87,9 @@ spec:
             #   readOnly: true
           # 探针打任一业务端口即可：/live、/ready 站点无关且豁免 Host 校验（§6.3/§11.1）；
           # 示例取 app1 站点端口。
+          # 注意：以下 `app1`/`app2` 端口与探针为**迁移后**状态（§7.2 第 2 步起生效）；
+          # 两步迁移的第 1 步（无 `sites`，legacy 8080）需沿用迁移前的探针/Service 布局，
+          # 否则 Pod 永远不 Ready（NetworkPolicy 已放行 8080 供第 1 步使用）。
           startupProbe:
             httpGet: { path: /live, port: app1 }
             periodSeconds: 2

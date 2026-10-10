@@ -62,6 +62,8 @@ curl -s -b /tmp/bff-multisite/jar http://app2.localhost/api/session   # 共享�
 ## 迁移演练（§11.3，两步发布）
 
 1. **行为中立发布**：先部署多站点能力二进制，配置保持**无 `sites`**（legacy 路径），行为与升级前一致。
+   该步沿用**迁移前**的探针/Service 布局（探针与 Service 指向 `server.business_port` 8080）；
+   `8081`/`8082` 站点端口布局自第 2 步起生效。
 2. **切换配置**：新增 `sites`（原站点沿用名 `default` 与原业务端口）、`session.cookie_name` 轮换为
    `BFF_SESSION_V2`、`cookie_domain`、每站点 `public_base_url`/`server_names`，并显式
    `allow_unmanaged_subdomains: true`。**推荐该次发布用 `strategy: Recreate`**（见
