@@ -37,7 +37,8 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 /// 对索引中的当前条目以有界并发（≤16）加载 session record，派生
 /// `providers`（record 中 `oidc:{provider}:tokens` 键）与 `sites`
 /// （`effective_sites()` 中 `allowed_providers` 命中 providers 的站点名，
-/// 去重并排序）。record 缺失（已过期）的条目跳过，交由 GC 清理（§10）。
+/// 去重并排序）。record 缺失（已过期）的条目跳过，交由 GC 清理（§10）；
+/// 存储后端临时故障时保留内存索引行（`providers`/`sites` 可能为空）而非清空列表。
 pub async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
     let entries: Vec<SessionInfo> = state.sessions.read().await.values().cloned().collect();
     let sites = state.cfg().effective_sites();
@@ -46,35 +47,44 @@ pub async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Va
         let state = state.clone();
         let sites = sites.clone();
         async move {
-            // 非法 ID（理论不可达）或 record 缺失 → 跳过（下轮 GC 清理索引项）
+            // 非法 ID（理论不可达）→ 跳过（下轮 GC 清理索引项）
             let parsed = info.id.parse::<Id>().ok()?;
-            let record = state.session_store.load(&parsed).await.ok().flatten()?;
+            match state.session_store.load(&parsed).await {
+                Ok(Some(record)) => {
+                    let mut providers: Vec<String> = record
+                        .data
+                        .keys()
+                        .filter_map(|k| {
+                            k.strip_prefix("oidc:")
+                                .and_then(|rest| rest.strip_suffix(":tokens"))
+                        })
+                        .map(str::to_string)
+                        .collect();
+                    providers.sort();
+                    providers.dedup();
+                    info.providers = providers;
 
-            let mut providers: Vec<String> = record
-                .data
-                .keys()
-                .filter_map(|k| {
-                    k.strip_prefix("oidc:")
-                        .and_then(|rest| rest.strip_suffix(":tokens"))
-                })
-                .map(str::to_string)
-                .collect();
-            providers.sort();
-            providers.dedup();
-            info.providers = providers;
-
-            let mut session_sites: Vec<String> = sites
-                .iter()
-                .filter(|s| {
-                    s.allowed_providers
+                    let mut session_sites: Vec<String> = sites
                         .iter()
-                        .any(|p| info.providers.contains(p))
-                })
-                .map(|s| s.name.clone())
-                .collect();
-            session_sites.sort();
-            session_sites.dedup();
-            info.sites = session_sites;
+                        .filter(|s| {
+                            s.allowed_providers
+                                .iter()
+                                .any(|p| info.providers.contains(p))
+                        })
+                        .map(|s| s.name.clone())
+                        .collect();
+                    session_sites.sort();
+                    session_sites.dedup();
+                    info.sites = session_sites;
+                }
+                // record 缺失（已过期）→ 跳过，交由 GC 清理
+                Ok(None) => return None,
+                // 存储后端临时故障（如 Redis 不可达）：不得清空整个列表；
+                // 保留内存索引行（`providers`/`sites` 可能为空），下轮再试。
+                Err(e) => {
+                    tracing::warn!(id = %info.id, error = %e, "加载会话失败");
+                }
+            }
             Some(info)
         }
     }))

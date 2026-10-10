@@ -157,6 +157,12 @@ export default function SessionsPage() {
     };
   };
 
+  // 模拟登录 provider 选项仅限所选站点白名单：后端会对越站 provider 返回 400（§8.1）。
+  const selectedSiteInfo = sites.find((s) => s.name === selectedSite);
+  const siteProviders = selectedSiteInfo
+    ? providers.filter((p) => selectedSiteInfo.providers.includes(p.id))
+    : [];
+
   return (
     <div className="space-y-6 p-6">
       <div className="flex items-center justify-between">
@@ -313,7 +319,14 @@ export default function SessionsPage() {
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label>站点</Label>
-              <Select value={selectedSite} onValueChange={setSelectedSite}>
+              <Select
+                value={selectedSite}
+                onValueChange={(v) => {
+                  setSelectedSite(v);
+                  // 站点切换时重置 provider，避免越站选择
+                  setSelectedProvider("");
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="选择站点..." />
                 </SelectTrigger>
@@ -333,7 +346,7 @@ export default function SessionsPage() {
                   <SelectValue placeholder="选择 Provider..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {providers.map((p) => (
+                  {siteProviders.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
                       {p.display_name || p.id}
                     </SelectItem>
