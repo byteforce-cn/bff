@@ -17,9 +17,15 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx
+      # 业务端口（§11.1）：站点 app1/app2 = 8081/8082；8080 保留给 §11.3 两步迁移的
+      # 第 1 步（v0.4 二进制以 legacy 模式跑 server.business_port）。
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8082
     - from:
         - namespaceSelector:
             matchLabels:
