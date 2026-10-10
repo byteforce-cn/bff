@@ -120,6 +120,9 @@ pub struct MockIdp {
     pub nonce: Arc<Mutex<Option<String>>>,
     /// refresh_token grant 的调用次数
     pub refresh_count: Arc<AtomicUsize>,
+    /// token 端点对 authorization_code grant 返回的 access_token
+    /// （默认 `mock-access-token`；令牌隔离用例改写为站点可区分的值）
+    pub access_token: Arc<Mutex<String>>,
 }
 
 #[derive(Clone)]
@@ -127,9 +130,15 @@ struct IdpState {
     url: String,
     nonce: Arc<Mutex<Option<String>>>,
     refresh_count: Arc<AtomicUsize>,
+    access_token: Arc<Mutex<String>>,
 }
 
 pub async fn spawn_mock_oidc_provider() -> MockIdp {
+    spawn_mock_oidc_provider_with_token("mock-access-token").await
+}
+
+/// 指定 access_token 的 mock IdP（默认值保持既有测试的期望不变）。
+pub async fn spawn_mock_oidc_provider_with_token(access_token: &str) -> MockIdp {
     use axum::{extract::State as AxState, routing::get, routing::post, Json, Router};
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -140,6 +149,7 @@ pub async fn spawn_mock_oidc_provider() -> MockIdp {
         url: url.clone(),
         nonce: Arc::new(Mutex::new(None)),
         refresh_count: Arc::new(AtomicUsize::new(0)),
+        access_token: Arc::new(Mutex::new(access_token.to_string())),
     };
 
     async fn discovery(AxState(st): AxState<IdpState>) -> Json<serde_json::Value> {
@@ -184,7 +194,7 @@ pub async fn spawn_mock_oidc_provider() -> MockIdp {
         let grant = form.get("grant_type").cloned().unwrap_or_default();
         match grant.as_str() {
             "authorization_code" => Json(serde_json::json!({
-                "access_token": "mock-access-token",
+                "access_token": st.access_token.lock().unwrap().clone(),
                 "token_type": "Bearer",
                 "expires_in": 3600,
                 "refresh_token": "mock-refresh-token",
@@ -225,6 +235,7 @@ pub async fn spawn_mock_oidc_provider() -> MockIdp {
         url,
         nonce: st.nonce,
         refresh_count: st.refresh_count,
+        access_token: st.access_token,
     }
 }
 
