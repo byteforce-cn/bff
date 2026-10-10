@@ -32,6 +32,7 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
         .route("/metrics", get(runtime_api::metrics))
         .route("/sessions", get(runtime_api::list_sessions))
         .route("/sessions/:id", delete(runtime_api::delete_session))
+        .route("/sites", get(runtime_api::list_sites))
         .route("/config/export", get(config_api::export_config))
         .route("/config/import", post(config_api::import_config))
         .route("/oidc/providers", get(config_api::list_providers))

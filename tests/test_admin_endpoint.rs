@@ -293,3 +293,30 @@ async fn test_endpoints_disabled_when_config_false() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 }
+
+/// `GET /admin/api/sites` 返回站点清单（含端口与 provider 绑定）（§10）。
+#[tokio::test]
+async fn admin_sites_endpoint_lists_ports() {
+    let idp_a = common::spawn_mock_oidc_provider().await;
+    let idp_b = common::spawn_mock_oidc_provider().await;
+    let state = common::make_state(common::multisite_config(&idp_a, &idp_b));
+    let admin = common::spawn_admin(state).await;
+    let client = common::test_client();
+
+    let resp = client
+        .get(format!("{}/admin/api/sites", admin))
+        .header("x-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["sites"][0]["name"], "app1");
+    assert_eq!(body["sites"][0]["port"], 8081);
+    assert_eq!(body["sites"][0]["default_provider"], "pA");
+    assert_eq!(body["sites"][0]["providers"], serde_json::json!(["pA"]));
+    assert_eq!(body["sites"][0]["logout_scope"], "global");
+    assert_eq!(body["sites"][0]["legacy"], false);
+    assert_eq!(body["sites"][1]["name"], "app2");
+    assert_eq!(body["sites"][1]["port"], 8082);
+}

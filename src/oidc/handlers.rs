@@ -806,6 +806,9 @@ pub async fn register_session(state: &AppState, session: &Session, provider: &st
             sub: sub.into(),
             created_at: now,
             last_seen: now,
+            // 站点/provider 集合由管理端 `list_sessions` 按 record 推导
+            sites: Vec::new(),
+            providers: Vec::new(),
         },
     );
 }

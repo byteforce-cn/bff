@@ -33,8 +33,8 @@ import {
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { listProviders, listSessions, revokeSession } from "@/lib/api";
-import type { SessionInfo } from "@/types";
+import { listProviders, listSessions, listSites, revokeSession } from "@/lib/api";
+import type { SessionInfo, SiteInfo } from "@/types";
 import { Users, RefreshCw, Clock, Trash2, LogIn } from "lucide-react";
 import { toast } from "sonner";
 
@@ -50,7 +50,9 @@ export default function SessionsPage() {
   // 模拟登录
   const [showSimulateDialog, setShowSimulateDialog] = useState(false);
   const [providers, setProviders] = useState<{ id: string; display_name?: string }[]>([]);
+  const [sites, setSites] = useState<SiteInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string>("");
+  const [selectedSite, setSelectedSite] = useState<string>("");
   const [simulating, setSimulating] = useState(false);
   const popupRef = useRef<Window | null>(null);
 
@@ -83,19 +85,39 @@ export default function SessionsPage() {
     if (showSimulateDialog) loadProviders();
   }, [showSimulateDialog, loadProviders]);
 
+  // 加载站点列表（模拟登录需选择站点端口发起 /login）
+  const loadSites = useCallback(async () => {
+    try {
+      const data = await listSites();
+      const list = (data as { sites?: SiteInfo[] }).sites || [];
+      setSites(list);
+      // 默认选中首个站点，避免用户忘记选择站点
+      setSelectedSite((cur) => cur || list[0]?.name || "");
+    } catch {
+      toast.error("加载站点列表失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showSimulateDialog) loadSites();
+  }, [showSimulateDialog, loadSites]);
+
   // 执行模拟登录
   const handleSimulateLogin = () => {
-    if (!selectedProvider) return;
+    if (!selectedProvider || !selectedSite) return;
+    const site = sites.find((s) => s.name === selectedSite);
+    if (!site) {
+      toast.error("所选站点不存在");
+      return;
+    }
     setSimulating(true);
     setShowSimulateDialog(false);
 
     const redirect = "/admin/sessions";
-    // OIDC /login 在 business port (8080)，admin-ui 在 admin port (8443)，
-    // 需要构造 business port 的绝对 URL，否则会命中 admin port 的 SPA fallback。
-    const businessOrigin = window.location.origin.replace(
-      window.location.port,
-      window.location.port === "8443" ? "8080" : window.location.port
-    );
+    // OIDC /login 在业务端口（非 admin 端口）：优先站点 public_base_url，
+    // 否则按站点监听端口构造 origin，否则会命中 admin 端口的 SPA fallback。
+    const businessOrigin =
+      site.public_base_url ?? `http://${window.location.hostname}:${site.port}`;
     const url = `${businessOrigin}/login?provider=${encodeURIComponent(selectedProvider)}&redirect=${encodeURIComponent(redirect)}&popup=true`;
 
     const popup = window.open(url, "oidc-simulate", "width=500,height=700");
@@ -170,6 +192,8 @@ export default function SessionsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Session ID</TableHead>
+                <TableHead>Provider</TableHead>
+                <TableHead>站点</TableHead>
                 <TableHead>创建时间</TableHead>
                 <TableHead>过期时间</TableHead>
                 <TableHead>其他数据</TableHead>
@@ -178,10 +202,10 @@ export default function SessionsPage() {
             </TableHeader>
             <TableBody>
               {loading ? (
-                <TableSkeleton rows={5} cols={5} />
+                <TableSkeleton rows={5} cols={7} />
               ) : sessions.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
                     <Users className="mx-auto mb-2 h-8 w-8 text-muted-foreground/50" />
                     暂无活跃会话
                   </TableCell>
@@ -193,6 +217,26 @@ export default function SessionsPage() {
                       {s.id}
                     </TableCell>
                     <TableCell>
+                      {s.provider ? (
+                        <Badge variant="secondary">{s.provider}</Badge>
+                      ) : (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {(s.sites || []).length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {(s.sites || []).map((site) => (
+                            <Badge key={site} variant="outline">
+                              {site}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
                       <Clock className="mr-1 inline h-3 w-3 text-muted-foreground" />
                       {s.created_at || "-"}
                     </TableCell>
@@ -201,7 +245,18 @@ export default function SessionsPage() {
                       <pre className="text-xs text-muted-foreground max-w-[300px] truncate">
                         {JSON.stringify(
                           Object.fromEntries(
-                            Object.entries(s).filter(([k]) => !["id", "created_at", "expires_at"].includes(k))
+                            Object.entries(s).filter(
+                              ([k]) =>
+                                ![
+                                  "id",
+                                  "provider",
+                                  "sub",
+                                  "sites",
+                                  "providers",
+                                  "created_at",
+                                  "expires_at",
+                                ].includes(k)
+                            )
                           ),
                           null,
                           2
@@ -230,7 +285,7 @@ export default function SessionsPage() {
         open={revokeId !== null}
         onOpenChange={(open) => { if (!open) setRevokeId(null); }}
         title="撤销会话"
-        description={`确定要撤销会话 "${revokeId?.slice(0, 8)}…" 吗？用户将被强制登出。`}
+        description={`确定要撤销会话 "${revokeId?.slice(0, 8)}…" 吗？此操作将终止该用户在所有站点的会话。`}
         onConfirm={async () => {
           if (!revokeId) return;
           try {
@@ -257,6 +312,21 @@ export default function SessionsPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
+              <Label>站点</Label>
+              <Select value={selectedSite} onValueChange={setSelectedSite}>
+                <SelectTrigger>
+                  <SelectValue placeholder="选择站点..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {sites.map((s) => (
+                    <SelectItem key={s.name} value={s.name}>
+                      {s.name}（端口 {s.port}）
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
               <Label>OIDC Provider</Label>
               <Select value={selectedProvider} onValueChange={setSelectedProvider}>
                 <SelectTrigger>
@@ -276,7 +346,7 @@ export default function SessionsPage() {
             <Button variant="outline" onClick={() => setShowSimulateDialog(false)}>
               取消
             </Button>
-            <Button onClick={handleSimulateLogin} disabled={!selectedProvider}>
+            <Button onClick={handleSimulateLogin} disabled={!selectedProvider || !selectedSite}>
               开始登录
             </Button>
           </DialogFooter>

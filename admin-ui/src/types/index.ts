@@ -98,7 +98,26 @@ export interface SessionInfo {
   id: string;
   created_at: string;
   expires_at: string;
+  /** 最近一次登录使用的 provider */
+  provider?: string;
+  sub?: string;
+  /** 当前会话实际持有 token 的站点集合 */
+  sites?: string[];
+  /** 当前会话实际持有 token 的 provider 集合 */
+  providers?: string[];
   [key: string]: unknown;
+}
+
+/** 站点摘要（GET /admin/api/sites，§10） */
+export interface SiteInfo {
+  name: string;
+  port: number;
+  public_base_url: string | null;
+  default_provider: string;
+  providers: string[];
+  session_profile: string;
+  logout_scope: "global" | "site";
+  legacy: boolean;
 }
 
 /** 完整应用配置 */

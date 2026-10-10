@@ -1,12 +1,13 @@
 //! 运行时 API：健康检查、指标、活跃会话、pipeline 试运行。
 use crate::orchestration::dag;
 use crate::orchestration::step::{execute_step, StepContext, StepOutput};
-use crate::state::AppState;
+use crate::state::{AppState, SessionInfo};
 use crate::utils::AppError;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,9 +33,82 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 }
 
 /// GET /admin/api/sessions — 活跃 Session 列表
+///
+/// 对索引中的当前条目以有界并发（≤16）加载 session record，派生
+/// `providers`（record 中 `oidc:{provider}:tokens` 键）与 `sites`
+/// （`effective_sites()` 中 `allowed_providers` 命中 providers 的站点名，
+/// 去重并排序）。record 缺失（已过期）的条目跳过，交由 GC 清理（§10）。
 pub async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let sessions: Vec<_> = state.sessions.read().await.values().cloned().collect();
+    let entries: Vec<SessionInfo> = state.sessions.read().await.values().cloned().collect();
+    let sites = state.cfg().effective_sites();
+
+    let sessions: Vec<SessionInfo> = futures::stream::iter(entries.into_iter().map(|mut info| {
+        let state = state.clone();
+        let sites = sites.clone();
+        async move {
+            // 非法 ID（理论不可达）或 record 缺失 → 跳过（下轮 GC 清理索引项）
+            let parsed = info.id.parse::<Id>().ok()?;
+            let record = state.session_store.load(&parsed).await.ok().flatten()?;
+
+            let mut providers: Vec<String> = record
+                .data
+                .keys()
+                .filter_map(|k| {
+                    k.strip_prefix("oidc:")
+                        .and_then(|rest| rest.strip_suffix(":tokens"))
+                })
+                .map(str::to_string)
+                .collect();
+            providers.sort();
+            providers.dedup();
+            info.providers = providers;
+
+            let mut session_sites: Vec<String> = sites
+                .iter()
+                .filter(|s| {
+                    s.allowed_providers
+                        .iter()
+                        .any(|p| info.providers.contains(p))
+                })
+                .map(|s| s.name.clone())
+                .collect();
+            session_sites.sort();
+            session_sites.dedup();
+            info.sites = session_sites;
+            Some(info)
+        }
+    }))
+    .buffer_unordered(16)
+    .filter_map(|entry| async move { entry })
+    .collect()
+    .await;
+
     Json(serde_json::json!({ "sessions": sessions, "count": sessions.len() }))
+}
+
+/// GET /admin/api/sites — 站点清单（§10）
+///
+/// 字段与 `ResolvedSite` 对齐；`logout_scope` 沿用配置的序列化形式
+/// （`"global"` / `"site"`）。
+pub async fn list_sites(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let sites: Vec<serde_json::Value> = state
+        .cfg()
+        .effective_sites()
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "port": s.port,
+                "public_base_url": s.public_base_url,
+                "default_provider": s.default_provider,
+                "providers": s.allowed_providers,
+                "session_profile": s.session_profile,
+                "logout_scope": s.logout_scope,
+                "legacy": s.legacy,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "sites": sites }))
 }
 
 /// POST /admin/api/oidc/providers/:id/verify — 真实连通性校验（discovery）。

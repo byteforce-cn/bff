@@ -25,10 +25,17 @@ use tower_sessions::{MemoryStore, SessionStore};
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub id: String,
+    /// 最近一次登录使用的 provider（非空；仅站点登录成功后登记）
     pub provider: String,
     pub sub: String,
     pub created_at: i64,
     pub last_seen: i64,
+    /// 当前会话实际持有 token 的站点集合（additive；由 `list_sessions` 推导）
+    #[serde(default)]
+    pub sites: Vec<String>,
+    /// 当前会话实际持有 token 的 provider 集合（additive；由 `list_sessions` 推导）
+    #[serde(default)]
+    pub providers: Vec<String>,
 }
 
 /// 配置应用失败：`Rejected`（校验/构建/密钥拒绝，旧配置保持）或
