@@ -18,6 +18,16 @@
 
 **验证**：`tests/test_oidc_signature.rs`（进程内 RS256 签名 IdP + JWKS，覆盖伪造密钥 / `alg:none` / nonce 不一致三类攻击拒绝）；Keycloak 26 真实 IdP 契约 E2E（见 §8）。
 
+### 多站点共享域 Cookie（暴露面）
+
+多站点 SSO 使用 `session.cookie_domain`（Domain cookie，如 `.example.com`）在站点子域间共享会话：
+
+- **暴露面**：该 Cookie 会发送给 `.example.com` 下**所有**子域（含未被 BFF 托管的服务）；域内任一子域被攻破即可窃取会话（会话记录含全部站点 token）；
+- **信任边界显式确认**：`session.allow_unmanaged_subdomains: true`（或对应 `session_profiles.<name>.allow_unmanaged_subdomains`）声明“已知该域内未托管子域也会收到会话 Cookie”。prod 下 `cookie_domain` 非空却未确认 → **拒绝启动**，dev 仅告警；
+- **正向 domain-match 校验**：`cookie_domain` 必须是引用该 profile 的每个站点主机的父域，否则启动失败；
+- **`__Host-` 前缀互斥**：`__Host-` 前缀的 Cookie 要求无 `Domain` 且 `Path=/`，与 Domain cookie **无法并用**；共享会话只能依赖 `Secure` + `HttpOnly` + `SameSite` + 会话 ID 轮换（登录后 `cycle_id()`）；
+- 会话记录承载全部站点 token，整条 last-write-wins（跳站并发写为低概率，见设计 §7.5）；单 record 规模随站点数增长，建议每 profile ≤10 站点。
+
 ## 2. 回调地址与重定向
 
 - `redirect_uri` / `post_logout_redirect_uri` 一律由 `server.public_base_url` 推导，**完全不信任 Host 头**；
@@ -34,6 +44,7 @@
 | --- | --- |
 | 网络隔离 | 独立端口；IP 白名单（每请求实时读取；生产收敛到运维网段，禁止公网 Ingress） |
 | 认证 | `X-Admin-Token` / `Bearer`；SHA-256 摘要**常量时间比较**；失败按来源 IP 限流（默认 30 次/分钟 → 429） |
+| 会话撤销语义 | 共享会话下 `DELETE /admin/api/sessions/:id` 清掉该会话的**全部站点 token** = **全站踢出**；管理台按钮已明示“终止该用户在所有站点的会话” |
 | 测试端点防呆 | `enable_test_endpoints` 在 `BFF_ENV=prod` 下强制关闭 |
 | 安全响应头 | CSP / X-Frame-Options / nosniff / Referrer-Policy / HSTS 覆盖管理面 |
 | 前端凭据存放 | Admin UI 的 token 使用 `sessionStorage` + 内存（不落 `localStorage`） |
