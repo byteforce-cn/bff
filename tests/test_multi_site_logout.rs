@@ -49,7 +49,12 @@ fn session_id(cookie: &str) -> String {
 /// （`bff:token_exchange:{session_id}:cfgfp:subfp`，§6.1）。
 fn exchange_cache_key(session_id: &str, subject_token: &str) -> String {
     use sha2::{Digest, Sha256};
-    let hex = |s: &str| format!("{:x}", Sha256::digest(s.as_bytes()));
+    let hex = |s: &str| {
+        Sha256::digest(s.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
     let cfg_fp = &hex(&TokenExchangeConfig::default().fingerprint())[0..16];
     let sub_fp = &hex(subject_token)[0..16];
     format!("bff:token_exchange:{session_id}:{cfg_fp}:{sub_fp}")

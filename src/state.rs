@@ -631,7 +631,7 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    crate::utils::hex_lower(&hasher.finalize())
 }
 
 /// 构建 HTTP 客户端（含 mTLS / 自定义 CA）；`timeout` 为整体超时。

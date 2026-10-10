@@ -11,6 +11,8 @@
 - 元数据：补齐 Cargo / npm 元数据（npm 版本对齐 0.1.0）；新增 `make snapshot`（git archive 快照）与 `make gitleaks`（密钥扫描，例外与理由见 `.gitleaks.toml`）
 - 开发/测试组件 Java 包名由 `com.example.*` 迁移至 `cn.byteforce.bff.dev.*`
 - 依赖升级：OpenTelemetry 栈 0.27 → 0.32（`opentelemetry_sdk` 0.32.1，含 GHSA-w9wp-h8wv-79jx 修复；otlp 0.32 / tracing-opentelemetry 0.33 / tonic 0.14）
+- 依赖升级：批量应用 dependabot（argon2 0.6 / humantime 2 / sha2 0.11 / ipnet 2.12.2 / moka 0.12.16 / rust-embed 8.13 / time 0.3.55 / tokio 1.53.2 / uuid 1.27；管理端 radix-ui 与 react-dom 19.3；vite 8.3.3；docker login/build-push action v4/v7）
+- 框架迁移：axum 0.7 → 0.8（路由参数 `:name` → `{name}`、WS 消息体改为 `Bytes`/`Utf8Bytes`）、tower-sessions 0.12 → 0.15、tower_governor 0.4 → 0.8 + governor 0.6 → 0.10（`error_handler` 移至 `Governor` 服务本身）
 - 源码与测试注释移除历史内部编号，便于外部读者理解
 
 ## [0.1.0] - 2026-09-27
