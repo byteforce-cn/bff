@@ -10,7 +10,7 @@ use crate::state::{AppState, SessionInfo};
 use crate::utils::AppError;
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Extension, Query, State};
+use axum::extract::{Extension, MatchedPath, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreAuthenticationFlow, CoreTokenResponse};
@@ -115,6 +115,33 @@ pub fn select_provider(
                 })
         }
     }
+}
+
+/// 回调 provider 解析（§5.4 第 8 条）：真实 IdP 只按注册的 `redirect_uri` 回跳
+/// （路径 = `provider.callback_path`），不回带 `?provider=`。同一站点绑定的 provider
+/// `callback_path` 唯一，因此可用匹配到的路由路径区分 provider。
+///
+/// - 显式 `?provider=`：等价 `select_provider`（白名单外 → 400，不回退）；
+/// - 无 `?provider=` 且非 legacy：命中 `callback_path == matched_path` 的站点白名单
+///   provider → 用它；无命中 → 回退 `default_provider`；
+/// - legacy：行为冻结，原样走 `select_provider`（多 provider 无 `?provider=` → 400）。
+fn select_callback_provider(
+    state: &AppState,
+    site: &SiteView,
+    id: Option<&str>,
+    matched_path: Option<&str>,
+) -> Result<OidcProviderConfig, AppError> {
+    if id.is_none() && !site.legacy {
+        if let Some(path) = matched_path {
+            let cfg = state.cfg();
+            if let Some(provider) = cfg.oidc.providers.iter().find(|p| {
+                p.callback_path == path && site.allowed_providers.iter().any(|a| a == &p.id)
+            }) {
+                return Ok(provider.clone());
+            }
+        }
+    }
+    select_provider(state, site, id)
 }
 
 /// 校验 redirect 参数：只允许**同源绝对路径**。
@@ -294,6 +321,7 @@ pub async fn callback(
     Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     headers: HeaderMap,
+    matched: MatchedPath,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, AppError> {
     if let Some(err) = q.error {
@@ -307,7 +335,12 @@ pub async fn callback(
         handle: &handle,
         view: state.site_view(&handle.name).expect("site view"),
     };
-    let provider = select_provider(&state, &ctx.view, q.provider.as_deref())?;
+    let provider = select_callback_provider(
+        &state,
+        &ctx.view,
+        q.provider.as_deref(),
+        Some(matched.as_str()),
+    )?;
     let code = q.code.ok_or_else(|| AppError::bad_request("缺少 code"))?;
     let state_param = q.state.ok_or_else(|| AppError::bad_request("缺少 state"))?;
 
