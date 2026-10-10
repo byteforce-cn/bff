@@ -2,14 +2,15 @@
 #![allow(dead_code)]
 
 use bff::config::{
-    AdminConfig, AppConfig, OidcProviderConfig, OidcSection, ProviderConfig, ServerConfig,
-    SessionConfig, SpaConfig, TokenRefreshConfig,
+    AdminConfig, AppConfig, LogoutScope, OidcProviderConfig, OidcSection, ProviderConfig,
+    ServerConfig, SessionConfig, SiteConfig, SiteOidcConfig, SpaConfig, TokenRefreshConfig,
 };
 use bff::state::AppState;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tower_sessions::Session;
 
 /// 基础测试配置（全内存 provider）。
 pub fn base_config() -> AppConfig {
@@ -223,6 +224,58 @@ pub fn mock_provider_cfg(idp: &MockIdp) -> OidcProviderConfig {
     }
 }
 
+/// 多站点 dev 语义夹具（§5.1/§5.2）：两站点共享 `default` profile 的 Domain cookie
+/// （`BFF_SESSION_V2` / `.test` / `allow_unmanaged_subdomains: true`），各自绑定一个
+/// mock provider（`shared_across_sites: false`）。
+///
+/// `server_names: []` + `public_base_url: None` = dev 语义（loopback Host 兜底）；
+/// 需要 prod 语义（public_base_url / 421 / Host 白名单）的用例应基于 `base_config()`
+/// 自行构造并显式设置站点字段。
+pub fn multisite_config(idp_a: &MockIdp, idp_b: &MockIdp) -> AppConfig {
+    let mut cfg = base_config();
+    // 全局校验仍要求 business_port > 0 且 ≠ admin_port（多站点下该端口仅占位）。
+    cfg.server.business_port = 8080;
+    cfg.server.admin_port = 8443;
+    cfg.session = SessionConfig {
+        cookie_name: "BFF_SESSION_V2".into(),
+        cookie_domain: Some(".test".into()),
+        allow_unmanaged_subdomains: true,
+        ..Default::default()
+    };
+    cfg.sites = vec![site_cfg("app1", 8081, "pA"), site_cfg("app2", 8082, "pB")];
+    cfg.oidc.providers = vec![
+        multisite_provider_cfg(idp_a, "pA"),
+        multisite_provider_cfg(idp_b, "pB"),
+    ];
+    cfg
+}
+
+fn site_cfg(name: &str, port: u16, provider: &str) -> SiteConfig {
+    SiteConfig {
+        name: name.into(),
+        port,
+        bind: "0.0.0.0".into(),
+        server_names: vec![],
+        public_base_url: None,
+        session_profile: "default".into(),
+        spa: None,
+        oidc: SiteOidcConfig {
+            default_provider: provider.into(),
+            allowed_providers: Some(vec![provider.into()]),
+        },
+        logout_scope: LogoutScope::Global,
+        security_headers: None,
+    }
+}
+
+fn multisite_provider_cfg(idp: &MockIdp, id: &str) -> OidcProviderConfig {
+    OidcProviderConfig {
+        id: id.into(),
+        display_name: format!("Mock {id}"),
+        ..mock_provider_cfg(idp)
+    }
+}
+
 /// 合成 provider 配置（不发起任何真实 OIDC 调用）：
 /// 供仅需“已登录会话”（`login_cookie` / `create_session_with_tokens`）的测试声明
 /// provider 白名单——站点化后 current_provider 必须 ∈ 站点 allowed_providers（§7.2）。
@@ -241,23 +294,48 @@ pub fn synthetic_provider_cfg() -> OidcProviderConfig {
     }
 }
 
+/// 用 `state` 的会话存储构造 `Session`：`None` 新建；`Some(id)` 复现已保存会话
+/// （同一 store、同一 id —— 用于验证跨站点视图的令牌可见性，§7.1）。
+pub fn session_for(state: &AppState, id: Option<tower_sessions::session::Id>) -> Session {
+    Session::new(
+        id,
+        Arc::new(bff::provider::session::DynSessionStore::new(
+            state.session_store.clone(),
+        )),
+        None,
+    )
+}
+
+/// 把令牌写入会话的 `oidc:{provider}:tokens` 键（§7.2 命名空间）。
+async fn insert_tokens(session: &Session, tokens: &bff::oidc::StoredTokens) {
+    session
+        .insert(&bff::oidc::tokens::session_key(&tokens.provider), tokens)
+        .await
+        .unwrap();
+}
+
+/// 构造并写入指定 provider 的标准测试令牌，返回该令牌（调用方自行 `save()`）。
+pub async fn write_tokens(session: &Session, provider: &str) -> bff::oidc::StoredTokens {
+    let tokens = bff::oidc::StoredTokens::new(
+        provider,
+        "test-user",
+        "test-access-token",
+        Some("test-refresh-token"),
+        None,
+        3600,
+    )
+    .expect("构造 StoredTokens 失败");
+    insert_tokens(session, &tokens).await;
+    tokens
+}
+
 /// 直接在 Session store 中写入令牌，返回 Cookie 头值。
 pub async fn create_session_with_tokens(
     state: &AppState,
     tokens: &bff::oidc::StoredTokens,
 ) -> String {
-    use tower_sessions::Session;
-    let session = Session::new(
-        None,
-        Arc::new(bff::provider::session::DynSessionStore::new(
-            state.session_store.clone(),
-        )),
-        None,
-    );
-    session
-        .insert(&bff::oidc::tokens::session_key(&tokens.provider), tokens)
-        .await
-        .unwrap();
+    let session = session_for(state, None);
+    insert_tokens(&session, tokens).await;
     session
         .insert("oidc:current_provider", &tokens.provider)
         .await
