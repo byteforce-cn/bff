@@ -76,7 +76,7 @@
 
 ### 配置导入返回 `requires_restart`
 
-管理端 import（或 `PUT /admin/api/config`）对含**启动物化字段**变更的配置返回
+管理端 import（`POST /admin/api/config/import`，版本化路径为 `POST /admin/api/v1/config/import`）对含**启动物化字段**变更的配置返回
 `{"status": "requires_restart", "hot_applied": [...], "requires_restart": [...]}`，**不替换运行配置、
 不落盘**（设计 §5.6）：
 

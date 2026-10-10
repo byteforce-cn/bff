@@ -161,7 +161,7 @@ kubectl -n bff apply -k deploy/k8s/
 > 运维口径：管理端改完配置后，**热生效项立即验证**（curl 探针/目标路由）；
 > 涉及“需重启”项时走滚动发布，并在变更单注明。
 >
-> **导入/热重载响应（多站点）**：`config import`（及 `PUT /admin/api/config`）对含启动物化字段变更的
+> **导入/热重载响应（多站点）**：`config import`（`POST /admin/api/config/import`，版本化路径为 `POST /admin/api/v1/config/import`）对含启动物化字段变更的
 > 配置返回 `{"status": "requires_restart", "hot_applied": [...], "requires_restart": [...]}`（按字段路径列出，
 > 如 `sites[app1].port`、`session_profiles[default].cookie_name`），**不替换运行配置、不落盘**；无结构变更时
 > 返回 `{"status": "applied", "hot_applied": [...]}`。配置 watcher 检测到结构差异时同样只告警、不应用，
