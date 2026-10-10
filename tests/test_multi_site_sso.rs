@@ -9,101 +9,8 @@ mod common;
 
 use bff::config::{InputMapping, OutputMapping, RouteDef, RouteType, RouteTypeConfig};
 use bff::state::AppState;
-use std::collections::HashMap;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// 会话 Cookie 名（`multisite_config` 的 `default` profile）。
-const SESSION_COOKIE: &str = "BFF_SESSION_V2";
-
-/// 从响应 set-cookie 提取 `BFF_SESSION_V2=<id>`（Domain cookie 需显式转发，§7.1）。
-fn extract_session_cookie(resp: &reqwest::Response) -> Option<String> {
-    resp.headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .map(|c| c.split(';').next().unwrap_or_default().trim().to_string())
-        .find(|pair| pair.starts_with(&format!("{SESSION_COOKIE}=")))
-}
-
-/// 在站点上完成一次完整 OIDC 登录（§7.3 时序）：
-///
-/// `GET /login?provider=` → 302 到 IdP authorize；解析 state/nonce 并写入 mock IdP；
-/// `GET {callback_path}?code=mock-code&state=…`（携带会话 Cookie）。
-/// 返回回调响应中的会话 Cookie 值（`cycle_id` 轮换后的新 id），供后续
-/// 跨站点请求显式携带。
-async fn login_on(
-    client: &reqwest::Client,
-    idp: &common::MockIdp,
-    base: &str,
-    provider: &str,
-    cookie: Option<&str>,
-) -> String {
-    // 1. /login → 302 到 IdP authorize
-    let mut req = client
-        .get(format!("{base}/login"))
-        .query(&[("provider", provider)]);
-    if let Some(c) = cookie {
-        req = req.header("cookie", c);
-    }
-    let resp = req.send().await.unwrap();
-    assert!(
-        resp.status().is_redirection(),
-        "/login?provider={provider} 应 3xx，实际: {}",
-        resp.status()
-    );
-    let location = resp
-        .headers()
-        .get("location")
-        .expect("/login 响应应有 location")
-        .to_str()
-        .unwrap()
-        .to_string();
-    assert!(
-        location.starts_with(&format!("{}/authorize", idp.url)),
-        "/login 应重定向到 {}/authorize，实际: {location}",
-        idp.url
-    );
-    // /login 会新建/更新会话 Cookie；回调必须携带同一会话
-    let cookie = extract_session_cookie(&resp)
-        .or_else(|| cookie.map(|c| c.to_string()))
-        .expect("login 后应有会话 Cookie");
-
-    // 2. 解析 authorize URL 的 state/nonce，写入 mock IdP（token 端点据此构造 id_token）
-    let auth_url = url::Url::parse(&location).unwrap();
-    let params: HashMap<_, _> = auth_url.query_pairs().into_owned().collect();
-    let state_param = params
-        .get("state")
-        .expect("authorize URL 应含 state")
-        .clone();
-    let nonce = params
-        .get("nonce")
-        .expect("authorize URL 应含 nonce")
-        .clone();
-    *idp.nonce.lock().unwrap() = Some(nonce);
-
-    // 3. 模拟 IdP 回调（popup=false → 302 重定向回站点）
-    let resp = client
-        .get(format!("{base}/auth/callback"))
-        .query(&[
-            ("code", "mock-code"),
-            ("state", &state_param),
-            ("provider", provider),
-        ])
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap();
-    if !resp.status().is_redirection() {
-        panic!(
-            "回调应 3xx（popup=false），实际: {} body: {}",
-            resp.status(),
-            resp.text().await.unwrap_or_default()
-        );
-    }
-    // cycle_id 轮换后返回新会话 id（缺失时沿用输入 Cookie，防御未来语义变化）
-    extract_session_cookie(&resp).unwrap_or(cookie)
-}
 
 /// `auth_required` 的 Proxy 路由（`strip_prefix`），供受保护路由断言使用。
 fn protected_proxy_route(path: &str, upstream: &str) -> RouteDef {
@@ -147,8 +54,8 @@ async fn site_a_login_does_not_grant_site_b_access() {
     let client = common::test_client();
 
     // A 登录 → 共享会话建立（Domain=.test 的 BFF_SESSION_V2）
-    let cookie = login_on(&client, &idp_a, &a, "pA", None).await;
-    assert!(cookie.starts_with(&format!("{SESSION_COOKIE}=")));
+    let cookie = common::login_on(&client, &idp_a, &a, "pA", None).await;
+    assert!(cookie.starts_with(&format!("{}=", common::SESSION_COOKIE)));
 
     // A：同一 Cookie 在 A 可用（对照）
     let resp = client
@@ -215,10 +122,10 @@ async fn site_b_silent_login_establishes_own_session() {
     let client = common::test_client();
 
     // A 先登录，建立共享会话
-    let cookie = login_on(&client, &idp_a, &a, "pA", None).await;
+    let cookie = common::login_on(&client, &idp_a, &a, "pA", None).await;
 
     // B 静默续登：同一 Cookie 走 B 自己的 provider（§7.3）
-    let cookie = login_on(&client, &idp_b, &b, "pB", Some(&cookie)).await;
+    let cookie = common::login_on(&client, &idp_b, &b, "pB", Some(&cookie)).await;
 
     // B 的 /api/session 显示 B 已登录
     let resp = client
@@ -330,8 +237,8 @@ async fn tokens_are_isolated_between_sites() {
     let client = common::test_client();
 
     // 同一共享会话先后在 A、B 登录
-    let cookie = login_on(&client, &idp_a, &a, "pA", None).await;
-    let cookie = login_on(&client, &idp_b, &b, "pB", Some(&cookie)).await;
+    let cookie = common::login_on(&client, &idp_a, &a, "pA", None).await;
+    let cookie = common::login_on(&client, &idp_b, &b, "pB", Some(&cookie)).await;
 
     // A 的路由用 token-A、B 的路由用 token-B；各自 200 且负样本零命中
     let resp = client
