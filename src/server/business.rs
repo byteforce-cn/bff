@@ -116,11 +116,11 @@ pub fn build_site_router(state: AppState, handle: Arc<SiteHandle>) -> anyhow::Re
     let app = app
         .route("/ready", get(readiness))
         .route("/api/session", get(session_info))
-        // 兼容旧 /pipeline/:name 路由（内部转为统一 Route 分发）
-        .route("/pipeline/:name", get(run_pipeline).post(run_pipeline))
+        // 兼容旧 /pipeline/{name} 路由（内部转为统一 Route 分发）
+        .route("/pipeline/{name}", get(run_pipeline).post(run_pipeline))
         // WebSocket 升级专用路由（在 fallback 之前匹配）
         .route("/ws", get(ws_upgrade_handler))
-        .route("/ws/*rest", get(ws_upgrade_handler))
+        .route("/ws/{*rest}", get(ws_upgrade_handler))
         .fallback(fallback_handler)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

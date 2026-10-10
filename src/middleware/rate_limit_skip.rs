@@ -58,7 +58,7 @@ pub struct RateLimitSkipState {
 /// 将配置语义「每秒 per_second 个令牌」换算为 tower-governor 的 `period`
 /// （**每 period 补 1 个令牌**）。
 ///
-/// ⚠️ tower-governor 0.4.x 的 `GovernorConfigBuilder::per_second(n)` 是
+/// ⚠️ tower-governor（0.4.x–0.8.x）的 `GovernorConfigBuilder::per_second(n)` 是
 /// 「每 **n 秒**补 1 个令牌」（周期语义），**不是**「每秒 n 个」。若把配置值直接
 /// 传入，限流会被收紧 n 倍（如默认 50/s 实际变成每 50 秒 1 个——burst 耗尽后
 /// 正常流量被长时间 429；20xx-xx 压测实验实测）。此处显式换算周期 = 1s / n。
@@ -121,7 +121,6 @@ pub fn rate_limit_skip_state(
                 .period(governor_period(per_second))
                 .burst_size(burst_size)
                 .key_extractor(ClientIpKeyExtractor { trusted_proxies })
-                .error_handler(governor_error_handler)
                 .finish()
                 .expect("限流配置非法"),
         ),
@@ -141,7 +140,9 @@ pub async fn rate_limit_skip_middleware(
         return next.run(request).await;
     }
     // 其余路径保持 tower-governor 全局限流（同一共享 limiter，状态跨请求一致）
-    let mut governor = Governor::new(next.clone(), &state.governor_conf);
+    // tower_governor 0.8：error_handler 由 builder 移至 Governor 服务本身。
+    let mut governor =
+        Governor::new(next.clone(), &state.governor_conf).error_handler(governor_error_handler);
     match governor.call(request).await {
         Ok(resp) => resp,
         // Next 的 Error 为 Infallible，限流器的 429 已由 governor 内部转为响应

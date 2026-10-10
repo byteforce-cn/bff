@@ -9,7 +9,7 @@ rust-version = "1.93"
 publish = false
 
 [dependencies]
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["fs", "cors", "trace", "compression-gzip", "limit", "request-id"] }
@@ -19,7 +19,7 @@ serde_yaml = "0.9"
 figment = { version = "0.10", features = ["yaml", "env"] }
 async-trait = "0.1"
 moka = { version = "0.12", features = ["future"] }
-tower-sessions = "0.12"
+tower-sessions = "0.15"
 # openidconnect 4.0 + oauth2 5 + reqwest 0.12 迁移：移除旧栈
 # （h2 0.3 / rustls 0.21 / rustls-webpki 0.101 / hyper 0.14），清零对应审计例外。
 # 注意：oauth2 5 起出网客户端直接传 `&reqwest::Client`（已实现 `AsyncHttpClient`），
@@ -36,8 +36,8 @@ metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4"] }
-tower_governor = "0.4"
-governor = "0.6"
+tower_governor = "0.8"
+governor = "0.10"
 ipnet = "2"
 url = "2"
 base64 = "0.23"

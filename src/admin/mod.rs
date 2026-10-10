@@ -31,28 +31,28 @@ pub fn build_admin_router(state: AppState) -> anyhow::Result<Router> {
         .route("/health", get(runtime_api::health))
         .route("/metrics", get(runtime_api::metrics))
         .route("/sessions", get(runtime_api::list_sessions))
-        .route("/sessions/:id", delete(runtime_api::delete_session))
+        .route("/sessions/{id}", delete(runtime_api::delete_session))
         .route("/sites", get(runtime_api::list_sites))
         .route("/config/export", get(config_api::export_config))
         .route("/config/import", post(config_api::import_config))
         .route("/oidc/providers", get(config_api::list_providers))
         .route(
-            "/oidc/providers/:id",
+            "/oidc/providers/{id}",
             put(config_api::update_provider).delete(config_api::delete_provider),
         )
         .route(
-            "/oidc/providers/:id/verify",
+            "/oidc/providers/{id}/verify",
             post(runtime_api::verify_provider),
         )
         .route(
             "/pipelines",
             get(config_api::list_pipelines).post(config_api::create_pipeline),
         )
-        .route("/pipelines/:name", delete(config_api::delete_pipeline))
-        .route("/pipelines/:name/test", post(runtime_api::test_pipeline))
+        .route("/pipelines/{name}", delete(config_api::delete_pipeline))
+        .route("/pipelines/{name}/test", post(runtime_api::test_pipeline))
         .route("/scripts", get(config_api::list_scripts))
-        .route("/scripts/:name", put(config_api::update_script))
-        .route("/scripts/:name/eval", post(config_api::eval_script))
+        .route("/scripts/{name}", put(config_api::update_script))
+        .route("/scripts/{name}/eval", post(config_api::eval_script))
         .route(
             "/routes",
             get(config_api::list_routes).put(config_api::update_routes),

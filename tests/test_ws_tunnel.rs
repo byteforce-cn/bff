@@ -98,13 +98,13 @@ async fn upstream_session(
 ) {
     let (mut sink, mut stream) = socket.split();
     if let Some(n) = oversize {
-        let _ = sink.send(AxMessage::Text("x".repeat(n))).await;
+        let _ = sink.send(AxMessage::Text("x".repeat(n).into())).await;
     }
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             AxMessage::Text(t) => {
                 if sink
-                    .send(AxMessage::Text(format!("echo:{t}")))
+                    .send(AxMessage::Text(format!("echo:{t}").into()))
                     .await
                     .is_err()
                 {

@@ -131,7 +131,7 @@ pub async fn ws_tunnel(
                                 Message::Close(c) => {
                                     let frame = c.map(|f| tungstenite::protocol::CloseFrame {
                                         code: tungstenite::protocol::frame::coding::CloseCode::from(f.code),
-                                        reason: f.reason,
+                                        reason: f.reason.to_string().into(),
                                     });
                                     let _ = upstream_sink.send(tungstenite::Message::Close(frame)).await;
                                     break;
@@ -178,14 +178,14 @@ pub async fn ws_tunnel(
                                 break;
                             }
                             let client_msg = match msg {
-                                tungstenite::Message::Text(t) => Message::Text(t),
-                                tungstenite::Message::Binary(b) => Message::Binary(b),
-                                tungstenite::Message::Ping(d) => Message::Ping(d),
-                                tungstenite::Message::Pong(d) => Message::Pong(d),
+                                tungstenite::Message::Text(t) => Message::Text(t.into()),
+                                tungstenite::Message::Binary(b) => Message::Binary(b.into()),
+                                tungstenite::Message::Ping(d) => Message::Ping(d.into()),
+                                tungstenite::Message::Pong(d) => Message::Pong(d.into()),
                                 tungstenite::Message::Close(c) => {
                                     let frame = c.map(|f| CloseFrame {
                                         code: f.code.into(),
-                                        reason: f.reason,
+                                        reason: f.reason.to_string().into(),
                                     });
                                     let _ = client_sink.send(Message::Close(frame)).await;
                                     break;
