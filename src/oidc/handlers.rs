@@ -3,6 +3,7 @@
 //! 站点上下文（§6.1 / §7.2 / §8）：所有入口显式携带站点视图，
 //! provider 选择、base_url 推导、令牌读写均按站点维度进行。
 use crate::config::{LogoutScope, OidcProviderConfig};
+use crate::middleware::host_validation::is_loopback_host;
 use crate::oidc::tokens::{flow_key, now_unix, session_key, StoredTokens};
 use crate::site::{SiteCtx, SiteHandle, SiteView};
 use crate::state::{AppState, SessionInfo};
@@ -209,16 +210,6 @@ fn base_url_from(headers: &HeaderMap, site: &SiteView) -> Result<String, AppErro
 /// 不参与 redirect_uri 下发）。
 pub fn canonical_base_url(site: &SiteView) -> String {
     site.canonical_base_url()
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let host = host.trim();
-    let hostname = if let Some(rest) = host.strip_prefix('[') {
-        rest.split(']').next().unwrap_or_default()
-    } else {
-        host.split(':').next().unwrap_or_default()
-    };
-    matches!(hostname, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// 计算授权请求的附加 scope 列表。

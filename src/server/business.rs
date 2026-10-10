@@ -178,9 +178,16 @@ pub fn build_site_router(state: AppState, handle: Arc<SiteHandle>) -> anyhow::Re
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             cfg.body_limit.max_bytes,
         ))
-        .with_state(state);
-    // 站点句柄 Extension：最后调用 `.layer` → 最外层
-    Ok(app.layer(axum::Extension(handle)))
+        .with_state(state.clone());
+    // Host 白名单（§6.3）：非豁免路径 Host 不命中 → 421。层序敏感：位于站点句柄
+    // Extension 之内、session layer 之外——先于会话建立执行，伪造 Host 不建立会话。
+    // 站点句柄 Extension 最后调用 `.layer` → 最外层。
+    Ok(app
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::middleware::host_validation::host_validation_middleware,
+        ))
+        .layer(axum::Extension(handle)))
 }
 
 /// legacy 模式便利入口（§6.1）：`cfg.sites` 非空时拒绝——显式多站点配置必须
