@@ -7,6 +7,12 @@ metadata:
 spec:
   replicas: 2
   revisionHistoryLimit: 5
+  # 迁移窗口策略（§11.3）：切换 `sites` 配置并轮换 cookie 名、引入 Domain cookie 的
+  # 那次发布推荐改为 `type: Recreate`——一次性短暂停机换取确定性，避免新旧 Pod 各自
+  # 读写不同 cookie 名（BFF_SESSION / BFF_SESSION_V2），导致同一用户在混版窗口反复重认证。
+  # 下方的 RollingUpdate 适用于无 Cookie / redirect 语义变更的常规发布；若迁移也必须
+  # 滚动，则须接受“滚动期间部分用户可能经历多次重认证”（文档声明），建议低峰执行。
+  # 任一策略下 Ingress/Service 在切换期间保持不变。
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -36,9 +42,14 @@ spec:
         - name: bff
           image: ghcr.io/byteforce-cn/bff:latest
           imagePullPolicy: IfNotPresent
+          # 显式多站点：每个站点一个业务端口（与 sites[].port 一一对应），admin 独立。
+          # 端口属基础设施契约：站点端口变更属结构变更（§5.6），须同步 Deployment /
+          # Service / Ingress，并触发配置指纹的 requires_restart。
           ports:
-            - name: business
-              containerPort: 8080
+            - name: app1
+              containerPort: 8081
+            - name: app2
+              containerPort: 8082
             - name: admin
               containerPort: 8443
           envFrom:
@@ -47,9 +58,14 @@ spec:
           env:
             - name: BFF_ENV
               value: "prod"
-            # 固定对外地址（redirect_uri 不再依赖 Host 头）
-            - name: BFF_SERVER__PUBLIC_BASE_URL
-              value: "https://bff.example.com"
+            # 显式多站点（§5.4 第 6 条）：`server.public_base_url` / `server.trusted_hosts`
+            # 为 dead config（非空即启动失败），每站点的对外地址改由 `sites[].public_base_url`
+            # 提供（prod 必填，redirect_uri 一律由此推导）。
+            # `sites` 为数组，figment 环境变量注入仅支持标量（见 deploy/https compose 注释），
+            # 故站点及其 public_base_url 经挂载的 ConfigMap / 运行时配置提供（见下方 volumes
+            # 的 config 挂载示例），此处不再设置 BFF_SERVER__PUBLIC_BASE_URL。
+            # - name: BFF_SERVER__PUBLIC_BASE_URL
+            #   value: "https://bff.example.com"
             # 配置持久化（共享存储时多副本收敛）
             - name: BFF_PERSISTENCE__ENABLED
               value: "true"
@@ -63,21 +79,25 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /data/bff
-            # 如通过 ConfigMap 管理声明式配置（routes/pipelines/oidc），整目录挂载：
+            # 如通过 ConfigMap 管理声明式配置（sites/routes/pipelines/oidc），整目录挂载：
+            # 例如 base.yaml 内声明 sites[].port: 8081/8082 与各自的 public_base_url，
+            # 与上方 containerPort / Service / Ingress 保持一致。
             # - name: config
             #   mountPath: /app/config
             #   readOnly: true
+          # 探针打任一业务端口即可：/live、/ready 站点无关且豁免 Host 校验（§6.3/§11.1）；
+          # 示例取 app1 站点端口。
           startupProbe:
-            httpGet: { path: /live, port: business }
+            httpGet: { path: /live, port: app1 }
             periodSeconds: 2
             failureThreshold: 30
           livenessProbe:
-            httpGet: { path: /live, port: business }
+            httpGet: { path: /live, port: app1 }
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /ready, port: business }
+            httpGet: { path: /ready, port: app1 }
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
