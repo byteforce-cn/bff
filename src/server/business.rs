@@ -24,21 +24,28 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tower_sessions::Session;
 
-pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
+/// §6.1 多站点主路径：按站点句柄构建业务路由（每个 listener 一个 router）。
+///
+/// 路由与 handler 与 legacy 完全一致；站点差异全部由最外层注入的
+/// `Extension<Arc<SiteHandle>>` 驱动：session 层取 `handle.session_layer`，
+/// 安全响应头 / SPA 目录 / metrics site 标签 / 站点令牌鉴权按请求从 `SiteView`
+/// 解析（配置热生效，§9/§10）。
+pub fn build_site_router(state: AppState, handle: Arc<SiteHandle>) -> anyhow::Result<Router> {
+    // §6.1：站点上下文（handler 闭包内用 Extension 重新取句柄构造 SiteCtx；
+    // 视图必须每请求解析，此处仅用于启动期存在性校验与日志）
+    let site = SiteCtx {
+        handle: handle.as_ref(),
+        view: state.site_view(&handle.name).expect("site view 必须存在"),
+    };
+    tracing::debug!(
+        site = %site.view.name,
+        port = site.view.port,
+        "构建站点业务路由"
+    );
+
     let cfg = state.cfg().clone();
-    // §5.2：会话层启动时按 profile 预构建（legacy 路径取 default profile）
-    let session_layer = state
-        .session_layers
-        .get("default")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("缺少 default 会话 profile 的 Session 层"))?;
-    // §6.1：legacy 便利入口注入 default 站点句柄，Extension 作为最外层
-    // （TraceLayer / 中间件 / handler 均能读到站点上下文）。
-    let handle = state
-        .site_handles()?
-        .into_iter()
-        .find(|h| h.legacy)
-        .ok_or_else(|| anyhow::anyhow!("缺少 legacy default 站点句柄"))?;
+    // §5.2：会话层启动时按 profile 预构建，站点 router 用句柄引用的层
+    let session_layer = handle.session_layer.clone();
 
     // Trace ID: 为每个请求生成 UUID 并传播到响应头
     let request_id_layer = SetRequestIdLayer::new(
@@ -75,8 +82,8 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .allow_credentials(true)
     };
 
-    // 安全响应头中间件
-    let sec_headers = cfg.security_headers.clone();
+    // 安全响应头由 `security_headers_middleware` 按请求站点应用（§9），
+    // 不再在构建期克隆全局配置。
 
     // gzip 压缩（原依赖 tower-http "compression-gzip" 特性但从未挂载 CompressionLayer）。
     // 谓词排除 `text/event-stream`：SSE 需要逐块低延迟，不能被压缩缓冲。
@@ -162,66 +169,10 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
             state.clone(),
             crate::middleware::ip_rate_limit::ip_rate_limit_middleware,
         ))
-        // 安全响应头
-        .layer(axum::middleware::from_fn(
-            move |req: axum::http::Request<Body>, next: axum::middleware::Next| {
-                let headers = sec_headers.clone();
-                async move {
-                    let path = req.uri().path().to_string();
-                    let mut resp = next.run(req).await;
-                    let h = resp.headers_mut();
-                    if !headers.content_security_policy.is_empty() {
-                        // 按路径前缀细分 CSP：最长前缀命中优先，未命中回退全局
-                        let csp = headers
-                            .csp_overrides
-                            .iter()
-                            .filter(|o| path.starts_with(&o.path_prefix))
-                            .max_by_key(|o| o.path_prefix.len())
-                            .map(|o| o.content_security_policy.as_str())
-                            .unwrap_or(headers.content_security_policy.as_str());
-                        h.insert(
-                            axum::http::HeaderName::from_static("content-security-policy"),
-                            csp.parse::<axum::http::HeaderValue>().unwrap(),
-                        );
-                    }
-                    if !headers.x_frame_options.is_empty() {
-                        h.insert(
-                            axum::http::HeaderName::from_static("x-frame-options"),
-                            headers
-                                .x_frame_options
-                                .parse::<axum::http::HeaderValue>()
-                                .unwrap(),
-                        );
-                    }
-                    if !headers.x_content_type_options.is_empty() {
-                        h.insert(
-                            axum::http::HeaderName::from_static("x-content-type-options"),
-                            headers
-                                .x_content_type_options
-                                .parse::<axum::http::HeaderValue>()
-                                .unwrap(),
-                        );
-                    }
-                    if headers.hsts_max_age > 0 {
-                        h.insert(
-                            axum::http::HeaderName::from_static("strict-transport-security"),
-                            format!("max-age={}", headers.hsts_max_age)
-                                .parse::<axum::http::HeaderValue>()
-                                .unwrap(),
-                        );
-                    }
-                    if !headers.referrer_policy.is_empty() {
-                        h.insert(
-                            axum::http::HeaderName::from_static("referrer-policy"),
-                            headers
-                                .referrer_policy
-                                .parse::<axum::http::HeaderValue>()
-                                .unwrap(),
-                        );
-                    }
-                    resp
-                }
-            },
+        // 安全响应头（§9：按请求站点读预构建值，零解析成本）
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            security_headers_middleware,
         ))
         // 请求体大小限制
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
@@ -230,6 +181,22 @@ pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
         .with_state(state);
     // 站点句柄 Extension：最后调用 `.layer` → 最外层
     Ok(app.layer(axum::Extension(handle)))
+}
+
+/// legacy 模式便利入口（§6.1）：`cfg.sites` 非空时拒绝——显式多站点配置必须
+/// 逐站点调用 `build_site_router`；否则取 legacy `default` 句柄委托
+/// （现有测试与嵌入方零改动）。
+pub fn build_business_router(state: AppState) -> anyhow::Result<Router> {
+    let cfg = state.cfg().clone();
+    if !cfg.sites.is_empty() {
+        anyhow::bail!("显式多站点配置请使用 build_site_router");
+    }
+    let handle = state
+        .site_handles()?
+        .into_iter()
+        .find(|h| h.legacy)
+        .ok_or_else(|| anyhow::anyhow!("缺少 legacy default 站点句柄"))?;
+    build_site_router(state, handle)
 }
 
 /// GET /live — K8s liveness probe：仅检查进程存活
@@ -337,16 +304,18 @@ async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
 }
 
 /// GET /api/session — 返回当前会话状态（供前端 JS 读取，因为 cookie 是 HttpOnly）。
-/// 站点感知（§7.2）：logged_in = 站点当前 provider 有令牌。
+/// 站点感知（§7.2）：logged_in = 站点当前 provider 有令牌；provider 为站点维度
+/// current provider（未登录时为 null，兼容 legacy 响应形状）。
 async fn session_info(
     State(state): State<AppState>,
     Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
 ) -> Json<serde_json::Value> {
     let view = state.site_view(&handle.name).expect("site view");
-    let logged_in = view.current_provider(&session).await.is_some();
+    let provider = view.current_provider(&session).await;
     Json(serde_json::json!({
-        "logged_in": logged_in,
+        "logged_in": provider.is_some(),
+        "provider": provider,
     }))
 }
 
@@ -522,7 +491,23 @@ async fn serve_spa(view: &SiteView, req: Request<Body>) -> Response {
     }
 }
 
-/// 请求计数指标（路径标签低基数化）。
+/// 安全响应头中间件（§9）：按请求站点从 `SiteView` 读预构建值并应用——
+/// 请求路径零字符串解析 / 零 `HeaderValue` 构造；站点覆盖（含 CSP 整体替换）
+/// 随配置热生效。
+async fn security_headers_middleware(
+    State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let view = state.site_view(&handle.name).expect("site view");
+    let mut resp = next.run(req).await;
+    view.security_headers.apply(&path, resp.headers_mut());
+    resp
+}
+
+/// 请求计数指标（路径标签低基数化，site 标签由站点句柄决定，§10）。
 ///
 /// 原实现直接用原始 URL path 作为标签：任何扫描器路径（`/.env`、`/wp-login.php` …）
 /// 都会经 SPA fallback 返回并被计数 → 攻击者可用任意 URL 无界撑大标签基数。
@@ -535,15 +520,21 @@ async fn metrics_middleware(
     next: axum::middleware::Next,
 ) -> Response {
     let method = req.method().to_string();
-    let path = metrics_path_label(&state, &handle.name, req.uri().path());
+    let raw_path = req.uri().path().to_string();
+    let path = metrics_path_label(&state, &handle.name, &raw_path);
     let start = std::time::Instant::now();
     let resp = next.run(req).await;
+    // §10：K8s 探针不进入业务请求指标（会污染低频站点的 P95/P99）
+    if is_probe_path(&raw_path) {
+        return resp;
+    }
     let status = resp.status().as_u16().to_string();
     // 全局请求延迟直方图（Prometheus 侧可算 P50/P95/P99）
     metrics::histogram!(
         "bff_http_request_duration_seconds",
         "method" => method.clone(),
         "path" => path.clone(),
+        "site" => handle.name.clone(),
     )
     .record(start.elapsed().as_secs_f64());
     metrics::counter!(
@@ -551,9 +542,15 @@ async fn metrics_middleware(
         "method" => method,
         "path" => path,
         "status" => status,
+        "site" => handle.name.clone(),
     )
     .increment(1);
     resp
+}
+
+/// 探针路径判定（§10）：`/live`、`/ready` 不计入业务请求指标。
+fn is_probe_path(path: &str) -> bool {
+    path == "/live" || path == "/ready"
 }
 
 /// 将请求路径归一化为有限标签集（含路由模板与固定路径），防止基数爆炸。

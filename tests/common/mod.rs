@@ -2,9 +2,11 @@
 #![allow(dead_code)]
 
 use bff::config::{
-    AdminConfig, AppConfig, LogoutScope, OidcProviderConfig, OidcSection, ProviderConfig,
-    ServerConfig, SessionConfig, SiteConfig, SiteOidcConfig, SpaConfig, TokenRefreshConfig,
+    AdminConfig, AppConfig, InputMapping, LogoutScope, OidcProviderConfig, OidcSection,
+    OutputMapping, ProviderConfig, RouteDef, RouteType, RouteTypeConfig, ServerConfig,
+    SessionConfig, SiteConfig, SiteOidcConfig, SpaConfig, TokenRefreshConfig,
 };
+use bff::site::SiteHandle;
 use bff::state::AppState;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -52,6 +54,24 @@ pub fn make_state(mut cfg: AppConfig) -> AppState {
 pub async fn spawn_business(state: AppState) -> String {
     let router = bff::server::business::build_business_router(state).expect("构建业务路由失败");
     spawn(router).await
+}
+
+/// 按站点名启动业务端口（绑定随机端口），返回 base URL（§6.1 多站点夹具）。
+pub async fn spawn_site(state: &AppState, name: &str) -> String {
+    let handle = site_handle(state, name);
+    let router =
+        bff::server::business::build_site_router(state.clone(), handle).expect("构建站点路由失败");
+    spawn(router).await
+}
+
+/// 按站点名取启动期构建的站点句柄（§6.1；不存在则 panic）。
+pub fn site_handle(state: &AppState, name: &str) -> Arc<SiteHandle> {
+    state
+        .site_handles()
+        .expect("构建站点句柄失败")
+        .into_iter()
+        .find(|h| h.name == name)
+        .unwrap_or_else(|| panic!("站点 [{name}] 句柄不存在"))
 }
 
 /// 启动管理端口（绑定随机端口），返回 base URL。
@@ -248,6 +268,26 @@ pub fn multisite_config(idp_a: &MockIdp, idp_b: &MockIdp) -> AppConfig {
         multisite_provider_cfg(idp_b, "pB"),
     ];
     cfg
+}
+
+/// 站点限定 Static 路由（§5.3）：`sites` 过滤，用于验证 per-site 路由隔离。
+///
+/// 响应体为 JSON `{ "ok": true, "site": <站点名> }`，命中时返回 200。
+pub fn route_with_site(path: &str, site: &str) -> RouteDef {
+    RouteDef {
+        sites: vec![site.into()],
+        path: path.into(),
+        methods: vec![],
+        description: String::new(),
+        auth_required: false,
+        route_type: RouteType::Static,
+        config: RouteTypeConfig {
+            body: Some(serde_json::json!({ "ok": true, "site": site })),
+            ..Default::default()
+        },
+        input_mapping: InputMapping::default(),
+        output_mapping: OutputMapping::default(),
+    }
 }
 
 fn site_cfg(name: &str, port: u16, provider: &str) -> SiteConfig {
