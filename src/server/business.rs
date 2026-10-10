@@ -556,7 +556,7 @@ async fn metrics_middleware(
 }
 
 /// 探针路径判定（§10）：`/live`、`/ready` 不计入业务请求指标。
-fn is_probe_path(path: &str) -> bool {
+pub(crate) fn is_probe_path(path: &str) -> bool {
     path == "/live" || path == "/ready"
 }
 
@@ -588,4 +588,21 @@ fn metrics_path_label(state: &AppState, site: &str, path: &str) -> String {
         return "/ws/*".to_string();
     }
     "other".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_probe_path;
+
+    /// §10：探针路径不计入业务请求指标（端到端断言见
+    /// `tests/test_multi_site_runtime.rs::metrics_carry_site_label_and_probes_are_excluded`）。
+    #[test]
+    fn probe_paths_are_excluded_from_business_metrics() {
+        assert!(is_probe_path("/live"));
+        assert!(is_probe_path("/ready"));
+        assert!(!is_probe_path("/api/x"));
+        // 前缀相同但不等于探针路径的请求仍进入业务指标
+        assert!(!is_probe_path("/livez"));
+        assert!(!is_probe_path("/ready.html"));
+    }
 }

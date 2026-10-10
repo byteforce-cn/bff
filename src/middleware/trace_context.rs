@@ -152,6 +152,8 @@ impl<B> MakeSpan<B> for BffMakeSpan {
             "http.method" = %request.method(),
             "http.target" = %request.uri().path(),
             "http.status_code" = tracing::field::Empty,
+            // §10/§14：日志/追踪带站点名；无站点 Extension 时回退 "-"
+            "bff.site" = %request_site_name(request),
         );
         if let Some(parent) = request
             .headers()
@@ -167,6 +169,18 @@ impl<B> MakeSpan<B> for BffMakeSpan {
         }
         span
     }
+}
+
+/// §10/§14：从请求扩展读取站点名。`server::business` 以最外层的
+/// `axum::Extension(Arc<SiteHandle>)` 注入，axum 0.7 直接以 `Arc<SiteHandle>` 为键
+/// 存于 request extensions（`Extension<T>` 提取器读取的即 `T`），故 span 创建时可见；
+/// 缺失（legacy 直接构造 / 层外）时回退 `"-"`。
+fn request_site_name<B>(request: &Request<B>) -> String {
+    request
+        .extensions()
+        .get::<std::sync::Arc<crate::site::SiteHandle>>()
+        .map(|handle| handle.name.clone())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 /// 响应阶段补充记录 `http.status_code`（保留默认的完成日志）。
@@ -225,5 +239,44 @@ mod tests {
         assert_eq!(root.trace_id, child.trace_id);
         assert_ne!(root.span_id, child.span_id);
         assert!(child.sampled);
+    }
+
+    /// §10/§14：`BffMakeSpan` 构造的 span 带 `bff.site` 字段；请求无站点 Extension
+    /// （legacy 直接构造 / Extension 层之外）时回退为 `"-"`。
+    #[test]
+    fn make_span_records_site_field_with_fallback() {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id};
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+
+        #[derive(Clone)]
+        struct CaptureSite(Arc<Mutex<Option<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureSite {
+            fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+                struct Visitor(Arc<Mutex<Option<String>>>);
+                impl Visit for Visitor {
+                    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                        if field.name() == "bff.site" {
+                            *self.0.lock().unwrap() = Some(format!("{value:?}"));
+                        }
+                    }
+                }
+                attrs.record(&mut Visitor(self.0.clone()));
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(None));
+        let subscriber = tracing_subscriber::registry().with(CaptureSite(captured.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let request = Request::builder().body(()).expect("构造请求");
+            let _span = BffMakeSpan.make_span(&request);
+        });
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("-"),
+            "无站点 Extension 时 bff.site 应回退为 \"-\""
+        );
     }
 }
