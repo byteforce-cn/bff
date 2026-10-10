@@ -42,7 +42,7 @@
 ## Not Ready（readiness 失败/无可用副本）
 
 1. `kubectl describe pod` 看探针失败原因；
-2. 手动复现：`curl -s http://<pod>:8080/ready | jq`；
+2. 手动复现：`curl -s http://<pod>:8080/ready | jq`（多站点探针打任一业务端口，如 `app1:8081`）；
    `upstreams_unreachable > 0` → 按 `health.upstreams` 清单逐个排查；
 3. 上游抖动导致全副本同时 503：确认 `health.allow_degraded` 语义是否符合期望
    （当前为 false 即严格模式）；
@@ -72,6 +72,34 @@
 
 ---
 
+## 多站点（Multi-site）
+
+### 配置导入返回 `requires_restart`
+
+管理端 import（`POST /admin/api/config/import`，版本化路径为 `POST /admin/api/v1/config/import`）对含**启动物化字段**变更的配置返回
+`{"status": "requires_restart", "hot_applied": [...], "requires_restart": [...]}`，**不替换运行配置、
+不落盘**（设计 §5.6）：
+
+1. 阅读 `requires_restart` 清单（字段路径，如 `sites[app1].port`、
+   `session_profiles[default].cookie_name`）；
+2. 这些变更只能通过**重启 / 滚动发布**生效——涉及 `sites[].port` 时先同步 Deployment / Service /
+   Ingress（端口属结构变更）；
+3. 落盘：重启前将新配置写入配置文件 / ConfigMap，或在重启后重新 import（此时不再报
+   `requires_restart`）；
+4. watcher 检测到结构差异同样只告警、不应用（保持旧配置），勿依赖热重载生效。
+
+### 管理端删除会话 = 全站踢出
+
+共享会话（同一 `session_profile`，如 `cookie_domain: .example.com`）下，
+`DELETE /admin/api/sessions/:id`（管理台「删除会话」）清掉该会话的**全部站点 token**，等效于
+**该用户在所有站点被踢出**。管理台按钮已提示此语义；运维执行前确认影响范围（用户下次访问任一站点
+需重新登录）。`GET /admin/api/sites` 返回站点清单（`name` / `port` / `public_base_url` /
+`default_provider` / `providers` / `session_profile` / `logout_scope` / `legacy`）；
+`GET /admin/api/sessions` 的每项现携带 `sites` / `providers`（当前会话实际持有 token 的站点与
+provider 集合）。
+
+---
+
 ## 配置相关应急操作
 
 | 操作 | 步骤 |
@@ -80,3 +108,5 @@
 | 强制放弃运行时覆盖 | 停止实例 → 移除/备份 `runtime.yaml` → 重启（回落到 base/env 配置） |
 | 密钥轮换 | 走 `docs/deployment.md` 的「迁移预警」：与 Session 迁移合并窗口执行，重启生效，全员重登 |
 | 恢复单实例形态 | 临时置 `provider.*=memory` **仅限已声明风险的单副本环境**；prod 防呆会拒绝，需同时改环境标记（不建议） |
+| 导入报 `requires_restart` | 变更属启动物化字段（如 `sites[].port`、profile cookie 策略）；见「多站点」节，走滚动发布 / 重启，不落盘 |
+| 回滚多站点配置 | 删除 `sites` / `session_profiles` 并还原 `session.cookie_name`；Domain cookie 忽略后自然过期，手动下发 `Max-Age=0` 可立即清理（详见 [deployment.md](deployment.md) §7.4） |

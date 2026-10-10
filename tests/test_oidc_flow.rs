@@ -24,6 +24,7 @@ async fn oidc_full_login_flow() {
     let mut cfg = common::base_config();
     cfg.oidc.providers.push(common::mock_provider_cfg(&idp));
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/api/users".into(),
         methods: vec![],
         description: String::new(),

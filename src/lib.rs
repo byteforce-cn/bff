@@ -1,11 +1,13 @@
 pub mod admin;
 pub mod config;
+pub mod config_fingerprint;
 pub mod middleware;
 pub mod oidc;
 pub mod orchestration;
 pub mod provider;
 pub mod scripting;
 pub mod server;
+pub mod site;
 pub mod state;
 pub mod telemetry;
 pub mod utils;

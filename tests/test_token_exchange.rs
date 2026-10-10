@@ -26,6 +26,7 @@ const AS_PATH: &str = "/oauth2/token";
 
 fn exchange_route(upstream: &str, te: TokenExchangeConfig) -> RouteDef {
     RouteDef {
+        sites: vec![],
         path: "/ex".into(),
         methods: vec![],
         description: "token exchange 代理".into(),
@@ -128,6 +129,8 @@ async fn t1_exchange_token_injected_to_upstream() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes
         .push(exchange_route(&upstream.uri(), te_cfg(&as_server.uri())));
     let state = make_state(cfg);
@@ -186,6 +189,8 @@ async fn t2_cache_reuse_single_exchange() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes
         .push(exchange_route(&upstream.uri(), te_cfg(&as_server.uri())));
     let state = make_state(cfg);
@@ -230,6 +235,8 @@ async fn t3_ttl_expires_re_exchange() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes
         .push(exchange_route(&upstream.uri(), te_cfg(&as_server.uri())));
     let state = make_state(cfg);
@@ -313,7 +320,10 @@ async fn t4_session_refresh_re_exchanges() {
     assert_eq!(as_count(&as_server).await, 1);
 
     // 会话刷新 → subject token 变化 → 缓存键变化 → 再次交换（exchanged-2）
-    bff::oidc::handlers::force_refresh(&state, &session, &tokens)
+    let site = state
+        .site_view("default")
+        .expect("legacy default 站点视图应存在");
+    bff::oidc::handlers::force_refresh(&state, &site, &session, &tokens)
         .await
         .unwrap()
         .expect("刷新应成功");
@@ -351,7 +361,10 @@ async fn t5_without_exchange_injects_session_token() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes.push(RouteDef {
+        sites: vec![],
         path: "/plain".into(),
         methods: vec![],
         description: "普通代理".into(),
@@ -480,6 +493,8 @@ async fn t7_access_denied_returns_401_no_retry() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes
         .push(exchange_route(&upstream.uri(), te_cfg(&as_server.uri())));
     let state = make_state(cfg);
@@ -523,6 +538,8 @@ async fn t8_token_endpoint_5xx_returns_502() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes
         .push(exchange_route(&upstream.uri(), te_cfg(&as_server.uri())));
     let state = make_state(cfg);
@@ -569,6 +586,8 @@ async fn t9a_client_secret_basic() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.routes
         .push(exchange_route(&upstream.uri(), te_cfg(&as_server.uri())));
     let state = make_state(cfg);
@@ -622,6 +641,8 @@ async fn t9b_client_secret_post() {
         .await;
 
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     let mut te = te_cfg(&as_server.uri());
     te.client_auth_method = TokenExchangeAuthMethod::ClientSecretPost;
     cfg.routes.push(exchange_route(&upstream.uri(), te));

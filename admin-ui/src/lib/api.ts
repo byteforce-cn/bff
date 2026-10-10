@@ -86,6 +86,7 @@ export async function verifyToken(): Promise<boolean> {
 export const health = () => request("/health");
 export const metrics = () => request<string>("/metrics");
 export const listSessions = () => request("/sessions");
+export const listSites = () => request("/sites");
 export const revokeSession = (id: string) =>
   request(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
 

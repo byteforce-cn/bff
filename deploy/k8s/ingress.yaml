@@ -15,10 +15,15 @@ metadata:
 spec:
   ingressClassName: nginx
   tls:
-    - hosts: ["bff.example.com"]
+    # 每个站点子域一张证书（正式环境可用同一泛域名证书；cert-manager 会自动申请）。
+    - hosts: ["app1.example.com", "app2.example.com"]
       secretName: bff-tls
+  # 每个站点一个 host 规则 → 对应 Service 端口（§11.1）；TLS 在 Ingress 终止。
+  # 注意：Host 不命中站点允许主机（server_names ∪ public_base_url 主机）时由 BFF
+  # 返回 421 Misdirected Request（§6.3）；nginx-ingress 默认 proxy_next_upstream 为
+  # `error timeout`，不含 `http_421`，不会因此重试（自定义列表时需保持这一点）。
   rules:
-    - host: bff.example.com
+    - host: app1.example.com
       http:
         paths:
           - path: /
@@ -27,4 +32,14 @@ spec:
               service:
                 name: bff
                 port:
-                  number: 8080
+                  number: 8081
+    - host: app2.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bff
+                port:
+                  number: 8082

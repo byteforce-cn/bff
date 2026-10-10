@@ -215,7 +215,7 @@ async fn provider_verify_and_delete() {
     bad.id = "unreachable".into();
     bad.issuer_url = "http://127.0.0.1:1".into();
     cfg2.oidc.providers.push(bad);
-    state.replace_config(cfg2).unwrap();
+    state.apply_config(cfg2).await.unwrap();
     let resp = client
         .post(format!(
             "{}/admin/api/v1/oidc/providers/unreachable/verify",

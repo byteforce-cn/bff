@@ -22,6 +22,7 @@ use std::collections::HashMap;
 /// 构造测试路由（默认 auth_required=false，空映射，无方法限制）。
 fn route(path: &str, route_type: RouteType, config: RouteTypeConfig) -> RouteDef {
     RouteDef {
+        sites: vec![],
         path: path.into(),
         methods: vec![],
         description: String::new(),
@@ -245,6 +246,8 @@ async fn pipeline_route_reference_and_missing_cases() {
 #[tokio::test]
 async fn script_route_extracts_inputs_across_sources() {
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     let mut r = route(
         "/api/dt/users",
         RouteType::Script,
@@ -415,6 +418,8 @@ fn proxy_route_without_upstream_rejected_at_validation() {
 #[tokio::test]
 async fn auth_required_route_rejects_anonymous_and_allows_session() {
     let mut cfg = base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     let mut r = route(
         "/api/dt/private",
         RouteType::Static,

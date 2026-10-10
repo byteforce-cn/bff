@@ -3,12 +3,14 @@
 BFF（Backend-For-Frontend）是前端与下游服务之间的可配置中间层：把登录 / 会话 / 鉴权收口、
 把多个下游服务聚合编排成面向页面的接口，并以声明式配置接入新路由，而不是为每条链路写定制网关。
 
-实现为**单二进制进程**（Rust / Axum），同时监听两个端口：
+实现为**单二进制进程**（Rust / Axum）：legacy 模式监听一个业务端口（`:8080`）与管理端口
+（`:8443`）；**显式多站点**（`sites` 非空）下每个站点一个业务端口（如 `:8081` / `:8082`），
+管理端口保持全局单实例。
 
 | 端口 | 面 | 内容 |
 | --- | --- | --- |
-| `:8080` | 业务面 | OIDC 端点、统一路由分发（proxy / pipeline / script / static）、SPA 托管、SSE / WebSocket |
-| `:8443` | 管理面 | 管理 API（配置 / Provider / Pipeline / 脚本 / 会话）、Prometheus 指标、内嵌管理台 |
+| `:8080`（legacy）/ `:8081`、`:8082`…（多站点） | 业务面 | OIDC 端点、统一路由分发（proxy / pipeline / script / static）、SPA 托管、SSE / WebSocket |
+| `:8443` | 管理面 | 管理 API（配置 / Provider / Pipeline / 脚本 / 会话 / 站点）、Prometheus 指标、内嵌管理台 |
 
 ## 总览
 
@@ -58,6 +60,28 @@ flowchart LR
   （缓存键包含调用参数指纹，避免跨用户串数据）；
 - **script**：QuickJS 沙箱执行（时长上限默认 2s，内存 / 栈限制，`spawn_blocking` 隔离）。
 
+## 多站点运行时
+
+显式多站点（`sites` 非空）下运行时分为两层，并以显式参数 `SiteCtx` 传递（**不使用隐式
+Extension 作为唯一来源**）：
+
+| 类型 | 性质 | 内容 |
+| --- | --- | --- |
+| `SiteHandle` | 静态（启动时构建） | `name` / `port` / `bind` / `session_profile` 引用与已构建的 `SessionManagerLayer`；站点 router 挂 `Extension<Arc<SiteHandle>>` |
+| `SiteView` | 动态（每请求按站点名解析） | `server_names` / `public_base_url` / `spa.dir` / provider 绑定 / `security_headers`（预构建 `HeaderMap`）/ `logout_scope` |
+| `SiteCtx` | 传参载体 | `SiteHandle` + `Arc<SiteView>`；沿 `dispatch → proxy / token_exchange / pipeline / ws` 传递 |
+
+- 路由入口：`build_site_router(state, handle)`（多站点主路径）与 `build_business_router(state)`
+  （legacy 便利入口，内部合成 `default` 站点，现有测试零改动）；
+- **多 listener**：`src/main.rs` 由 `sites[]`（或 legacy 合成）循环 bind，每个站点一个 router，
+  共享单一信号源；**任一 listener bind 失败 → 启动失败**；
+- **异常退出即全局关停**：任一 listener 的 accept 循环意外退出（未请求关闭即结束、返回错误或
+  panic）时，触发全局优雅关闭并退出进程（错误 `服务 {name} 意外退出`），由 K8s 重启——不允许
+  “部分站点静默不可用而 Pod 仍 Ready”；
+- **优雅停机**：收到 SIGTERM/SIGINT 后停止接受新连接，排空至多 **30s** 再退出；
+- **Host 校验**：非豁免路径 Host 不命中有效白名单（`server_names ∪ {public_base_url 主机}`）→
+  **421 Misdirected Request**；`/live`、`/ready` 无条件豁免；校验在 session layer 之前执行。
+
 ## OIDC 与会话
 
 - 授权码流程 + **PKCE（S256）** + `state` / `nonce`；ID Token 走真实 JWKS 验签（RS256），
@@ -65,7 +89,11 @@ flowchart LR
 - **回调地址恒定**：`redirect_uri` 一律由 `server.public_base_url` 推导，**绝不信任 Host 头**；
   未配置时回退 `trusted_hosts` 白名单（`BFF_ENV=prod` 强制二者至少其一）；
   OIDC 客户端缓存的键包含 `(provider, base_url)`，避免首个调用者固化回调地址；
-- 回调路径按 provider 配置在启动时动态注册（`callback_path`，默认 `/auth/callback`）；
+- 回调路径按 provider 配置在启动时动态注册（`callback_path`，默认 `/auth/callback`）；同一站点绑定的
+  provider `callback_path` 必须唯一（legacy 合成站点豁免）；
+- **站点感知**：`select_provider` 限定站点 `allowed_providers`（`?provider=` 越站返回 400 且不回退默认）；
+  `current_tokens` / `canonical_base_url` / 令牌刷新均按站点运行（`oidc:{site}:current_provider`）；
+  登出按 `sites[].logout_scope`：`global` 清全站 + RP-Initiated Logout，`site` 仅清本站点且不触发 IdP 登出；
 - 令牌加密存储于会话（AES-256-GCM）；刷新为 SWR + 分布式锁；登出优先使用 discovery 的
   `end_session_endpoint`，失败回退本地清会话；
 - 会话 Cookie：`HttpOnly` + `Secure` + `SameSite=Lax`（跨站点 IdP 场景；同站 IdP 可显式改回 `Strict`）；
@@ -75,8 +103,9 @@ flowchart LR
 
 - 独立端口 + **IP 白名单**（每请求实时读取）+ `X-Admin-Token` / `Bearer` 认证
   （常量时间比较；失败按来源 IP 计数限流）；
-- API 分组：配置导入 / 导出（自动脱敏 + `***` 哨兵回填）、热重载与**落盘持久化**、
-  Provider（含连通性验证与删除）、Pipeline / 脚本 / 路由管理、会话列表与撤销、Prometheus 指标、健康检查；
+- API 分组：配置导入 / 导出（自动脱敏 + `***` 哨兵回填）、热重载与**落盘持久化**（区分
+  `hot_applied` / `requires_restart`）、Provider（含连通性验证与删除）、Pipeline / 脚本 / 路由管理、
+  **站点清单（`GET /admin/api/sites`）**、会话列表与撤销、Prometheus 指标、健康检查；
 - 管理写操作统一**结构化审计**（操作者、来源 IP、方法与状态；配置变更输出变更摘要）；
 - 变更路径：**先原子落盘（临时文件 + rename）再应用内存**，失败即拒绝，避免内存 / 磁盘分裂；
 - 内嵌管理台：编译期由 RustEmbed 打包进二进制；未构建管理端时 `build.rs` 生成占位提示页，
@@ -95,10 +124,12 @@ flowchart LR
 
 ## 可观测性
 
-- **指标**（Prometheus）：`bff_http_requests_total{path}`（标签归一化）、
-  `bff_http_request_duration_seconds`、`bff_upstream_request_duration_seconds{upstream,status_class}`、
-  限流 / 熔断 / Token Exchange 等业务指标；
+- **指标**（Prometheus）：`bff_http_requests_total{path,site}`（标签归一化）、
+  `bff_http_request_duration_seconds{site}`、`bff_upstream_request_duration_seconds{upstream,status_class}`、
+  限流 / 熔断 / Token Exchange 等业务指标；`site` 标签由 `SiteHandle` 决定（基数 = 站点数）；
+  **`/live`、`/ready` 不进入业务请求指标**（探针会污染低频站点的 P95/P99）；
 - **追踪**：W3C `traceparent` 逐跳传播（响应 / 出站与导出 span 严格一致）；
+  span 属性 `bff.site`（站点名，无站点上下文回退 `-`）随 JSON 日志事件一并输出，错误日志带站点名；
   可选 OTel（OTLP/gRPC）导出，`ParentBased` 采样，关停时 flush；
 - **资产**：Grafana 面板与 Prometheus 告警规则（`deploy/grafana/`、`deploy/prometheus/`）、
   处置手册 [runbook.md](runbook.md)。
@@ -116,6 +147,8 @@ src/
 ├── scripting/     # QuickJS 沙箱
 ├── telemetry.rs   # OTel 导出与关停
 ├── state.rs       # AppState：配置快照 / provider / HTTP 客户端 / 后台任务
+├── site.rs        # 站点运行时：SiteHandle / SiteView / SiteCtx / 预构建安全头
+├── server/serve.rs# 多 listener 编排：异常退出 → 全局关停（§6.1）
 └── config.rs      # 配置模型、合并与校验
 ```
 

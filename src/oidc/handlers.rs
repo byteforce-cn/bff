@@ -1,11 +1,16 @@
 //! OIDC 登录 / 回调 / 登出处理器，以及令牌刷新（分布式锁防惊群）。
-use crate::config::OidcProviderConfig;
+//!
+//! 站点上下文（§6.1 / §7.2 / §8）：所有入口显式携带站点视图，
+//! provider 选择、base_url 推导、令牌读写均按站点维度进行。
+use crate::config::{LogoutScope, OidcProviderConfig};
+use crate::middleware::host_validation::is_loopback_host;
 use crate::oidc::tokens::{flow_key, now_unix, session_key, StoredTokens};
+use crate::site::{SiteCtx, SiteHandle, SiteView};
 use crate::state::{AppState, SessionInfo};
 use crate::utils::AppError;
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Query, State};
+use axum::extract::{Extension, MatchedPath, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreAuthenticationFlow, CoreTokenResponse};
@@ -14,6 +19,7 @@ use openidconnect::{
     RefreshToken, Scope,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use tower_sessions::Session;
 
@@ -43,25 +49,99 @@ struct AuthFlow {
     popup: bool,
 }
 
-/// 选择 provider：未指定且仅配置一个时取默认值。
-pub fn select_provider(state: &AppState, id: Option<&str>) -> Result<OidcProviderConfig, AppError> {
+/// 选择 provider（站点感知，§8.1）：
+///
+/// - 显式多站点：`Some(id)` 必须 ∈ 站点 `allowed_providers`，否则 **400**（不回退默认）；
+///   `None` → 站点 `default_provider`；
+/// - legacy：保持旧语义冻结（未知 id → 404；无 id 且多 provider → 400）。
+pub fn select_provider(
+    state: &AppState,
+    site: &SiteView,
+    id: Option<&str>,
+) -> Result<OidcProviderConfig, AppError> {
     let cfg = state.cfg();
-    match id {
-        Some(id) => cfg
-            .oidc
-            .providers
-            .iter()
-            .find(|p| p.id == id)
-            .cloned()
-            .ok_or_else(|| AppError::not_found(format!("OIDC provider 不存在: {}", id))),
-        None => match cfg.oidc.providers.as_slice() {
-            [single] => Ok(single.clone()),
-            [] => Err(AppError::bad_request("未配置任何 OIDC provider")),
-            _ => Err(AppError::bad_request(
-                "存在多个 provider，请通过 ?provider= 指定",
-            )),
-        },
+    if site.legacy {
+        // 旧语义冻结：全局 provider 列表查找 + 单 provider 默认值
+        return match id {
+            Some(id) => cfg
+                .oidc
+                .providers
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+                .ok_or_else(|| AppError::not_found(format!("OIDC provider 不存在: {}", id))),
+            None => match cfg.oidc.providers.as_slice() {
+                [single] => Ok(single.clone()),
+                [] => Err(AppError::bad_request("未配置任何 OIDC provider")),
+                _ => Err(AppError::bad_request(
+                    "存在多个 provider，请通过 ?provider= 指定",
+                )),
+            },
+        };
     }
+
+    match id {
+        Some(id) => {
+            if !site.allowed_providers.iter().any(|p| p == id) {
+                return Err(AppError::bad_request(format!(
+                    "provider [{}] 不在站点 [{}] 的 allowed_providers 白名单内",
+                    id, site.name
+                )));
+            }
+            cfg.oidc
+                .providers
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+                .ok_or_else(|| AppError::bad_request(format!("OIDC provider 不存在: {}", id)))
+        }
+        None => {
+            if site.default_provider.is_empty() {
+                return Err(AppError::bad_request(format!(
+                    "站点 [{}] 未配置默认 provider",
+                    site.name
+                )));
+            }
+            cfg.oidc
+                .providers
+                .iter()
+                .find(|p| p.id == site.default_provider)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "站点 [{}] 默认 provider [{}] 不存在",
+                        site.name, site.default_provider
+                    ))
+                })
+        }
+    }
+}
+
+/// 回调 provider 解析（§5.4 第 8 条）：真实 IdP 只按注册的 `redirect_uri` 回跳
+/// （路径 = `provider.callback_path`），不回带 `?provider=`。同一站点绑定的 provider
+/// `callback_path` 唯一，因此可用匹配到的路由路径区分 provider。
+///
+/// - 显式 `?provider=`：等价 `select_provider`（白名单外 → 400，不回退）；
+/// - 无 `?provider=` 且非 legacy：命中 `callback_path == matched_path` 的站点白名单
+///   provider → 用它；无命中 → 回退 `default_provider`；
+/// - legacy：行为冻结，原样走 `select_provider`（多 provider 无 `?provider=` → 400）。
+fn select_callback_provider(
+    state: &AppState,
+    site: &SiteView,
+    id: Option<&str>,
+    matched_path: Option<&str>,
+) -> Result<OidcProviderConfig, AppError> {
+    if id.is_none() && !site.legacy {
+        if let Some(path) = matched_path {
+            let cfg = state.cfg();
+            if let Some(provider) = cfg.oidc.providers.iter().find(|p| {
+                p.callback_path == path && site.allowed_providers.iter().any(|a| a == &p.id)
+            }) {
+                return Ok(provider.clone());
+            }
+        }
+    }
+    select_provider(state, site, id)
 }
 
 /// 校验 redirect 参数：只允许**同源绝对路径**。
@@ -101,17 +181,18 @@ pub fn validate_redirect(redirect: &str) -> bool {
     }
 }
 
-/// 推导本服务对外 base_url。
+/// 推导本服务对外 base_url（站点感知，§8.2）。
 ///
-/// 1. 配置了 `server.public_base_url` → **一律使用它，完全不信任 Host 头**；
+/// 1. 配置了站点 `public_base_url` → **一律使用它，完全不信任 Host 头**；
 /// 2. 否则回退 `Host`（+ 可信 `X-Forwarded-Proto`），且：
-///    - `server.trusted_hosts` 非空时，Host 必须命中白名单；
-///    - 为空时仅允许 loopback Host（开发/测试），其余拒绝。
+///    - Host 必须命中站点 `allowed_hosts`（`server_names ∪ {public_host}`）；
+///    - 未配置 `public_base_url`（dev 语义）时 loopback Host 作开发兜底放行；
+///      legacy 保持旧语义冻结：白名单（`trusted_hosts`）非空时不额外放行 loopback；
+///    - Host 缺失 → 回退 `http://127.0.0.1:{site.port}`（仅开发/测试）。
 ///
 /// 拒绝而非静默回退：避免“回调地址与实际入口不符”在生产变成难排查的登录故障。
-fn base_url_from(headers: &HeaderMap, state: &AppState) -> Result<String, AppError> {
-    let cfg = state.cfg();
-    if let Some(base) = &cfg.server.public_base_url {
+fn base_url_from(headers: &HeaderMap, site: &SiteView) -> Result<String, AppError> {
+    if let Some(base) = &site.public_base_url {
         return Ok(base.trim_end_matches('/').to_string());
     }
 
@@ -119,14 +200,18 @@ fn base_url_from(headers: &HeaderMap, state: &AppState) -> Result<String, AppErr
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
     {
-        let trusted = if cfg.server.trusted_hosts.is_empty() {
-            is_loopback_host(host)
-        } else {
-            cfg.server
-                .trusted_hosts
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(host.trim()))
-        };
+        let in_whitelist = site
+            .allowed_hosts
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(host.trim()));
+        let trusted = in_whitelist
+            || if site.legacy {
+                // 旧语义：trusted_hosts 为空 → 仅 loopback；非空 → 白名单不放行 loopback
+                site.allowed_hosts.is_empty() && is_loopback_host(host)
+            } else {
+                // dev 兜底（§6.3 loopback 语义）：未配置 public_base_url 时放行 loopback
+                is_loopback_host(host)
+            };
         if trusted {
             let proto = headers
                 .get("x-forwarded-proto")
@@ -138,36 +223,20 @@ fn base_url_from(headers: &HeaderMap, state: &AppState) -> Result<String, AppErr
             return Ok(format!("{}://{}", proto, host.trim()));
         }
         return Err(AppError::bad_request(
-            "Host 不受信任：请配置 server.public_base_url 或 server.trusted_hosts",
+            "Host 不受信任：请配置站点 public_base_url 或 server_names",
         ));
     }
 
     // 无 Host 头（非常规协议）：回退本机（仅开发/测试）
-    Ok(format!("http://127.0.0.1:{}", cfg.server.business_port))
+    Ok(format!("http://127.0.0.1:{}", site.port))
 }
 
-/// 与请求无关的规范 base_url（后台刷新等非请求路径使用）。
+/// 与请求无关的规范 base_url（后台刷新等非请求路径使用，§8.2）。
 ///
 /// `public_base_url` 优先；否则回退本机地址（仅用于 client 缓存键与 discovery，
 /// 不参与 redirect_uri 下发）。
-pub fn canonical_base_url(state: &AppState) -> String {
-    let cfg = state.cfg();
-    cfg.server
-        .public_base_url
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", cfg.server.business_port))
-        .trim_end_matches('/')
-        .to_string()
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let host = host.trim();
-    let hostname = if let Some(rest) = host.strip_prefix('[') {
-        rest.split(']').next().unwrap_or_default()
-    } else {
-        host.split(':').next().unwrap_or_default()
-    };
-    matches!(hostname, "localhost" | "127.0.0.1" | "::1")
+pub fn canonical_base_url(site: &SiteView) -> String {
+    site.canonical_base_url()
 }
 
 /// 计算授权请求的附加 scope 列表。
@@ -192,12 +261,17 @@ fn authorize_scopes(config_scopes: &[String]) -> Vec<String> {
 /// GET /login — 发起授权码 + PKCE 流程
 pub async fn login(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     headers: HeaderMap,
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, AppError> {
-    let provider = select_provider(&state, q.provider.as_deref())?;
-    let base_url = base_url_from(&headers, &state)?;
+    let ctx = SiteCtx {
+        handle: &handle,
+        view: state.site_view(&handle.name).expect("site view"),
+    };
+    let provider = select_provider(&state, &ctx.view, q.provider.as_deref())?;
+    let base_url = base_url_from(&headers, &ctx.view)?;
     let client = state
         .oidc_clients
         .get(&provider, &base_url)
@@ -244,8 +318,10 @@ pub async fn login(
 /// GET /auth/callback — IdP 回调：换码、验签、建会话
 pub async fn callback(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     headers: HeaderMap,
+    matched: MatchedPath,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, AppError> {
     if let Some(err) = q.error {
@@ -255,7 +331,16 @@ pub async fn callback(
             q.error_description.unwrap_or_default()
         )));
     }
-    let provider = select_provider(&state, q.provider.as_deref())?;
+    let ctx = SiteCtx {
+        handle: &handle,
+        view: state.site_view(&handle.name).expect("site view"),
+    };
+    let provider = select_callback_provider(
+        &state,
+        &ctx.view,
+        q.provider.as_deref(),
+        Some(matched.as_str()),
+    )?;
     let code = q.code.ok_or_else(|| AppError::bad_request("缺少 code"))?;
     let state_param = q.state.ok_or_else(|| AppError::bad_request("缺少 state"))?;
 
@@ -268,7 +353,7 @@ pub async fn callback(
         return Err(AppError::unauthorized("state 校验失败（CSRF 防护）"));
     }
 
-    let base_url = base_url_from(&headers, &state)?;
+    let base_url = base_url_from(&headers, &ctx.view)?;
     let client = state
         .oidc_clients
         .get(&provider, &base_url)
@@ -317,8 +402,9 @@ pub async fn callback(
         .insert(&session_key(&provider.id), stored)
         .await
         .context("写入 session 失败")?;
+    // §7.2：写入站点维度 provider 键（legacy 旧键仅作迁移回退，不再写入）
     session
-        .insert("oidc:current_provider", &provider.id)
+        .insert(&ctx.view.provider_key(), &provider.id)
         .await
         .context("写入 session 失败")?;
     session.remove_value(&flow_key(&provider.id)).await.ok();
@@ -345,14 +431,51 @@ pub async fn callback(
     Ok(Redirect::to(&target).into_response())
 }
 
-/// GET /logout — 清除本地会话并登出 IdP（RP-Initiated Logout）
+/// GET /logout — 按站点 `logout_scope` 清除会话（§7.4）：
+///
+/// - `Global`（默认）：flush 全部站点 token + 清理 token exchange 缓存 +
+///   RP-Initiated Logout（用触发站点选出的 provider 与 id_token_hint）；
+/// - `Site`：仅移除站点 `allowed_providers` 全部 token 与站点 provider 键，
+///   不调 IdP、保留会话与其他站点，重定向 `/`，仍清理 exchange 缓存。
 pub async fn logout(
     State(state): State<AppState>,
+    Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
     headers: HeaderMap,
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, AppError> {
-    let provider = select_provider(&state, q.provider.as_deref()).ok();
+    let ctx = SiteCtx {
+        handle: &handle,
+        view: state.site_view(&handle.name).expect("site view"),
+    };
+
+    let sid = session.id().map(|id| id.to_string());
+
+    // Site scope：仅移除本站点 provider 的 token（§7.4），不 flush 会话、不调 IdP
+    if ctx.view.logout_scope == LogoutScope::Site {
+        for p in &ctx.view.allowed_providers {
+            session.remove_value(&session_key(p)).await.ok();
+        }
+        session.remove_value(&ctx.view.provider_key()).await.ok();
+        if let Some(sid) = &sid {
+            let cleared = crate::server::token_exchange::clear_session_cache(&state, sid).await;
+            if cleared > 0 {
+                tracing::info!(session_id = %sid, cleared, "站点登出清理 token exchange 缓存");
+            }
+        }
+        return Ok(Redirect::to("/").into_response());
+    }
+
+    // Global scope：provider 定位优先 `?provider=`（站点白名单校验），
+    // 缺失时回退站点当前 provider（§7.4）；再回退到 IdP 登出与本地 flush。
+    let provider = if let Some(id) = q.provider.as_deref() {
+        select_provider(&state, &ctx.view, Some(id)).ok()
+    } else {
+        match ctx.view.current_provider(&session).await {
+            Some(id) => select_provider(&state, &ctx.view, Some(&id)).ok(),
+            None => None,
+        }
+    };
 
     // 尝试取出 id_token 作为 id_token_hint（在清除 session 之前）
     let id_token_hint = match &provider {
@@ -366,7 +489,6 @@ pub async fn logout(
     };
 
     // 清除 BFF 本地会话
-    let sid = session.id().map(|id| id.to_string());
     if let Some(p) = &provider {
         session.remove_value(&session_key(&p.id)).await.ok();
     }
@@ -386,7 +508,7 @@ pub async fn logout(
     // （原实现硬编码 Spring AS 的 `/connect/logout`，换 IdP 即失效）。
     match &provider {
         Some(p) => {
-            let base_url = base_url_from(&headers, &state)?;
+            let base_url = base_url_from(&headers, &ctx.view)?;
             let post_logout_redirect = format!("{}/", base_url.trim_end_matches('/'));
             match state.oidc_clients.end_session_endpoint(p).await {
                 Some(endpoint) => {
@@ -538,12 +660,15 @@ fn decode_jwt_payload_unverified(jwt: &str) -> Result<serde_json::Value, AppErro
 
 /// 令牌刷新（LockProvider 防惊群）。成功返回新的 StoredTokens。
 /// 持锁后会检查 token 是否仍在 skew 窗口，已刷新则直接返回。
+///
+/// 站点感知（§8.3）：provider 必须 ∈ 站点白名单，只刷新站点当前 provider。
 pub async fn try_refresh(
     state: &AppState,
+    site: &SiteView,
     session: &Session,
     tokens: &StoredTokens,
 ) -> Result<Option<StoredTokens>, AppError> {
-    let provider = match select_provider(state, Some(&tokens.provider)) {
+    let provider = match select_provider(state, site, Some(&tokens.provider)) {
         Ok(p) => p,
         Err(_) => return Ok(None),
     };
@@ -583,7 +708,7 @@ pub async fn try_refresh(
         }
     }
 
-    let result = do_refresh(state, &provider, &tokens.sub, refresh_token).await;
+    let result = do_refresh(state, site, &provider, &tokens.sub, refresh_token).await;
     match result {
         Ok(new_tokens) => {
             if session
@@ -609,10 +734,11 @@ pub async fn try_refresh(
 /// 强制刷新（供代理层 401 重试使用）。跳过 is_expiring 检查，只要 upstream 拒绝了 token 就刷新。
 pub async fn force_refresh(
     state: &AppState,
+    site: &SiteView,
     session: &Session,
     tokens: &StoredTokens,
 ) -> Result<Option<StoredTokens>, AppError> {
-    let provider = match select_provider(state, Some(&tokens.provider)) {
+    let provider = match select_provider(state, site, Some(&tokens.provider)) {
         Ok(p) => p,
         Err(_) => return Ok(None),
     };
@@ -640,7 +766,7 @@ pub async fn force_refresh(
     };
 
     // force: 不检查 is_expiring，直接刷新
-    let result = do_refresh(state, &provider, &tokens.sub, refresh_token).await;
+    let result = do_refresh(state, site, &provider, &tokens.sub, refresh_token).await;
     match result {
         Ok(new_tokens) => {
             session
@@ -662,6 +788,7 @@ pub async fn force_refresh(
 
 async fn do_refresh(
     state: &AppState,
+    site: &SiteView,
     provider: &OidcProviderConfig,
     sub: &str,
     refresh_token: String,
@@ -669,7 +796,7 @@ async fn do_refresh(
     // refresh 路径不再硬编码 127.0.0.1，改用与 public_base_url 对齐的规范 base；
     // 叠加 OidcClientManager 的 (provider_id, base_url) 缓存键，
     // 彻底消除“后台刷新把整机 redirect_uri 钉死”的跨用户污染。
-    let base_url = canonical_base_url(state);
+    let base_url = canonical_base_url(site);
     let client = state.oidc_clients.get(provider, &base_url).await?;
     let resp: CoreTokenResponse = client
         .exchange_refresh_token(&RefreshToken::new(refresh_token))
@@ -712,6 +839,9 @@ pub async fn register_session(state: &AppState, session: &Session, provider: &st
             sub: sub.into(),
             created_at: now,
             last_seen: now,
+            // 站点/provider 集合由管理端 `list_sessions` 按 record 推导
+            sites: Vec::new(),
+            providers: Vec::new(),
         },
     );
 }
@@ -722,16 +852,14 @@ pub async fn unregister_session(state: &AppState, session: &Session) {
     }
 }
 
-/// 供代理层取当前会话的明文 access token。
-pub async fn current_access_token(session: &Session) -> Option<String> {
-    let tokens = current_tokens(session).await?;
-    tokens.access_token().ok()
+/// 供代理层取当前会话的明文 access token（站点维度，§7.2）。
+pub async fn current_access_token(site: &SiteView, session: &Session) -> Option<String> {
+    site.current_access_token(session).await
 }
 
-/// 供中间件读取当前会话的令牌（含 provider 键）。
-pub async fn current_tokens(session: &Session) -> Option<StoredTokens> {
-    let provider: String = session.get("oidc:current_provider").await.ok().flatten()?;
-    session.get(&session_key(&provider)).await.ok().flatten()
+/// 供中间件读取当前会话的令牌（含 provider 键，站点维度，§7.2）。
+pub async fn current_tokens(site: &SiteView, session: &Session) -> Option<StoredTokens> {
+    site.current_tokens(session).await
 }
 
 #[cfg(test)]
@@ -780,5 +908,147 @@ mod redirect_tests {
         // 配置本身不含 openid 时不会额外注入（由 crate 负责）
         assert_eq!(authorize_scopes(&["profile".into()]), vec!["profile"]);
         assert!(authorize_scopes(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod site_aware_tests {
+    //! Task 9 单测：站点感知的 provider 选择与 base_url 推导（§8.1 / §8.2）。
+    use super::{base_url_from, select_provider};
+    use crate::config::{
+        AppConfig, LogoutScope, OidcProviderConfig, ResolvedSite, SecurityHeadersConfig,
+    };
+    use crate::site::{PrebuiltSecurityHeaders, SiteView};
+    use crate::state::AppState;
+    use axum::http::{HeaderMap, StatusCode};
+    use std::sync::Arc;
+
+    fn provider(id: &str) -> OidcProviderConfig {
+        OidcProviderConfig {
+            id: id.into(),
+            display_name: id.into(),
+            issuer_url: "http://127.0.0.1:9".into(),
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            callback_path: "/auth/callback".into(),
+            scopes: vec!["openid".into()],
+            insecure_skip_id_token_verification: true,
+            refresh_skew_secs: 60,
+            shared_across_sites: false,
+        }
+    }
+
+    fn test_state(providers: Vec<OidcProviderConfig>) -> AppState {
+        let mut cfg = AppConfig::default();
+        cfg.server.business_port = 8080;
+        cfg.server.admin_port = 8443;
+        cfg.oidc.providers = providers;
+        AppState::new(cfg).expect("构造 AppState 失败")
+    }
+
+    fn resolved(
+        default: &str,
+        allowed: &[&str],
+        legacy: bool,
+        public_base_url: Option<&str>,
+        allowed_hosts: &[&str],
+    ) -> ResolvedSite {
+        ResolvedSite {
+            name: if legacy {
+                "default".into()
+            } else {
+                "app1".into()
+            },
+            port: 8080,
+            bind: "0.0.0.0".into(),
+            server_names: vec![],
+            public_base_url: public_base_url.map(|s| s.to_string()),
+            public_host: None,
+            allowed_hosts: allowed_hosts.iter().map(|s| s.to_string()).collect(),
+            spa_dir: "dist".into(),
+            session_profile: "default".into(),
+            default_provider: default.into(),
+            allowed_providers: allowed.iter().map(|s| s.to_string()).collect(),
+            logout_scope: LogoutScope::Global,
+            security_headers: None,
+            legacy,
+        }
+    }
+
+    fn view(r: &ResolvedSite) -> Arc<SiteView> {
+        let headers = Arc::new(
+            PrebuiltSecurityHeaders::build(&SecurityHeadersConfig::default(), None).unwrap(),
+        );
+        Arc::new(SiteView::from_resolved(r, headers))
+    }
+
+    #[test]
+    fn multisite_provider_not_in_whitelist_is_400() {
+        let state = test_state(vec![provider("p1"), provider("p2")]);
+        let v = view(&resolved("p1", &["p1"], false, None, &[]));
+
+        // 白名单外的 provider → 400，不回退默认
+        let err = select_provider(&state, &v, Some("p2")).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        // 不存在的 provider → 同样 400
+        let err = select_provider(&state, &v, Some("nope")).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        // 白名单内 → 成功
+        assert_eq!(select_provider(&state, &v, Some("p1")).unwrap().id, "p1");
+        // None → default_provider
+        assert_eq!(select_provider(&state, &v, None).unwrap().id, "p1");
+    }
+
+    #[test]
+    fn legacy_multi_provider_without_id_is_400() {
+        let state = test_state(vec![provider("p1"), provider("p2")]);
+        let v = view(&resolved("p1", &["p1", "p2"], true, None, &[]));
+
+        // 旧语义冻结：多 provider 无 id → 400
+        let err = select_provider(&state, &v, None).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        // 旧语义冻结：未知 id → 404（不统一改码）
+        let err = select_provider(&state, &v, Some("nope")).unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        // 指定 id → 成功
+        assert_eq!(select_provider(&state, &v, Some("p2")).unwrap().id, "p2");
+    }
+
+    #[test]
+    fn base_url_uses_public_base_url_and_rejects_unlisted_host() {
+        // public_base_url 优先：任意 Host 都返回它，完全不信任 Host 头
+        let v = view(&resolved(
+            "p1",
+            &["p1"],
+            false,
+            Some("https://a.example/"),
+            &[],
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "evil.example.com".parse().unwrap());
+        assert_eq!(base_url_from(&headers, &v).unwrap(), "https://a.example");
+
+        // 无 public_base_url + allowed_hosts=["a.example"] + Host=evil → Err(400)
+        let v2 = view(&resolved("p1", &["p1"], false, None, &["a.example"]));
+        let mut evil = HeaderMap::new();
+        evil.insert("host", "evil.example.com".parse().unwrap());
+        let err = base_url_from(&evil, &v2).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+
+        // 无 public_base_url + Host=localhost → Ok("http://localhost")（dev 兜底）
+        let mut lb = HeaderMap::new();
+        lb.insert("host", "localhost".parse().unwrap());
+        assert_eq!(base_url_from(&lb, &v2).unwrap(), "http://localhost");
+
+        // 白名单 Host 正常放行
+        let mut ok = HeaderMap::new();
+        ok.insert("host", "a.example".parse().unwrap());
+        assert_eq!(base_url_from(&ok, &v2).unwrap(), "http://a.example");
+
+        // Host 缺失 → 回退 loopback + 站点端口
+        assert_eq!(
+            base_url_from(&HeaderMap::new(), &v2).unwrap(),
+            "http://127.0.0.1:8080"
+        );
     }
 }

@@ -63,11 +63,59 @@ config/
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `cookie_name` | `BFF_SESSION` | 会话 Cookie 名 |
+| `cookie_name` | `BFF_SESSION` | 会话 Cookie 名；跨全部 profile（含 `default`）**全局唯一** |
+| `cookie_domain` | 空 | 非空 = Domain cookie（`.example.com` / `example.com` 均接受并归一）；缺省/空串 = host-only；**需重启** |
 | `secure` / `http_only` | `true` | Cookie 安全属性（prod 强制 `secure`） |
-| `same_site` | `Lax` | 跨站点 IdP 场景必须 `Lax`（`Strict` 会丢回调 Cookie 导致登录失败）；同站可改回 `Strict` |
+| `same_site` | `Lax` | `Strict` / `Lax` / `None`（YAML 字符串）；跨站点 IdP 顶层导航回调必须 `Lax`（`Strict` 会丢回调 Cookie 导致登录失败），同站可改回 `Strict`；`"None"` 必须带引号且强制 `secure: true` |
 | `ttl` | `14d` | 会话有效期（与 Cookie `Max-Age` 对齐） |
-| `gc_interval` | `10m` | 服务端会话索引 GC 周期 |
+| `gc_interval` | `10m` | 服务端会话索引 GC 周期（**进程级**，仅顶层生效） |
+| `allow_unmanaged_subdomains` | `false` | 共享域信任边界显式确认：`cookie_domain` 非空时 prod 必须为 `true`（否则拒绝启动），dev 仅告警（见 §多站点启动期校验） |
+
+### sites — 多站点定义
+
+`sites` 非空即进入**显式多站点**模式：每个站点一个监听端口与 router；缺省（为空）时按 §5.5
+合成名为 `default` 的 legacy 单站点，行为与升级前完全一致。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `name` | 必填 | 站点名，唯一，匹配 `[a-z0-9-]+`；保留名 `admin` 禁止；用作指标 / 日志 / 会话命名空间 |
+| `port` | 必填 | 监听端口；唯一、非 `0`、≠ `server.admin_port`（**需重启**） |
+| `bind` | `0.0.0.0` | 监听地址（**需重启**） |
+| `server_names` | 空 | Host 白名单条目（**仅主机名**，拒绝 `://` / `/` / 端口 / 通配符 `*`）；有效白名单 = `server_names ∪ {public_base_url 主机}`（热生效） |
+| `public_base_url` | 空（prod 必填） | 对外基础 URL（http/https、无 path/query）；`redirect_uri` / 登出回跳一律由此推导、**不信任 Host**（热生效） |
+| `session_profile` | `default` | 引用的会话 profile（见下；**需重启**） |
+| `spa` | 继承顶层 `spa` | 站点级 SPA 目录 `spa.dir`（热生效） |
+| `oidc.default_provider` | 空 | 站点默认 provider（引用 `oidc.providers[].id`） |
+| `oidc.allowed_providers` | `[default_provider]` | 站点可用 provider 白名单；`?provider=` 越站返回 **400** 且不回退默认 |
+| `logout_scope` | `global` | `global` = 清全站 token（`session.flush()`）+ RP-Initiated Logout；`site` = 仅清本站点 token、**不触发 IdP 登出**（热生效） |
+| `security_headers` | 无 | Partial 覆盖（见「安全响应头」），未指定字段继承全局 |
+
+> 显式多站点下顶层 `server.public_base_url` / `server.trusted_hosts` 为 **dead config**（非空即启动失败）；
+> `server.business_port` 被忽略（≠ 8080 时仅告警）。
+
+### session_profiles — 会话 profile 覆盖
+
+顶层 `session` 即 profile `default` 的定义（零改动兼容）；额外 profile 通过 `session_profiles`
+声明，**未指定字段继承顶层 `session` 后覆盖**。同 profile 内站点共享一份 `SessionStore`；
+跨子域共享会话要求该 profile 的 `cookie_domain` 非空。`session_profiles` 不得定义 `default` 键，
+profile 名匹配 `[a-z0-9-]+`。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `cookie_name` | 继承顶层 | 会话 Cookie 名；跨全部 profile（含 `default`）**全局唯一**（**需重启**） |
+| `cookie_domain` | 继承顶层 | 非空 = Domain cookie；显式空串 `""` = 强制 host-only（用于隔离组）（**需重启**） |
+| `secure` / `http_only` | 继承顶层 | Cookie 安全属性（prod 逐 profile 校验 `secure`）（**需重启**） |
+| `same_site` | 继承顶层 | `Strict` / `Lax` / `None`；`"None"` 必须带引号且强制 `secure: true`（**需重启**） |
+| `ttl` | 继承顶层 | 会话有效期（profile 级）（**需重启**） |
+| `allow_unmanaged_subdomains` | `false` | 共享域信任边界显式确认（prod 下 `cookie_domain` 非空时必须 `true`） |
+
+### security_headers — 站点级安全响应头覆盖
+
+`sites[].security_headers` 为 **Partial 类型**（字段全部可选）：未指定字段继承全局
+`security_headers`；`content_security_policy` 一旦指定即**整体替换**（含全局按路径的
+`csp_overrides`）。可覆盖字段：`content_security_policy`、`x_frame_options`、
+`x_content_type_options`、`hsts_max_age`、`referrer_policy`。安全响应头在配置替换时
+**预构建为 `HeaderMap`**，请求路径零解析开销（热生效）。
 
 ### admin — 管理面
 
@@ -150,7 +198,7 @@ config/
 
 | 段 | 说明 |
 | --- | --- |
-| `oidc.providers` | Provider 列表：`id` / `issuer_url` / `client_id` / `client_secret` / `scopes` / `callback_path` 等；支持管理端动态维护（热生效） |
+| `oidc.providers` | Provider 列表：`id` / `issuer_url` / `client_id` / `client_secret` / `scopes` / `callback_path` / `shared_across_sites` 等；支持管理端动态维护（热生效，`callback_path` 集合变化除外） |
 | `token_refresh.skip_prefixes` | 跳过令牌刷新检查的路径前缀（登录 / 回调 / 静态资源等） |
 | `routes`（`routes/routes.yaml`） | 统一路由表；字段与行为见 [architecture.md](architecture.md)「统一路由分发」 |
 | `pipelines`（`pipelines/*.yaml`） | 服务编排 DAG 定义 |
@@ -171,9 +219,42 @@ config/
 - `insecure_skip_id_token_verification=true`；
 - `session.secure=false`；
 - `bff_secret` 仍为默认弱值；
-- 未配置 `public_base_url` 且 `trusted_hosts` 为空。
+- 未配置 `public_base_url` 且 `trusted_hosts` 为空；
+- **多站点**：显式多站点下某站点缺 `public_base_url`、`cookie_domain` 非空却未
+  `allow_unmanaged_subdomains: true`、同一 profile 内站点共享 provider 却未
+  `shared_across_sites: true` 等（详见下节）。
+
+## 多站点启动期校验（fail-fast）
+
+显式多站点（`sites` 非空）在启动时逐条校验，任一失败即**拒绝启动**；错误信息含字段路径
+（如 `sites[0].port`、`session_profiles[isolated].cookie_name`）：
+
+1. 站点 `name` 非空、唯一、匹配 `[a-z0-9-]+`；保留名 `admin` 禁止（error）；
+2. `port` 唯一、非 `0`、≠ `admin_port`；`bind` 为可解析 IP；
+3. `session_profile` 引用存在；profile 名合法且不得为 `default`；`cookie_name` 全局唯一；
+   `same_site ∈ {Strict, Lax, None}` 且 `None ⇒ secure: true`（prod 逐 profile 校验 `secure`）；
+4. `cookie_domain` 非空时须正向 domain-match 引用该 profile 的全部站点主机；被 ≥2 个不同主机站点
+   引用且 `cookie_domain` 为空 → prod 启动失败、dev 告警；
+5. prod 下 `cookie_domain` 非空且未显式 `allow_unmanaged_subdomains: true` → 启动失败；
+6. prod 下每站点必须配置 `public_base_url`；`server_names` 若配置须包含 public 主机；站点间
+   归一化后 `public_base_url` 唯一；顶层 `server.public_base_url` / `server.trusted_hosts` 非空 → error；
+   `server.business_port` 被忽略（≠ 8080 时 warn）；
+7. `server_names` 条目仅主机名：拒绝 `://` / `/` / 端口 / 通配符 `*`；大小写不敏感、去尾点、站点内唯一；
+8. 站点绑定的 provider 必须存在；`default_provider ∈ allowed_providers`；**同一站点**绑定的 provider
+   `callback_path` 必须唯一（error）。**legacy 豁免**：无 `sites` 时合成站点绑定全部 provider，
+   多 provider 共享 `callback_path` 仍按 `?provider=` 选择，既有配置原样启动（§5.4 第 12 条）；
+9. `routes[].sites` 引用的站点必须已定义（仅显式多站点校验）；
+10. 同一 profile 内被 >1 个站点引用的 provider 必须显式 `oidc.providers[].shared_across_sites: true`，
+    否则启动失败（保证站点间令牌互不可见）；
+11. prod 下多站点解析到同一 `spa.dir` → warn；
+12. `sites` 为空 ⇔ legacy 模式：保持既有全局校验、多 provider 选择语义（无 `?provider=` → **400**）
+    与 Host 校验路径完全不变。
 
 ## 热生效边界
 
-热生效项（每请求读取）与需重启项（启动构建）的完整对照表见 [deployment.md](deployment.md) §3；
-运维口径：管理端改完配置后先验证热生效项，涉及需重启项走滚动发布。
+多站点模式的 `sites[].server_names` / `public_base_url` / `spa.dir` / `oidc` 绑定 /
+`security_headers` / `logout_scope` 为**热生效**（每请求从配置快照按站点名解析）；
+`sites[].port` / `bind` / `session_profile`、profile 解析后的 cookie 策略
+（`cookie_name` / `cookie_domain` / `secure` / `http_only` / `same_site` / `ttl`）等属**需重启**
+（结构指纹）。热生效项（每请求读取）与需重启项（启动构建）的完整对照表见
+[deployment.md](deployment.md) §3；运维口径：管理端改完配置后先验证热生效项，涉及需重启项走滚动发布。

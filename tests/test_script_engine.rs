@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 #[tokio::test]
 async fn heavy_script_is_terminated_and_server_stays_responsive() {
     let mut cfg = common::base_config();
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
     cfg.pipelines.insert(
         "heavy".into(),
         serde_yaml::from_str(

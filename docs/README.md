@@ -8,6 +8,8 @@
 | [deployment.md](deployment.md) | 生产部署：TLS 方案 / K8s / SLO / 热生效对照表 / 上线检查单 |
 | [runbook.md](runbook.md) | 告警处置手册 |
 | [token-exchange-rfc8693.md](token-exchange-rfc8693.md) | RFC 8693 Token Exchange 设计与运维 |
+| [multi-site-design.md](multi-site-design.md) | BFF 多站点设计 v0.4 定稿（完整规格；实施计划见下） |
+| [multi-site 实施计划](superpowers/plans/2026-10-09-multi-site.md) | 多站点能力 P1 落地任务拆解（TDD / SDD 执行） |
 
 仓库内的其他验证与交付资产：
 

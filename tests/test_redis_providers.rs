@@ -127,6 +127,8 @@ async fn session_cookie_works_across_two_bff_instances() {
     cfg.provider.session_store = "redis".into();
     cfg.provider.cache = "redis".into();
     cfg.provider.redis_url = url;
+    // 站点化后“已登录会话”要求 provider ∈ 站点白名单（§7.2）
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
 
     // 实例 A：生成已登录会话
     let state_a = common::make_state(cfg.clone());

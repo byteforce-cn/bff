@@ -13,6 +13,7 @@ fn temp_path(tag: &str) -> std::path::PathBuf {
 
 fn demo_route(path: &str) -> RouteDef {
     RouteDef {
+        sites: vec![],
         path: path.into(),
         methods: vec!["GET".into()],
         description: "persistence demo".into(),

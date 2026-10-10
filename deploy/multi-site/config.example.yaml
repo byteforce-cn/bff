@@ -1,0 +1,73 @@
+# 本地双子域 SSO 验收用的两站点配置示例（§11.2）。
+#
+# 可直接作为独立 base.yaml 供 BFF_ENV=dev 启动（步骤见同目录 README.md）：
+#   cp deploy/multi-site/config.example.yaml /tmp/bff-multisite/base.yaml
+#   BFF_ENV=dev BFF_CONFIG_DIR=/tmp/bff-multisite cargo run --release
+#
+# 要点：
+# - 不配置顶层 `server.public_base_url`（显式多站点下为 dead config，非空即启动失败，§5.4 第 6 条）；
+# - 站点各自声明 `server_names`；`public_base_url` 指向 nginx 暴露的本地子域，
+#   使 OIDC redirect_uri 经 nginx 回跳（跨站 SSO 必需）。若只用 localhost:8081/8082
+#   直连，可去掉两处 `public_base_url`，改走 dev loopback 兜底语义——但那样
+#   无法验证 Domain cookie 共享（§11.2）；
+# - `session.cookie_domain` + `allow_unmanaged_subdomains` 建立共享会话 Cookie（§5.2）。
+
+server:
+  admin_port: 8443
+  business_port: 8080        # 显式多站点下被忽略（≠ 8080 时仅告警）
+
+sites:
+  - name: app1
+    port: 8081
+    bind: "127.0.0.1"
+    server_names: ["app1.localhost"]
+    public_base_url: "http://app1.localhost"
+    session_profile: default
+    oidc:
+      default_provider: app1
+      allowed_providers: [app1]
+    logout_scope: global
+  - name: app2
+    port: 8082
+    bind: "127.0.0.1"
+    server_names: ["app2.localhost"]
+    public_base_url: "http://app2.localhost"
+    session_profile: default
+    oidc:
+      default_provider: app2
+      allowed_providers: [app2]
+    logout_scope: global
+
+session:
+  cookie_name: "BFF_SESSION_V2"        # 迁移期轮换后的 Cookie 名（§11.3）
+  cookie_domain: ".localhost"          # 两子域共享 → 跨站 SSO
+  secure: false                        # 本地 http（dev）；生产必须 true
+  http_only: true
+  same_site: "Lax"
+  ttl: "336h"
+  allow_unmanaged_subdomains: true     # 共享域信任边界显式确认（prod 必填，§5.4 第 5 条）
+
+# 本地 mock IdP（`cargo run --example mock_idp`，监听 127.0.0.1:9090）。
+# 两个 provider 指向同一 issuer、使用不同 client_id；各站点只绑定自己的 provider，
+# 因此无需 shared_across_sites（§5.4 第 10 条）。生产请替换为真实 IdP 并移除
+# insecure_skip_id_token_verification。
+oidc:
+  providers:
+    - id: app1
+      display_name: "App1 (local mock IdP)"
+      issuer_url: "http://127.0.0.1:9090"
+      client_id: "app1-client"
+      client_secret: "app1-secret"
+      callback_path: "/auth/callback"
+      scopes: ["openid"]
+      insecure_skip_id_token_verification: true
+      shared_across_sites: false
+    - id: app2
+      display_name: "App2 (local mock IdP)"
+      issuer_url: "http://127.0.0.1:9090"
+      client_id: "app2-client"
+      client_secret: "app2-secret"
+      callback_path: "/auth/callback"
+      scopes: ["openid"]
+      insecure_skip_id_token_verification: true
+      shared_across_sites: false

@@ -1,4 +1,4 @@
-use crate::config::SessionConfig;
+use crate::config::ResolvedSessionProfile;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,27 +51,33 @@ impl SessionStore for DynSessionStore {
     }
 }
 
-/// 基于共享 store 构造 Session 层（store 同时存入 AppState 供测试/管理端访问）。
+/// 基于共享 store 与解析后的 profile 构造 Session 层（§5.2：每 profile 一个，启动时构建）。
 ///
-/// `session.ttl` 配置后，Cookie 与服务端存储使用同一空闲过期（`Expiry::OnInactivity`）：
+/// `cookie_domain` 非空 = Domain cookie（跨子域共享 SSO）；空/缺省 = host-only。
+/// `ttl` 配置后，Cookie 与服务端存储使用同一空闲过期（`Expiry::OnInactivity`）：
 /// - Cookie 获得 `Max-Age`，不再“关浏览器即失效”而服务端留存 2 周；
 /// - 服务端 record 带 `expiry_date`，Redis 后端由此推导真实 TTL（MemoryStore 惰性过滤）。
 pub fn build_layer(
     store: Arc<dyn SessionStore>,
-    session: &SessionConfig,
+    profile: &ResolvedSessionProfile,
 ) -> anyhow::Result<SessionManagerLayer<DynSessionStore>> {
-    let same_site = match session.same_site.to_ascii_lowercase().as_str() {
+    let same_site = match profile.same_site.to_ascii_lowercase().as_str() {
         "lax" => SameSite::Lax,
         "strict" => SameSite::Strict,
         "none" => SameSite::None,
         other => anyhow::bail!("非法 same_site 配置: {}", other),
     };
     let layer = SessionManagerLayer::new(DynSessionStore(store))
-        .with_name(session.cookie_name.clone())
-        .with_secure(session.secure)
-        .with_http_only(session.http_only)
+        .with_name(profile.cookie_name.clone())
+        .with_secure(profile.secure)
+        .with_http_only(profile.http_only)
         .with_same_site(same_site);
-    let layer = match session.ttl {
+    // §5.2：cookie_domain 非空 = Domain cookie（跨子域共享；配置层已归一化去前导点）
+    let layer = match profile.cookie_domain.as_deref().filter(|d| !d.is_empty()) {
+        Some(domain) => layer.with_domain(domain.to_string()),
+        None => layer,
+    };
+    let layer = match profile.ttl {
         Some(ttl) if ttl > Duration::ZERO => layer.with_expiry(Expiry::OnInactivity(
             time::Duration::seconds(ttl.as_secs() as i64),
         )),

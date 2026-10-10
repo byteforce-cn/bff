@@ -95,11 +95,11 @@ kubectl -n bff apply -k deploy/k8s/
 
 | 文件 | 内容 |
 | --- | --- |
-| `deployment.yaml` | 2 副本、startup/liveness/readiness 探针、`terminationGracePeriodSeconds: 45`（对齐 30s 排空窗口）、nonroot + seccomp、资源配额 |
-| `service.yaml` | 业务 ClusterIP；**管理端口独立 ClusterIP**（不要挂 Ingress） |
-| `ingress.yaml` | TLS 终止、SSE 反缓冲、`proxy-read-timeout` |
+| `deployment.yaml` | 2 副本、多站点容器端口（`app1:8081` / `app2:8082` / `admin:8443`）、startup/liveness/readiness 探针打 **app1** 站点端口、`terminationGracePeriodSeconds: 45`（对齐 30s 排空窗口）、nonroot + seccomp、资源配额；迁移发布策略见注释（`strategy: Recreate`） |
+| `service.yaml` | 每站点一个业务 ClusterIP 端口；**管理端口独立 ClusterIP**（不要挂 Ingress） |
+| `ingress.yaml` | 每子域一条 host 规则 → 对应 Service 端口；TLS 终止、SSE 反缓冲、`proxy-read-timeout` |
 | `pdb-hpa.yaml` | PDB minAvailable=1；HPA CPU 70%（2–6 副本） |
-| `networkpolicy.yaml` | 8443 仅运维命名空间；出网按实际拓扑收窄 |
+| `networkpolicy.yaml` | 业务入网放行 **8080 + 8081 + 8082**（8080 为两步迁移第 1 步预留）；8443 仅运维命名空间；出网按实际拓扑收窄 |
 | `pvc.yaml` | 配置持久化卷（多副本需 RWX 共享存储） |
 | `secret.example.yaml` | 密钥模板（真实值走 SealedSecrets/Vault） |
 
@@ -129,6 +129,8 @@ kubectl -n bff apply -k deploy/k8s/
 | `admin.auth_token` / `auth_mode` / `ip_whitelist` / `trusted_proxies` | 认证与白名单中间件每请求读配置 |
 | `admin.auth_fail_limit_per_minute` | 每请求读配置 |
 | `server.public_base_url` / `trusted_hosts` | OIDC 处理器每请求读配置 |
+| `sites[].server_names` / `public_base_url` / `spa.dir` / `oidc` 绑定 / `security_headers` / `logout_scope` | 每请求从配置快照按站点名解析（`SiteView`）；`security_headers` 在配置替换时预构建为 `HeaderMap` |
+| `sites[].oidc.allowed_providers` / `default_provider` | 站点鉴权与 provider 选择每请求解析（防越站） |
 | `auth_rate_limit.*`（enabled/paths/per_ip/trusted_proxies） | 中间件每请求读配置 |
 | `websocket.*`（超时/心跳/消息上限） | 每个升级请求读取 |
 | `health.*`（探针缓存 TTL/超时/路径） | `/ready` 每请求读取 |
@@ -141,6 +143,8 @@ kubectl -n bff apply -k deploy/k8s/
 | 配置 | 原因 |
 | --- | --- |
 | `server.business_port` / `admin_port` | 监听地址启动绑定 |
+| `sites[]` 增删 / `name` / `port` / `bind` / `session_profile` | listener 与 router 结构启动构建 |
+| profile 解析后 cookie 策略：`(cookie_name, cookie_domain, secure, http_only, same_site, ttl)` | `SessionManagerLayer` 启动构建 |
 | `provider.*`（memory/redis 选型、redis_url） | Provider 实例与 Session 层启动构建 |
 | `session.*`（cookie 名/secure/same_site/ttl） | SessionManagerLayer 启动构建 |
 | `bff_secret.*` | **显式拒绝热更新**（密钥派生进程级一次性完成），必须重启 |
@@ -156,6 +160,12 @@ kubectl -n bff apply -k deploy/k8s/
 
 > 运维口径：管理端改完配置后，**热生效项立即验证**（curl 探针/目标路由）；
 > 涉及“需重启”项时走滚动发布，并在变更单注明。
+>
+> **导入/热重载响应（多站点）**：`config import`（`POST /admin/api/config/import`，版本化路径为 `POST /admin/api/v1/config/import`）对含启动物化字段变更的
+> 配置返回 `{"status": "requires_restart", "hot_applied": [...], "requires_restart": [...]}`（按字段路径列出，
+> 如 `sites[app1].port`、`session_profiles[default].cookie_name`），**不替换运行配置、不落盘**；无结构变更时
+> 返回 `{"status": "applied", "hot_applied": [...]}`。配置 watcher 检测到结构差异时同样只告警、不应用，
+> 保持旧配置（设计 §5.6）。
 
 ---
 
@@ -247,3 +257,95 @@ kubectl -n bff apply -k deploy/k8s/
   内网自签配 `http_client.ca_cert_path`；双向 TLS 配 `client_cert_path/key_path`；
   示例配置中的 `http://localhost` 仅为本地联调，照抄上线属不安全默认值。
 - [ ] `telemetry.otlp_endpoint` 指向内网 collector（勿暴露公网；跨网段用 https 端点）。
+
+---
+
+## 7. 多站点（Multi-site）部署与迁移
+
+> 设计规格：§5（配置模型）/ §8.4（IdP 注册）/ §11（部署与迁移）。本节汇总部署与运维侧落地。
+
+### 7.1 端口与清单
+
+显式多站点下 BFF 逐 `sites[].port` 监听，管理端口保持全局单实例：
+
+| 端口 | 归属 | 说明 |
+| --- | --- | --- |
+| `8081` / `8082` | 业务站点 app1 / app2 | 每个站点一个容器端口 + Service 端口 |
+| `8080` | legacy 迁移预留 | 两步发布第 1 步（无 `sites` 时 `server.business_port`）；NetworkPolicy 放行 |
+| `8443` | 管理面（全局） | 独立 ClusterIP，不挂 Ingress |
+
+`deploy/k8s/` 已按 `app1:8081` / `app2:8082` / `admin:8443` 配置（清单要点见 §2.3）；探针打
+**app1（8081）**——`/live`、`/ready` 站点无关且豁免 Host 校验。
+
+> ⚠️ 站点端口属基础设施契约：`sites[].port` 变更属**结构变更**（§5.6 `requires_restart`），
+> 须同步 Deployment / Service / Ingress。
+
+**本地双子域验收**：`deploy/multi-site/` 提供 nginx 反向代理示例，把 `app1.localhost` /
+`app2.localhost` 代理到 `127.0.0.1:8081` / `8082`，并固定 `proxy_set_header Host $host;`（剥端口，
+模拟生产 Host 透传）：
+
+| 文件 | 说明 |
+| --- | --- |
+| [`deploy/multi-site/nginx.conf`](../deploy/multi-site/nginx.conf) | 两个 `server` 块 + `default_server` 透传伪造 Host（预期 421） |
+| [`deploy/multi-site/config.example.yaml`](../deploy/multi-site/config.example.yaml) | 两站点 dev 配置示例（`sites` + `session.cookie_domain` + `allow_unmanaged_subdomains`） |
+| [`deploy/multi-site/README.md`](../deploy/multi-site/README.md) | 启动步骤与 curl 手工验收 |
+
+> 为什么用子域：host-only Cookie 按**主机**（而非端口）共享，纯 `localhost:8081/8082` 无法验证
+> Domain cookie 语义与跨站 SSO（设计 §11.2）。
+
+### 7.2 两步发布与 Cookie 名轮换
+
+默认迁移路径（设计 §11.3）：
+
+1. **行为中立发布**：先部署多站点能力二进制，配置保持**无 `sites`**（legacy 模式）→ 行为与升级前
+   完全一致，验证回归。该步必须沿用**迁移前**的探针/Service 布局：探针与 Service 指向
+   `server.business_port`（8080）；`deploy/k8s/` 中的 `app1:8081` / `app2:8082` 站点端口布局
+   自第 2 步（切换 `sites`）起才生效（NetworkPolicy 已放行 8080 供第 1 步使用）。
+2. **切换配置**：新增 `sites`（原站点建议沿用名 `default` 与原业务端口）、把 `session.cookie_name`
+   轮换为 `BFF_SESSION_V2`、设置 `session.cookie_domain: .example.com`、每站点 `public_base_url` /
+   `server_names`，并按 §5.4 第 5 条显式 `session.allow_unmanaged_subdomains: true`。
+
+切换是一次性的，**推荐步骤 2 使用 `strategy: Recreate`**（`deploy/k8s/deployment.yaml` 默认
+`RollingUpdate`，迁移时改 `Recreate`）：短暂停机换取确定性，避免新旧 Pod 各自读写不同 cookie 名
+（`BFF_SESSION` / `BFF_SESSION_V2`）导致同一用户反复重认证。任一策略下 Ingress/Service 保持不变。
+
+### 7.3 混版窗口（若必须滚动）
+
+若必须滚动发布，需明确接受：滚动期间部分用户可能经历**多次**重认证（不是一次），因新旧 Pod 各自
+持有不同 cookie 名。建议低峰执行并在变更单注明该代价。
+
+### 7.4 回滚与 Cookie 清理
+
+- **回滚配置**：删除 `sites` / `session_profiles` 并还原 `session.cookie_name`；
+- **Domain cookie（V2）**：回滚后旧代码忽略 `BFF_SESSION_V2`，其随 `Max-Age` 自然过期；需要立即
+  清理可由运维下发同名 `Max-Age=0` 删除；
+- **旧 host-only cookie（V1）**：轮换后仍被浏览器发送但被新代码忽略；若未过期且 Redis 旧记录仍在，
+  回滚后可恢复为已登录状态——变更窗口内需核对两种 cookie 的清理约定。
+
+### 7.5 IdP 注册清单（交付模板，设计 §8.4）
+
+每个站点在 IdP 注册**独立 client**（令牌受众隔离）：
+
+| 项 | 值 |
+| --- | --- |
+| `client_id` / `client_secret` | 每站点独立 |
+| `redirect_uri` | `https://appN.example.com/auth/callback`（与 `sites[N].public_base_url` + provider `callback_path` 推导一致） |
+| `post_logout_redirect_uri` | `https://appN.example.com/` |
+| IdP 侧 SSO 会话 | 必须保留（跨站点静默认证的前提） |
+
+`redirect_uri` 一律由站点 `public_base_url` 推导、**不信任 Host**（设计 §8.2）；同一站点绑定的多个
+provider 其 `callback_path` 必须唯一（§5.4 第 8 条），否则回调无法区分 provider。
+
+### 7.6 SameSite 交叉验证
+
+- `SameSite=Lax`（默认）兼容 IdP 的**顶层导航**回调与登出回跳；
+- 若企业 IdP 的登录流程涉及**跨站 POST 回调**（如 SAML 场景），`Lax` 会阻止 Cookie 发送，此时需
+  `session.same_site: "None"`（YAML 必须带引号）且 `secure: true`（校验强制）；
+- 部署前逐站点确认 IdP 实际的回调方式，并据此在其 profile 上交叉核对 `SameSite` 策略。
+
+### 7.7 421 与 nginx `proxy_next_upstream`
+
+Host 不命中站点白名单（`server_names ∪ {public_base_url 主机}`）时 BFF 返回 **421 Misdirected
+Request**。nginx/nginx-ingress 的 `proxy_next_upstream` **默认值为 `error timeout`，不含
+`http_421`**，421 会原样透传给客户端，不影响默认重试行为。仅当运维自定义了该列表并**包含
+`http_421`** 时，需将其移除，避免 421 被当作可重试错误在下游反复重试。

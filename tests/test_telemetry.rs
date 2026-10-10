@@ -402,4 +402,10 @@ async fn http_request_span_exported_and_linked() {
     assert_eq!(attr("http.method").as_deref(), Some("GET"));
     assert_eq!(attr("http.target").as_deref(), Some("/live"));
     assert_eq!(attr("http.status_code").as_deref(), Some("200"));
+    // §10/§14：span 属性携带站点名（legacy 配置合成 `default` 站点）
+    assert_eq!(
+        attr("bff.site").as_deref(),
+        Some("default"),
+        "http.request span 应带 bff.site=default"
+    );
 }

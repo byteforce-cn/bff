@@ -1,4 +1,5 @@
 use bff::config::AppConfig;
+use bff::server::serve::{run_servers, watch_shutdown, ServerFuture};
 use bff::state::AppState;
 use std::path::PathBuf;
 use tokio::signal;
@@ -29,13 +30,12 @@ async fn main() -> anyhow::Result<()> {
         None => registry.init(),
     }
 
-    let business_port = config.server.business_port;
     let admin_port = config.server.admin_port;
 
     let state = AppState::new(config)?;
     // 启动依赖自检：Redis 启用时 PING 一次（fail-fast）
     state.verify_dependencies().await?;
-    tracing::info!(business_port, admin_port, "BFF 启动中");
+    tracing::info!(admin_port, "BFF 启动中");
 
     // 后台会话索引 GC（清理 store 中已过期的会话条目，防内存无界增长与列表失真）
     {
@@ -50,58 +50,63 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { watch_state.run_config_watcher().await });
     }
 
-    let business_router = bff::server::business::build_business_router(state.clone())?;
-    let admin_router = bff::server::admin::build_admin_router(state)?;
+    let handles = state.site_handles()?;
 
-    let business_addr = std::net::SocketAddr::from(([0, 0, 0, 0], business_port));
-    let admin_addr = std::net::SocketAddr::from(([0, 0, 0, 0], admin_port));
-
-    let business_listener = tokio::net::TcpListener::bind(business_addr).await?;
-    let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
-    tracing::info!(%business_addr, "业务端口已监听");
-    tracing::info!(%admin_addr, "管理端口已监听");
-
-    // 单一信号源（SIGTERM/SIGINT 各注册一次），经 watch 广播给两个服务。
+    // 单一信号源（SIGTERM/SIGINT 各注册一次），经 watch 广播给全部 listener。
     // 原实现三处独立注册信号 + 固定 sleep(2s) 后直接退出（硬杀在途请求/WS 连接）。
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!("收到终止信号，开始优雅关闭（停止接受新连接）...");
-        let _ = shutdown_tx.send(true);
+        let _ = signal_tx.send(true);
     });
 
-    let business = axum::serve(
-        business_listener,
-        business_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(watch_shutdown(shutdown_rx.clone()));
-
-    let admin = axum::serve(
-        admin_listener,
-        admin_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(watch_shutdown(shutdown_rx.clone()));
-
-    let mut servers = tokio::task::JoinSet::new();
-    servers.spawn(async move { business.await.map_err(|e| e.to_string()) });
-    servers.spawn(async move { admin.await.map_err(|e| e.to_string()) });
-
-    // 等待首个服务结束（正常情况下由信号触发的优雅关闭使其先后结束）
-    if let Some(res) = servers.join_next().await {
-        match res {
-            Ok(Ok(())) => tracing::info!("一个服务已优雅退出"),
-            Ok(Err(e)) => tracing::error!(error = %e, "服务异常退出"),
-            Err(e) => tracing::error!(error = %e, "服务任务异常"),
-        }
+    // §6.1：逐站点 bind + 构建 router（每个 listener 一个）；任一 bind 失败即启动失败。
+    let mut servers: Vec<(String, ServerFuture)> = Vec::with_capacity(handles.len() + 1);
+    for handle in handles {
+        let router = bff::server::business::build_site_router(state.clone(), handle.clone())?;
+        let listener = tokio::net::TcpListener::bind((handle.bind.as_str(), handle.port)).await?;
+        tracing::info!(site = %handle.name, bind = %handle.bind, port = handle.port, "业务端口已监听");
+        let name = handle.name.clone();
+        let shutdown = shutdown_rx.clone();
+        servers.push((
+            name.clone(),
+            Box::pin(async move {
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(watch_shutdown(shutdown))
+                .await
+                .map_err(|e| anyhow::anyhow!("站点 {name} listener 异常: {e}"))
+            }),
+        ));
     }
 
-    // 排空其余在途请求/连接：显式截止时间（与 K8s terminationGracePeriod 对齐），
-    // 替代原先固定 sleep(2s) 后强制退出的行为。
-    const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    let drain = async { while servers.join_next().await.is_some() {} };
-    if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
-        tracing::warn!("等待在途请求排空超时（30s），强制退出");
+    // 管理端 listener（绑定 0.0.0.0，与 legacy 行为一致）。
+    let admin_router = bff::server::admin::build_admin_router(state)?;
+    let admin_addr = std::net::SocketAddr::from(([0, 0, 0, 0], admin_port));
+    let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
+    tracing::info!(%admin_addr, "管理端口已监听");
+    {
+        let shutdown = shutdown_rx.clone();
+        servers.push((
+            "admin".to_string(),
+            Box::pin(async move {
+                axum::serve(
+                    admin_listener,
+                    admin_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .with_graceful_shutdown(watch_shutdown(shutdown))
+                .await
+                .map_err(|e| anyhow::anyhow!("admin listener 异常: {e}"))
+            }),
+        ));
     }
+
+    // §6.1 / §12：首个结束的 listener 决定语义——异常退出即触发全局关闭。
+    let result = run_servers(servers, shutdown_tx, shutdown_rx).await;
 
     // flush + 关停 OTel（导出队列中的尾部落 span），再记录最终日志。
     // shutdown_async：SDK 的阻塞式关停在 current_thread 运行时会死锁，
@@ -109,8 +114,16 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = telemetry {
         handle.shutdown_async().await;
     }
-    tracing::info!("BFF 已关闭");
-    Ok(())
+    match result {
+        Ok(()) => {
+            tracing::info!("BFF 已关闭");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "BFF 异常退出");
+            Err(e)
+        }
+    }
 }
 
 /// 等待关闭信号（SIGINT/SIGTERM 任一）。
@@ -132,12 +145,4 @@ async fn wait_for_shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-}
-
-/// 将 watch 通道转换为 `with_graceful_shutdown` 所需的 future。
-async fn watch_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
-    if *rx.borrow() {
-        return;
-    }
-    let _ = rx.changed().await;
 }

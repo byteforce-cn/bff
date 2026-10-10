@@ -183,3 +183,85 @@ async fn non_popup_callback_still_redirects() {
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(location, "/dashboard", "应重定向到 /dashboard");
 }
+
+// ============================================================
+// 5. 管理会话列表：站点/provider 集合推导（§10）
+// ============================================================
+
+/// §10：共享会话持有站点 A（pA）与手动补写的站点 B（pB）令牌。
+///
+/// `list_sessions` 以会话 record 键推导 `providers`，再按
+/// `effective_sites().allowed_providers` 命中推导 `sites`（去重、排序）。
+#[tokio::test]
+async fn list_sessions_derives_sites_and_providers() {
+    let idp_a = common::spawn_mock_oidc_provider().await;
+    let idp_b = common::spawn_mock_oidc_provider().await;
+    let cfg = common::multisite_config(&idp_a, &idp_b);
+    let state = common::make_state(cfg);
+    let a = common::spawn_site(&state, "app1").await;
+    let admin = common::spawn_admin(state.clone()).await;
+    let client = common::test_client();
+
+    // 站点 A 登录（mock provider pA）→ 共享会话 record 持有 `oidc:pA:tokens`
+    let cookie = common::login_on(&client, &idp_a, &a, "pA", None).await;
+    let session_id = cookie
+        .strip_prefix(&format!("{}=", common::SESSION_COOKIE))
+        .expect("Cookie 应以会话 Cookie 名开头")
+        .to_string();
+
+    // 手动补写 pB 的令牌键，模拟同一共享会话在站点 B 完成登录
+    let id: tower_sessions::session::Id = session_id.parse().expect("会话 id 应可解析");
+    let mut record = state
+        .session_store
+        .load(&id)
+        .await
+        .expect("加载会话 record 失败")
+        .expect("会话 record 应存在");
+    record.data.insert(
+        "oidc:pB:tokens".into(),
+        serde_json::json!({"provider": "pB", "access_token": "t"}),
+    );
+    state
+        .session_store
+        .save(&record)
+        .await
+        .expect("保存会话 record 失败");
+
+    let resp = client
+        .get(format!("{}/admin/api/sessions", admin))
+        .header("x-admin-token", "test-admin-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().expect("sessions 应为数组");
+    let session = sessions
+        .iter()
+        .find(|s| s["id"] == serde_json::json!(session_id))
+        .expect("应含登录会话");
+
+    let providers: Vec<String> = session["providers"]
+        .as_array()
+        .expect("providers 应为数组")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        providers,
+        vec!["pA".to_string(), "pB".to_string()],
+        "providers 应由 record 键推导并排序: {session}"
+    );
+
+    let sites: Vec<String> = session["sites"]
+        .as_array()
+        .expect("sites 应为数组")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        sites,
+        vec!["app1".to_string(), "app2".to_string()],
+        "sites 应由 allowed_providers 命中推导并排序: {session}"
+    );
+}
