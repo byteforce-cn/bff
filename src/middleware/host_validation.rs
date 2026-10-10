@@ -79,8 +79,8 @@ pub async fn host_validation_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let path = req.uri().path().to_string();
-    if EXEMPT_PATHS.contains(&path.as_str()) {
+    // 探针路径豁免容忍尾斜杠（`/live/` 同 `/live`）
+    if EXEMPT_PATHS.contains(&req.uri().path().trim_end_matches('/')) {
         return next.run(req).await;
     }
 
@@ -100,7 +100,7 @@ pub async fn host_validation_middleware(
     };
 
     let allowed = view.allowed_hosts.iter().any(|h| h == &host)
-        || (view.public_base_url.is_none() && is_loopback_host(raw_host));
+        || (view.public_base_url.is_none() && is_loopback_host(&host));
     if !allowed {
         tracing::warn!(site = %view.name, host = %raw_host, "Host 不在白名单，拒绝请求（421）");
         return misdirected_response();

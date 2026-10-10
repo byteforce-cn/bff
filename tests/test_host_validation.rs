@@ -257,6 +257,51 @@ async fn legacy_enforce_host_empty_allowlist_loopback_only() {
     );
 }
 
+/// dev 语义（未配置 `public_base_url`）的 loopback 兜底应基于**归一化后**的主机名：
+/// 大小写与尾点差异不得把合法的开发用 loopback Host 判成 421。
+#[tokio::test]
+async fn dev_loopback_host_comparison_is_normalized() {
+    let site = prod_site("app1", 8081, &[], None);
+    let state = make_state(prod_config(site));
+    let bff = spawn_site(&state, "app1").await;
+    let client = test_client();
+
+    for host in ["LOCALHOST", "localhost.", "Localhost:8081"] {
+        let resp = client
+            .get(format!("{bff}/api/session"))
+            .header("host", host)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "dev loopback Host={host} 应放行（归一化比较）"
+        );
+    }
+}
+
+/// 探针路径的豁免应容忍尾斜杠：`/live/` 同样无条件跳过 Host 校验。
+#[tokio::test]
+async fn probe_path_with_trailing_slash_is_exempt() {
+    let site = prod_site("app1", 8081, &[], Some("https://app1.example.com"));
+    let state = make_state(prod_config(site));
+    let bff = spawn_site(&state, "app1").await;
+    let client = test_client();
+
+    let resp = client
+        .get(format!("{bff}/live/"))
+        .header("host", "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status().as_u16(),
+        421,
+        "/live/ 应与 /live 一样豁免 Host 校验"
+    );
+}
+
 /// Host 头缺失（裸 TCP）→ 421。
 #[tokio::test]
 async fn missing_host_header_gets_421() {
