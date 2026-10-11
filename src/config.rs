@@ -138,6 +138,9 @@ pub struct AppConfig {
     pub pipelines: HashMap<String, PipelineDef>,
     #[serde(default)]
     pub routes: Vec<RouteDef>,
+    /// 当前用户视图（`GET /api/me`）：默认只返回身份与会话，权限视图缺省关闭
+    #[serde(default)]
+    pub me: MeConfig,
     /// 显式多站点定义（空 = legacy 单站点，按 §5.5 合成 `default` 站点）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sites: Vec<SiteConfig>,
@@ -464,6 +467,72 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+/// `/api/me` 端点配置（issue #94）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeConfig {
+    /// 权限视图（下游授权权威解析；缺省关闭）
+    #[serde(default, skip_serializing_if = "MePermissionsConfig::is_default")]
+    pub permissions: MePermissionsConfig,
+}
+
+/// 权限视图配置：启用时以 Bearer access token 调用 `resolve_url`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MePermissionsConfig {
+    /// 是否返回权限视图（站点可覆盖；缺省关闭）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 下游授权权威 resolve 端点（`enabled` 时必填，http(s) 绝对 URL）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resolve_url: String,
+    /// 单次 resolve 调用超时（默认 3s）
+    #[serde(default = "default_me_resolve_timeout", with = "humantime_serde")]
+    pub timeout: Duration,
+    /// resolve 结果缓存 TTL（默认 30s；0 = 不缓存）
+    #[serde(default = "default_me_permissions_cache_ttl", with = "humantime_serde")]
+    pub cache_ttl: Duration,
+}
+
+impl Default for MePermissionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            resolve_url: String::new(),
+            timeout: default_me_resolve_timeout(),
+            cache_ttl: default_me_permissions_cache_ttl(),
+        }
+    }
+}
+
+impl MePermissionsConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn default_me_resolve_timeout() -> Duration {
+    Duration::from_secs(3)
+}
+
+fn default_me_permissions_cache_ttl() -> Duration {
+    Duration::from_secs(30)
+}
+
+/// 站点级 `/api/me` 覆盖（Partial：`None` = 继承全局）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteMeOverride {
+    /// 是否返回权限视图；`None` 继承全局 `me.permissions.enabled`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions_enabled: Option<bool>,
+}
+
+/// 站点已解析的权限视图配置（`None` = `/api/me` 不返回 permissions）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMePermissions {
+    pub resolve_url: String,
+    pub timeout: Duration,
+    pub cache_ttl: Duration,
+}
+
 /// 显式站点定义（§5.1）。`sites` 为空时按 §5.5 合成 legacy `default` 站点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteConfig {
@@ -498,6 +567,9 @@ pub struct SiteConfig {
     /// 站点级安全响应头覆盖（未指定字段继承全局，CSP 一旦指定即整体替换）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_headers: Option<SiteSecurityHeadersOverride>,
+    /// 站点级 `/api/me` 覆盖（未指定字段继承全局 `me`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub me: Option<SiteMeOverride>,
 }
 
 /// 站点 OIDC 绑定（§5.1）。
@@ -600,7 +672,24 @@ pub struct ResolvedSite {
     pub allowed_providers: Vec<String>,
     pub logout_scope: LogoutScope,
     pub security_headers: Option<SiteSecurityHeadersOverride>,
+    /// 已解析的权限视图配置（`None` = 不返回 permissions）
+    pub me_permissions: Option<ResolvedMePermissions>,
     pub legacy: bool,
+}
+
+/// 合并全局 `me.permissions` 与站点覆盖：站点 `Some` 优先，否则继承全局开关。
+fn resolve_me_permissions(
+    global: &MeConfig,
+    site: Option<&SiteMeOverride>,
+) -> Option<ResolvedMePermissions> {
+    let enabled = site
+        .and_then(|s| s.permissions_enabled)
+        .unwrap_or(global.permissions.enabled);
+    enabled.then(|| ResolvedMePermissions {
+        resolve_url: global.permissions.resolve_url.clone(),
+        timeout: global.permissions.timeout,
+        cache_ttl: global.permissions.cache_ttl,
+    })
 }
 
 /// 归一化主机名：trim、小写、去尾点、`[::1]` 去方括号。
@@ -805,6 +894,7 @@ impl AppConfig {
                 allowed_providers,
                 logout_scope: LogoutScope::Global,
                 security_headers: None,
+                me_permissions: resolve_me_permissions(&self.me, None),
                 legacy: true,
             }]
         } else {
@@ -848,6 +938,7 @@ impl AppConfig {
                         allowed_providers,
                         logout_scope: site.logout_scope,
                         security_headers: site.security_headers.clone(),
+                        me_permissions: resolve_me_permissions(&self.me, site.me.as_ref()),
                         legacy: false,
                     }
                 })
@@ -2140,6 +2231,7 @@ impl AppConfig {
         let sites = self.effective_sites();
         self.validate_session_profiles(is_prod, &sites)?;
         self.validate_sites(is_prod, &sites)?;
+        self.validate_me()?;
         self.validate_site_providers(&sites)?;
 
         Ok(())
@@ -2311,6 +2403,35 @@ impl AppConfig {
     ///   归一化后站点内唯一；
     /// - 规则 11：prod 下多站点复用同一 `spa.dir` 仅告警；
     /// - legacy 冻结：无 `sites` 定义时禁止 `routes[].sites` 注解（路由会静默不可命中）。
+    /// `me.permissions` 校验：任一站点（含 legacy 全局）启用权限视图时，
+    /// `resolve_url` 必须是非空 http(s) 绝对 URL。
+    fn validate_me(&self) -> anyhow::Result<()> {
+        let p = &self.me.permissions;
+        let any_enabled = p.enabled
+            || self.sites.iter().any(|s| {
+                s.me.as_ref()
+                    .and_then(|m| m.permissions_enabled)
+                    .unwrap_or(false)
+            });
+        if !any_enabled {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !p.resolve_url.is_empty(),
+            "me.permissions.resolve_url 不能为空（权限视图已启用）"
+        );
+        anyhow::ensure!(
+            p.resolve_url.starts_with("http://") || p.resolve_url.starts_with("https://"),
+            "me.permissions.resolve_url 必须是 http(s) 绝对 URL: {}",
+            p.resolve_url
+        );
+        anyhow::ensure!(
+            p.timeout > Duration::ZERO,
+            "me.permissions.timeout 必须大于 0（权限视图已启用）"
+        );
+        Ok(())
+    }
+
     fn validate_sites(&self, is_prod: bool, sites: &[ResolvedSite]) -> anyhow::Result<()> {
         // legacy 分支：合成 default 站点，站点级字段无显式配置；仅冻结 routes[].sites 语义。
         if self.sites.is_empty() {
@@ -4291,6 +4412,129 @@ oidc:
       client_id: "c2"
       callback_path: "/cb/p2"
 "#,
+        );
+    }
+}
+
+// ── me：当前用户视图配置（issue #94）──
+
+#[cfg(test)]
+mod me_config_tests {
+    use super::*;
+
+    fn expect_err(yaml: &str, need: &str) {
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("YAML 可解析");
+        let err = cfg
+            .validate_with_env(false)
+            .expect_err("dev 应校验失败")
+            .to_string();
+        assert!(err.contains(need), "错误应含 {need}，实际: {err}");
+    }
+
+    #[test]
+    fn me_permissions_disabled_by_default() {
+        let cfg: AppConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!cfg.me.permissions.enabled);
+        assert_eq!(
+            cfg.me.permissions.timeout,
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            cfg.me.permissions.cache_ttl,
+            std::time::Duration::from_secs(30)
+        );
+        let sites = cfg.effective_sites();
+        assert!(sites[0].me_permissions.is_none(), "缺省关闭");
+    }
+
+    #[test]
+    fn me_permissions_enabled_resolves_for_legacy_site() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/api/resolve"
+"#,
+        )
+        .unwrap();
+        cfg.validate_with_env(false).unwrap();
+        let sites = cfg.effective_sites();
+        let p = sites[0].me_permissions.as_ref().expect("legacy 站点应启用");
+        assert_eq!(p.resolve_url, "https://iam.internal/api/resolve");
+    }
+
+    #[test]
+    fn me_permissions_site_override_wins_over_global() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/api/resolve"
+sites:
+  - name: app1
+    port: 8081
+  - name: app2
+    port: 8082
+    me:
+      permissions_enabled: false
+"#,
+        )
+        .unwrap();
+        cfg.validate_with_env(false).unwrap();
+        let sites = cfg.effective_sites();
+        assert!(sites
+            .iter()
+            .find(|s| s.name == "app1")
+            .unwrap()
+            .me_permissions
+            .is_some());
+        assert!(sites
+            .iter()
+            .find(|s| s.name == "app2")
+            .unwrap()
+            .me_permissions
+            .is_none());
+    }
+
+    #[test]
+    fn me_permissions_enabled_without_resolve_url_rejected() {
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+"#,
+            "me.permissions.resolve_url",
+        );
+    }
+
+    #[test]
+    fn me_permissions_rejects_non_http_resolve_url() {
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "iam.internal/resolve"
+"#,
+            "me.permissions.resolve_url",
+        );
+    }
+
+    /// 站点单独开启（全局关闭）同样要求 resolve_url，否则站点启用后必然失败。
+    #[test]
+    fn me_permissions_site_enable_requires_resolve_url() {
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    me:
+      permissions_enabled: true
+"#,
+            "me.permissions.resolve_url",
         );
     }
 }

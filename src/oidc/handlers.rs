@@ -971,6 +971,7 @@ mod site_aware_tests {
             allowed_providers: allowed.iter().map(|s| s.to_string()).collect(),
             logout_scope: LogoutScope::Global,
             security_headers: None,
+            me_permissions: None,
             legacy,
         }
     }

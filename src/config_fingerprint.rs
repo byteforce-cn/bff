@@ -862,6 +862,7 @@ oidc:
                         oidc: Default::default(),
                         logout_scope: LogoutScope::Global,
                         security_headers: None,
+                        me: None,
                     })
                 }),
             ),
