@@ -316,6 +316,7 @@ fn site_cfg(name: &str, port: u16, provider: &str) -> SiteConfig {
         },
         logout_scope: LogoutScope::Global,
         security_headers: None,
+        me: None,
     }
 }
 

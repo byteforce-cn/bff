@@ -116,6 +116,7 @@ pub fn build_site_router(state: AppState, handle: Arc<SiteHandle>) -> anyhow::Re
     let app = app
         .route("/ready", get(readiness))
         .route("/api/session", get(session_info))
+        .route("/api/me", get(crate::server::me::me_handler))
         // 兼容旧 /pipeline/{name} 路由（内部转为统一 Route 分发）
         .route("/pipeline/{name}", get(run_pipeline).post(run_pipeline))
         // WebSocket 升级专用路由（在 fallback 之前匹配）
@@ -574,6 +575,7 @@ fn metrics_path_label(state: &AppState, site: &str, path: &str) -> String {
         "/live",
         "/ready",
         "/api/session",
+        "/api/me",
     ];
     if FIXED.contains(&path) {
         return path.to_string();

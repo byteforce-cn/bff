@@ -89,9 +89,31 @@ config/
 | `oidc.allowed_providers` | `[default_provider]` | 站点可用 provider 白名单；`?provider=` 越站返回 **400** 且不回退默认 |
 | `logout_scope` | `global` | `global` = 清全站 token（`session.flush()`）+ RP-Initiated Logout；`site` = 仅清本站点 token、**不触发 IdP 登出**（热生效） |
 | `security_headers` | 无 | Partial 覆盖（见「安全响应头」），未指定字段继承全局 |
+| `me` | 无 | `/api/me` 站点级覆盖（见「me — 当前用户视图与权限」），未指定继承全局 |
 
 > 显式多站点下顶层 `server.public_base_url` / `server.trusted_hosts` 为 **dead config**（非空即启动失败）；
 > `server.business_port` 被忽略（≠ 8080 时仅告警）。
+
+### me — 当前用户视图与权限
+
+`GET /api/me` 返回当前用户身份（`sub` / `preferred_username` / `name` / `email`，取自会话中的
+ID Token）、会话（`logged_in` / `provider` / `expires_at`，**不含任何令牌**）与可选的权限视图。
+未登录返回 `200 {"logged_in": false, "provider": null}`，响应体不夹带任何用户信息。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `permissions.enabled` | `false` | 是否返回权限视图（**缺省关闭**，避免所有站点强制依赖下游授权服务） |
+| `permissions.resolve_url` | 必填（启用时） | 下游授权权威 resolve 端点（http/https 绝对 URL） |
+| `permissions.timeout` | `3s` | 单次 resolve 调用超时（覆盖连接与响应体读取全阶段）；失败/超时降级为不返回 `permissions`（身份照常 200） |
+| `permissions.cache_ttl` | `30s` | resolve 结果缓存 TTL（`0` = 不缓存；键含 `site+provider+sub`） |
+
+站点级覆盖：`sites[].me.permissions_enabled`（`true`/`false`），未指定继承全局开关；
+任一站点（含 legacy 全局）启用而 `resolve_url` 为空/非 http(s) 时启动期校验失败。
+
+resolve 调用契约为 `POST` + `Authorization: Bearer <access token>` +
+body `{"sub": "...", "provider": "..."}`，响应 `2xx {"roles": [...], "permissions": [...]}`
+（两个键至少出现一个且为字符串数组）。响应结构非法、超过 64 KiB 或超时均按失败降级
+（`permissions` 不出现，身份不受影响）。
 
 ### session_profiles — 会话 profile 覆盖
 

@@ -131,6 +131,7 @@ kubectl -n bff apply -k deploy/k8s/
 | `server.public_base_url` / `trusted_hosts` | OIDC 处理器每请求读配置 |
 | `sites[].server_names` / `public_base_url` / `spa.dir` / `oidc` 绑定 / `security_headers` / `logout_scope` | 每请求从配置快照按站点名解析（`SiteView`）；`security_headers` 在配置替换时预构建为 `HeaderMap` |
 | `sites[].oidc.allowed_providers` / `default_provider` | 站点鉴权与 provider 选择每请求解析（防越站） |
+| `me.permissions.*` / `sites[].me.permissions_enabled` | `/api/me` 权限视图开关与 resolve 参数每请求从站点视图解析；变更后视图重建（指纹归 `sites.view`） |
 | `auth_rate_limit.*`（enabled/paths/per_ip/trusted_proxies） | 中间件每请求读配置 |
 | `websocket.*`（超时/心跳/消息上限） | 每个升级请求读取 |
 | `health.*`（探针缓存 TTL/超时/路径） | `/ready` 每请求读取 |

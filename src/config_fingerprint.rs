@@ -388,6 +388,7 @@ fn site_views_equivalent(old: &AppConfig, new: &AppConfig) -> bool {
                     && a.default_provider == b.default_provider
                     && sorted_set(&a.allowed_providers) == sorted_set(&b.allowed_providers)
                     && a.security_headers == b.security_headers
+                    && a.me_permissions == b.me_permissions
                     && a.logout_scope == b.logout_scope
             }
             _ => true, // 增删站点：结构指纹负责
@@ -862,6 +863,7 @@ oidc:
                         oidc: Default::default(),
                         logout_scope: LogoutScope::Global,
                         security_headers: None,
+                        me: None,
                     })
                 }),
             ),
@@ -969,6 +971,26 @@ oidc:
             let hot = hot_applied_fields(&old, &new, &HashMap::new(), &HashMap::new());
             assert!(hot.contains(&group.to_string()), "{group} 未检出: {hot:?}");
         }
+    }
+
+    /// `me.permissions` 影响 `/api/me` 的 `SiteView.me_permissions`：变更属热生效（sites.view），
+    /// 且必须出现在 hot_applied 清单（否则管理端导入看起来像 no-op）。
+    #[test]
+    fn me_permissions_change_is_hot_and_reported() {
+        let (old, new) = changed(|c| {
+            c.me.permissions.enabled = true;
+            c.me.permissions.resolve_url = "https://iam.internal/resolve".into();
+        });
+        let restart = requires_restart_fields(&old, &new);
+        assert!(
+            restart.is_empty(),
+            "me.permissions 不应要求重启: {restart:?}"
+        );
+        let hot = hot_applied_fields(&old, &new, &HashMap::new(), &HashMap::new());
+        assert!(
+            hot.contains(&"sites.view".to_string()),
+            "me.permissions 未入热生效清单: {hot:?}"
+        );
     }
 
     /// `diff` 同时返回两个清单。

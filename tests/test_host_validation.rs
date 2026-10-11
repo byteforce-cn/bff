@@ -35,6 +35,7 @@ fn prod_site(
         oidc: SiteOidcConfig::default(),
         logout_scope: LogoutScope::Global,
         security_headers: None,
+        me: None,
     }
 }
 

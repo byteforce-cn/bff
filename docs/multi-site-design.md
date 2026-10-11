@@ -387,7 +387,7 @@ sequenceDiagram
 
 ## 9. 路由、SPA 与安全响应头
 
-- 每站点独立 `spa.dir` + `index.html` fallback；`/api/` 与 `/admin/api/` 前缀 404 行为保持；每站点各自注册保留路径（`/login`、`/logout`、回调路径、`/live`、`/ready`、`/api/session`、`/pipeline/:name`、`/ws`）。
+- 每站点独立 `spa.dir` + `index.html` fallback；`/api/` 与 `/admin/api/` 前缀 404 行为保持；每站点各自注册保留路径（`/login`、`/logout`、回调路径、`/live`、`/ready`、`/api/session`、`/api/me`、`/pipeline/:name`、`/ws`）。
 - 路由按 §5.3 过滤与优先级匹配；未命中路由时按站点 SPA fallback；`/api` 404 语义不变。
 - **P1 提供 per-site `security_headers` 覆盖**：`sites[].security_headers` 为 **Partial 类型**（所有字段 `Option`）：未指定字段继承全局；`content_security_policy` 一旦指定即**整体替换**（含全局 path-prefix `csp_overrides`）。
 - **性能**：安全响应头在配置替换时**预构建为 `HeaderMap`（`HeaderValue` 已解析）**，`SiteView` 只持有 `Arc<HeaderMap>`；请求路径零解析成本。中间件改为按请求读 `SiteView` 的预构建值（兑现热生效），不得在热路径解析字符串/构造 `HeaderValue`。
