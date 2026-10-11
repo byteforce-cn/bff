@@ -902,11 +902,11 @@ async fn me_site_policy_can_disable_permissions() {
     let a = common::spawn_site(&state, "app1").await;
     let b = common::spawn_site(&state, "app2").await;
     let client = common::test_client();
+    // A 先断言：B 的静默续登会轮换共享会话 id（cycle_id），旧 cookie 随即失效
     let cookie_a = common::login_on(&client, &idp_a, &a, "pA", None).await;
-    let cookie_b = common::login_on(&client, &idp_b, &b, "pB", Some(&cookie_a)).await;
-
     let body_a = me_body(&a, &cookie_a).await;
     assert_eq!(body_a["permissions"]["roles"][0], "admin");
+    let cookie_b = common::login_on(&client, &idp_b, &b, "pB", Some(&cookie_a)).await;
     let body_b = me_body(&b, &cookie_b).await;
     assert_eq!(body_b["logged_in"], true);
     assert!(body_b.get("permissions").is_none(), "站点显式关闭: {body_b}");
@@ -927,8 +927,8 @@ Expected: `permissions` 相关用例失败（`body.get("permissions").is_none()`
 /// 权限视图解析结果校验：`roles` / `permissions` 至少出现一个且必须是字符串数组；
 /// 结构非法返回 `None`（整体拒绝，不输出半截字段）。
 pub(crate) fn permissions_fields(resolve_body: &serde_json::Value) -> Option<serde_json::Value> {
-    fn strings(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
-        let arr = v?.as_array()?;
+    fn strings(v: &serde_json::Value) -> Option<Vec<String>> {
+        let arr = v.as_array()?;
         Some(
             arr.iter()
                 .filter_map(|x| x.as_str().map(str::to_string))
@@ -939,8 +939,15 @@ pub(crate) fn permissions_fields(resolve_body: &serde_json::Value) -> Option<ser
     if !has_any {
         return None;
     }
-    let roles = strings(resolve_body.get("roles"))?;
-    let permissions = strings(resolve_body.get("permissions"))?;
+    // 键缺失 = 该维度为空；键存在但非数组 = 结构非法（整体拒绝）
+    let roles = match resolve_body.get("roles") {
+        Some(v) => strings(v)?,
+        None => Vec::new(),
+    };
+    let permissions = match resolve_body.get("permissions") {
+        Some(v) => strings(v)?,
+        None => Vec::new(),
+    };
     Some(serde_json::json!({"roles": roles, "permissions": permissions}))
 }
 

@@ -2403,8 +2403,9 @@ impl AppConfig {
     ///   归一化后站点内唯一；
     /// - 规则 11：prod 下多站点复用同一 `spa.dir` 仅告警；
     /// - legacy 冻结：无 `sites` 定义时禁止 `routes[].sites` 注解（路由会静默不可命中）。
-    /// `me.permissions` 校验：任一站点（含 legacy 全局）启用权限视图时，
-    /// `resolve_url` 必须是非空 http(s) 绝对 URL。
+    ///
+    /// `me.permissions` 校验：任一站点（含 legacy 全局）启用权限视图时，`resolve_url`
+    /// 必须是非空 http(s) 绝对 URL。
     fn validate_me(&self) -> anyhow::Result<()> {
         let p = &self.me.permissions;
         let any_enabled = p.enabled

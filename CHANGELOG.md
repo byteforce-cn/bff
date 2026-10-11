@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `GET /api/me`：同源只读的「当前用户与会话」视图（身份取自 ID Token，**不含任何令牌**）；未登录返回 `200 {"logged_in": false}`；可选的权限视图（`me.permissions`，缺省关闭，站点可覆盖）由下游授权权威 `/resolve` 解析并按 `site+provider+sub` 缓存，失败/超时降级为不返回该字段
+
 ### Changed
 
 - 文档重构：README 重写为面向外部受众的骨架（新增英文版 README.en.md）；新增 `docs/architecture.md`、`docs/configuration.md`、`docs/security-hardening.md`；原内部审计/进度文档由上述文档取代；`docs/production-deployment.md` 更名为 `docs/deployment.md`
