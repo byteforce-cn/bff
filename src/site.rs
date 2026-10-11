@@ -41,6 +41,8 @@ pub struct SiteView {
     pub allowed_providers: Vec<String>,
     pub logout_scope: LogoutScope,
     pub security_headers: Arc<PrebuiltSecurityHeaders>,
+    /// 已解析的权限视图配置（`None` = `/api/me` 不返回 permissions）
+    pub me_permissions: Option<crate::config::ResolvedMePermissions>,
     pub legacy: bool,
 }
 
@@ -199,6 +201,7 @@ impl SiteView {
             allowed_providers: site.allowed_providers.clone(),
             logout_scope: site.logout_scope,
             security_headers,
+            me_permissions: site.me_permissions.clone(),
             legacy: site.legacy,
         }
     }

@@ -1,6 +1,6 @@
 # `/api/me` 当前用户与权限视图 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 为 BFF 增加同源只读端点 `GET /api/me`：SPA 不接触任何令牌即可拿到当前用户身份、会话状态与可配置的权限视图。
 
@@ -56,7 +56,7 @@
   - `pub struct ResolvedMePermissions { pub resolve_url: String, pub timeout: Duration, pub cache_ttl: Duration }`
   - `ResolvedSite.me_permissions: Option<ResolvedMePermissions>`（`None` = 该站点不返回权限视图）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 追加到 `src/config.rs` 的 `#[cfg(test)] mod tests`（沿用同模块 `expect_ok` / `expect_err` 辅助）：
 
@@ -155,12 +155,12 @@ sites:
 }
 ```
 
-- [ ] **Step 2: 跑测试，确认 RED**
+- [x] **Step 2: 跑测试，确认 RED**
 
 Run: `cargo test --lib config::tests::me_permissions -- --nocapture`
 Expected: 编译失败 `no field 'me' on type AppConfig` / `cannot find ...`（功能尚未实现）。
 
-- [ ] **Step 3: 实现配置模型与解析**
+- [x] **Step 3: 实现配置模型与解析**
 
 在 `src/config.rs`：
 
@@ -323,12 +323,12 @@ fn validate_me(&self) -> anyhow::Result<()> {
 
 7. 修字面量编译错误：`SiteConfig { ... }` 补 `me: None`，`ResolvedSite { ... }` 补 `me_permissions: None`（文件见 Files）。
 
-- [ ] **Step 4: 跑测试，确认 GREEN**
+- [x] **Step 4: 跑测试，确认 GREEN**
 
 Run: `cargo test --lib config::tests::me_permissions -- --nocapture`
 Expected: `test result: ok. 6 passed`。
 
-- [ ] **Step 5: 文档（同一个提交）**
+- [x] **Step 5: 文档（同一个提交）**
 
 `docs/configuration.md`：TOC 在 `### sites` 后加 `### me — 当前用户视图与权限`，正文加：
 
@@ -351,7 +351,7 @@ resolve 调用契约为 `POST` + `Authorization: Bearer <access token>` +
 body `{"sub": "...", "provider": "..."}`，响应 `2xx {"roles": [...], "permissions": [...]}`。
 ```
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/config.rs src/config_fingerprint.rs src/site.rs src/oidc/handlers.rs \
@@ -378,7 +378,7 @@ git commit -m "feat(me): add me.permissions config with per-site override and va
   - `pub(crate) fn decode_id_token_claims(id_token: &str) -> Option<serde_json::Value>`
   - `pub(crate) fn identity_fields(sub: &str, claims: Option<&serde_json::Value>) -> serde_json::Value`
 
-- [ ] **Step 1: 写失败测试（单元 + 集成）**
+- [x] **Step 1: 写失败测试（单元 + 集成）**
 
 `src/server/me.rs` 底部 `#[cfg(test)] mod tests`（连同 handler 骨架一起创建，见 Step 3）：
 
@@ -549,12 +549,12 @@ async fn me_falls_back_to_session_sub_without_id_token() {
 
 > `common::create_session_with_tokens` 返回 legacy Cookie 头值 `BFF_SESSION=<id>`（见 `tests/common/mod.rs:384`）。
 
-- [ ] **Step 2: 跑测试，确认 RED**
+- [x] **Step 2: 跑测试，确认 RED**
 
 Run: `cargo test --test test_me_endpoint -- --nocapture`
 Expected: 请求 `/api/me` 返回 404（未注册路由），断言 `assert_eq!(resp.status(), 200)` 失败。
 
-- [ ] **Step 3: 实现最小 handler + 路由**
+- [x] **Step 3: 实现最小 handler + 路由**
 
 `src/server/mod.rs` 加 `pub mod me;`。
 
@@ -633,18 +633,18 @@ fn logged_out() -> serde_json::Value {
 `.route("/api/me", get(crate::server::me::me_handler))`；`metrics_path_label` 的
 `FIXED` 数组补 `"/api/me"`。
 
-- [ ] **Step 4: 跑测试，确认 GREEN**
+- [x] **Step 4: 跑测试，确认 GREEN**
 
 Run: `cargo test --test test_me_endpoint -- --nocapture && cargo test --lib server::me -- --nocapture`
 Expected: `test result: ok`（集成 3 passed + 单元 3 passed）。
 
-- [ ] **Step 5: 文档（同一个提交）**
+- [x] **Step 5: 文档（同一个提交）**
 
 - `docs/architecture.md` 路由清单在「探针」前加一行：
   `- 当前用户视图：\`/api/me\`（身份 + 会话；\`me.permissions\` 启用时含下游权限视图，缺省关闭）；`
 - `docs/multi-site-design.md:390` 保留路径列表加 `/api/me`（与 `/api/session` 并列）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/server/me.rs src/server/mod.rs src/server/business.rs src/site.rs \

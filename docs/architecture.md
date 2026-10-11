@@ -39,6 +39,7 @@ flowchart LR
 8. **指标采集**：请求计数与延迟直方图（`path` 标签归一化，防基数爆炸）；
 9. **路由**：
    - OIDC 端点：`/login`、按 provider 配置动态注册的回调路径、`/logout`；
+   - 当前用户视图：`/api/me`（身份 + 会话，站点级 `me.permissions` 启用时含下游权限视图，缺省关闭；不含任何令牌）；
    - 探针：`/live`（进程存活）、`/ready`（上游探测，结果缓存、输出裁剪）；
    - WebSocket 升级：`/ws`、`/ws/*`（仅 `proxy` + `websocket|auto` 路由可升级，强制会话鉴权）；
    - 兼容入口：`/pipeline/:name`（内部转为统一分发，鉴权规则与路由一致）；
