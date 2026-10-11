@@ -42,11 +42,7 @@ pub async fn me_handler(
     session: Session,
 ) -> Json<serde_json::Value> {
     let view = state.site_view(&handle.name).expect("site view");
-    let Some(provider) = view.current_provider(&session).await else {
-        return Json(logged_out());
-    };
     let Some(tokens) = view.current_tokens(&session).await else {
-        // current_provider 已确认令牌存在；读取失败按未登录处理（防御，不 500）
         return Json(logged_out());
     };
     let id_token = tokens.id_token().ok().flatten();
@@ -54,7 +50,10 @@ pub async fn me_handler(
     let mut body = identity_fields(&tokens.sub, claims.as_ref());
     if let Some(obj) = body.as_object_mut() {
         obj.insert("logged_in".into(), serde_json::Value::Bool(true));
-        obj.insert("provider".into(), serde_json::Value::String(provider));
+        obj.insert(
+            "provider".into(),
+            serde_json::Value::String(tokens.provider.clone()),
+        );
         obj.insert(
             "expires_at".into(),
             serde_json::Value::from(tokens.expires_at),
@@ -97,6 +96,9 @@ pub(crate) fn permissions_fields(resolve_body: &serde_json::Value) -> Option<ser
 }
 
 /// 调用下游授权权威解析权限；任何失败/超时/结构非法都返回 `None`（降级为身份视图）。
+/// resolve 响应体上限：权限清单应远小于此；超出即按失败降级（防下游异常/被攻陷时内存膨胀）。
+const RESOLVE_MAX_BODY_BYTES: usize = 64 * 1024;
+
 /// 成功结果按 `site + provider + sub` 缓存，TTL 见 `me.permissions.cache_ttl`。
 async fn resolve_permissions(
     state: &AppState,
@@ -104,10 +106,8 @@ async fn resolve_permissions(
     tokens: &StoredTokens,
     cfg: &ResolvedMePermissions,
 ) -> Option<serde_json::Value> {
-    let key = format!(
-        "bff:me:permissions:{}:{}:{}",
-        site.name, tokens.provider, tokens.sub
-    );
+    // 长度前缀消除分隔符歧义（provider 只校验非空、sub 由 IdP 控制，两者都可能含 `:`）。
+    let key = permissions_cache_key(&site.name, &tokens.provider, &tokens.sub);
     if let Some(bytes) = state.cache.get(&key).await {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             return Some(v);
@@ -120,9 +120,12 @@ async fn resolve_permissions(
             return None;
         }
     };
+    // `RequestBuilder::timeout` 覆盖「连接 → 响应体读取完成」全阶段：
+    // 仅用 `tokio::time::timeout` 包 `send()` 时，body 慢读会拖到客户端总超时（默认 30s）。
     let request = state
         .http
         .post(&cfg.resolve_url)
+        .timeout(cfg.timeout)
         .header(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {access_token}"),
@@ -147,10 +150,16 @@ async fn resolve_permissions(
         tracing::warn!(%status, "权限视图：resolve 返回非 2xx，降级");
         return None;
     }
-    let body = match resp.json::<serde_json::Value>().await {
-        Ok(v) => v,
+    let body = match crate::server::proxy::read_capped_body(resp, RESOLVE_MAX_BODY_BYTES).await {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "权限视图：resolve 响应非法 JSON，降级");
+                return None;
+            }
+        },
         Err(e) => {
-            tracing::warn!(error = %e, "权限视图：resolve 响应非法 JSON，降级");
+            tracing::warn!(error = %e, "权限视图：resolve 响应超限，降级");
             return None;
         }
     };
@@ -158,14 +167,27 @@ async fn resolve_permissions(
         tracing::warn!("权限视图：resolve 响应缺少 roles/permissions 数组，降级");
         return None;
     };
-    if let Ok(bytes) = serde_json::to_vec(&permissions) {
-        state.cache.set(&key, bytes, cfg.cache_ttl).await;
+    // TTL=0 = 不缓存（Redis 后端会把 0 钳到 1ms，必须在调用侧显式跳过）
+    if cfg.cache_ttl > std::time::Duration::ZERO {
+        if let Ok(bytes) = serde_json::to_vec(&permissions) {
+            state.cache.set(&key, bytes, cfg.cache_ttl).await;
+        }
     }
     Some(permissions)
 }
 
 fn logged_out() -> serde_json::Value {
     serde_json::json!({"logged_in": false, "provider": null})
+}
+
+/// 权限缓存键：长度前缀消除分隔符歧义（provider 只校验非空、sub 由 IdP 控制，
+/// 两者都可能含 `:`，平铺拼接会出现 `("iam:r","u1")` 与 `("iam","r:u1")` 同键的别名）。
+fn permissions_cache_key(site: &str, provider: &str, sub: &str) -> String {
+    format!(
+        "bff:me:permissions:{site}:{}:{provider}:{}:{sub}",
+        provider.len(),
+        sub.len()
+    )
 }
 
 #[cfg(test)]
@@ -217,6 +239,20 @@ mod tests {
         assert!(permissions_fields(&serde_json::json!({"roles": "admin"})).is_none());
         assert!(permissions_fields(&serde_json::json!({})).is_none());
         assert!(permissions_fields(&serde_json::json!({"other": []})).is_none());
+    }
+
+    #[test]
+    fn permissions_cache_key_is_unambiguous() {
+        // 分隔符别名：provider 含 `:` 时不得与「更短 provider + 含 `:` 的 sub」碰撞
+        assert_ne!(
+            permissions_cache_key("app1", "iam:r", "u1"),
+            permissions_cache_key("app1", "iam", "r:u1")
+        );
+        // 站点维度必须参与键
+        assert_ne!(
+            permissions_cache_key("app1", "p", "x"),
+            permissions_cache_key("app2", "p", "x")
+        );
     }
 
     #[test]

@@ -665,7 +665,7 @@ git commit -m "feat(me): add GET /api/me identity and session view"
 - Consumes（Task 1/2）：`ResolvedMePermissions`、`SiteView.me_permissions`、`me_handler` 内的身份视图。
 - Produces：`pub(crate) fn permissions_fields(resolve_body: &serde_json::Value) -> Option<serde_json::Value>`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `src/server/me.rs` 的 `mod tests` 追加：
 
@@ -914,12 +914,12 @@ async fn me_site_policy_can_disable_permissions() {
 }
 ```
 
-- [ ] **Step 2: 跑测试，确认 RED**
+- [x] **Step 2: 跑测试，确认 RED**
 
 Run: `cargo test --test test_me_endpoint -- --nocapture`
 Expected: `permissions` 相关用例失败（`body.get("permissions").is_none()` 或 `roles[0]` 索引 panic），且 resolve 请求计数为 0。
 
-- [ ] **Step 3: 实现 resolve + 缓存 + 降级**
+- [x] **Step 3: 实现 resolve + 缓存 + 降级**
 
 `src/server/me.rs` 追加（handler 在身份字段写完后接线）：
 
@@ -1028,12 +1028,12 @@ handler 中身份字段写完后：
 
 补充 import：`use crate::config::ResolvedMePermissions; use crate::oidc::tokens::StoredTokens; use crate::site::SiteView;`。
 
-- [ ] **Step 4: 跑测试，确认 GREEN**
+- [x] **Step 4: 跑测试，确认 GREEN**
 
 Run: `cargo test --test test_me_endpoint -- --nocapture && cargo test --lib server::me -- --nocapture`
 Expected: `test result: ok`（集成 11 passed + 单元 4 passed）。
 
-- [ ] **Step 5: 文档（同一个提交）**
+- [x] **Step 5: 文档（同一个提交）**
 
 `CHANGELOG.md` 的 `## [Unreleased]` 下新增：
 
@@ -1043,7 +1043,7 @@ Expected: `test result: ok`（集成 11 passed + 单元 4 passed）。
 - `GET /api/me`：同源只读的「当前用户与会话」视图（身份取自 ID Token，**不含任何令牌**）；未登录返回 `200 {"logged_in": false}`；可选的权限视图（`me.permissions`，缺省关闭，站点可覆盖）由下游授权权威 `/resolve` 解析并按 `site+provider+sub` 缓存，失败/超时降级为不返回该字段
 ```
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/server/me.rs tests/test_me_endpoint.rs CHANGELOG.md
@@ -1054,7 +1054,26 @@ git commit -m "feat(me): resolve optional permission view with cache and gracefu
 
 ## 收尾验证（三个任务全部完成后）
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] `cargo test --all-features`（全量，含既有回归）
-- [ ] 整分支 review（fresh reviewer）：对照 issue #94 验收标准与 Global Constraints，确认无令牌泄露、无 5xx 降级路径。
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] `cargo test --all-features`（全量，含既有回归）
+- [x] 整分支 review（fresh reviewer）：对照 issue #94 验收标准与 Global Constraints，确认无令牌泄露、无 5xx 降级路径。
+
+---
+
+## Review 修复记录（整分支 fresh reviewer，2026-10-11）
+
+Critical: 0。Important 2 项、Minor 8 项；处理如下（全部 RED→GREEN，除标注外）：
+
+| 发现 | 处理 |
+| --- | --- |
+| P1-1 `permissions.timeout` 未覆盖响应体读取（慢 body 拖到客户端总超时 30s） | 修复：`RequestBuilder::timeout(cfg.timeout)`；测试 `me_degrades_when_resolve_body_never_finishes`（RED 实测 30.0s → GREEN <3s） |
+| P1-2 resolve 响应体无上限（内存膨胀/污染缓存） | 修复：复用 `proxy::read_capped_body`（`pub(crate)`）+ 64 KiB 上限；测试 `me_degrades_when_resolve_body_exceeds_cap` |
+| P2-1 `cache_ttl=0` 在 Redis 后端被钳到 1ms | 修复：调用侧 `cache_ttl > ZERO` 才 `set`。未加测试：memory 后端本就 no-op，无法构造区分性 RED |
+| P2-2 `validate_me` 吸收了 `validate_sites` 的 rustdoc | 修复：文档块归位 |
+| P2-3 `me.permissions` 变更未入配置指纹/hot_applied 清单 | 修复：`site_views_equivalent` 比较 `me_permissions`；`docs/deployment.md` 热生效表补行；测试 `me_permissions_change_is_hot_and_reported` |
+| P2-4 缓存键分隔符别名（provider 含 `:`） | 修复：长度前缀键 `permissions_cache_key`；单测 `permissions_cache_key_is_unambiguous` |
+| P2-5 resolve 复用带重定向的出网客户端 | 接受：reqwest 跨主机重定向会剥离 `Authorization`；被攻陷的授权权威本就可直接注入权限，无新增风险 |
+| P2-6 resolve_url 内嵌凭据会进日志 | 修复：`validate_me` 拒绝用户信息；测试 `me_permissions_rejects_resolve_url_with_credentials` |
+| P2-7 provider 解析两次，响应标签可能与缓存键不一致 | 修复：统一用 `tokens.provider` |
+| P2-8 计划文档勾选状态不一致 | 修复：本表与勾选同步 |

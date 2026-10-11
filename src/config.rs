@@ -2392,20 +2392,8 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 站点字段与 Host 白名单校验（§5.4 第 1/2/6/7/11 条 + §5.3 重复路由告警）。
-    ///
-    /// - 规则 1/2/3：站点名合法（`[a-z0-9-]+`）且唯一、保留名 `admin` 禁止；端口非 0、
-    ///   唯一、≠ `admin_port`；`bind` 必须为可解析 IP；`session_profile` 必须已定义；
-    /// - 规则 6（prod）：每站点 `public_base_url` 必填、`server_names` 配置时必须包含 public 主机、
-    ///   站点间归一化后唯一；显式多站点下顶层 `server.public_base_url` / `trusted_hosts` 为
-    ///   dead config（error）；`server.business_port` 被忽略（≠ 8080 时 warn）；
-    /// - 规则 7：`server_names` 仅主机名（复用 `normalize_host`，读原始值以免非法项被静默丢弃），
-    ///   归一化后站点内唯一；
-    /// - 规则 11：prod 下多站点复用同一 `spa.dir` 仅告警；
-    /// - legacy 冻结：无 `sites` 定义时禁止 `routes[].sites` 注解（路由会静默不可命中）。
-    ///
     /// `me.permissions` 校验：任一站点（含 legacy 全局）启用权限视图时，`resolve_url`
-    /// 必须是非空 http(s) 绝对 URL。
+    /// 必须是 http(s) 绝对 URL、非空且不得内嵌用户信息（凭据会进入日志）。
     fn validate_me(&self) -> anyhow::Result<()> {
         let p = &self.me.permissions;
         let any_enabled = p.enabled
@@ -2430,9 +2418,27 @@ impl AppConfig {
             p.timeout > Duration::ZERO,
             "me.permissions.timeout 必须大于 0（权限视图已启用）"
         );
+        let parsed = url::Url::parse(&p.resolve_url)
+            .map_err(|e| anyhow::anyhow!("me.permissions.resolve_url 非法: {e}"))?;
+        anyhow::ensure!(
+            parsed.username().is_empty() && parsed.password().is_none(),
+            "me.permissions.resolve_url 不得内嵌用户信息（凭据会进入日志）: {}",
+            p.resolve_url
+        );
         Ok(())
     }
 
+    /// 站点字段与 Host 白名单校验（§5.4 第 1/2/6/7/11 条 + §5.3 重复路由告警）。
+    ///
+    /// - 规则 1/2/3：站点名合法（`[a-z0-9-]+`）且唯一、保留名 `admin` 禁止；端口非 0、
+    ///   唯一、≠ `admin_port`；`bind` 必须为可解析 IP；`session_profile` 必须已定义；
+    /// - 规则 6（prod）：每站点 `public_base_url` 必填、`server_names` 配置时必须包含 public 主机、
+    ///   站点间归一化后唯一；显式多站点下顶层 `server.public_base_url` / `trusted_hosts` 为
+    ///   dead config（error）；`server.business_port` 被忽略（≠ 8080 时 warn）；
+    /// - 规则 7：`server_names` 仅主机名（复用 `normalize_host`，读原始值以免非法项被静默丢弃），
+    ///   归一化后站点内唯一；
+    /// - 规则 11：prod 下多站点复用同一 `spa.dir` 仅告警；
+    /// - legacy 冻结：无 `sites` 定义时禁止 `routes[].sites` 注解（路由会静默不可命中）。
     fn validate_sites(&self, is_prod: bool, sites: &[ResolvedSite]) -> anyhow::Result<()> {
         // legacy 分支：合成 default 站点，站点级字段无显式配置；仅冻结 routes[].sites 语义。
         if self.sites.is_empty() {
@@ -4519,6 +4525,20 @@ me:
   permissions:
     enabled: true
     resolve_url: "iam.internal/resolve"
+"#,
+            "me.permissions.resolve_url",
+        );
+    }
+
+    /// resolve_url 内嵌用户信息会把凭据带进日志（reqwest 错误串含 URL），必须拒绝。
+    #[test]
+    fn me_permissions_rejects_resolve_url_with_credentials() {
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://svc:secret@authz.internal/resolve"
 "#,
             "me.permissions.resolve_url",
         );

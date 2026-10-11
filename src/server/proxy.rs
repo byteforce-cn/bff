@@ -379,7 +379,10 @@ async fn proxy_http(
 }
 
 /// 按上限读取响应体（reqwest 无默认上限；大响应会造成内存膨胀/OOM）。
-async fn read_capped_body(resp: reqwest::Response, max: usize) -> Result<Vec<u8>, AppError> {
+pub(crate) async fn read_capped_body(
+    resp: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, AppError> {
     use futures::StreamExt;
     let mut buf: Vec<u8> = Vec::new();
     let mut stream = resp.bytes_stream();

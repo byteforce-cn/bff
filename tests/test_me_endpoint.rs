@@ -375,3 +375,70 @@ async fn me_site_policy_can_disable_permissions() {
     );
     resolve.verify().await;
 }
+
+/// Review P1-1：resolve 立即返回响应头、body 永不结束 —— 超时必须覆盖 body 读取，
+/// 不能被客户端总超时（默认 30s）拖住。
+#[tokio::test]
+async fn me_degrades_when_resolve_body_never_finishes() {
+    let app = axum::Router::new().route(
+        "/resolve",
+        axum::routing::post(|| async {
+            let stream =
+                futures::stream::pending::<Result<axum::body::Bytes, std::convert::Infallible>>();
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                axum::body::Body::from_stream(stream),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    cfg.me.permissions.enabled = true;
+    cfg.me.permissions.resolve_url = format!("http://{addr}/resolve");
+    cfg.me.permissions.timeout = Duration::from_millis(200);
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(&state, serde_json::json!({"sub": "user-1"})).await;
+
+    let start = std::time::Instant::now();
+    let body = me_body(&bff, &cookie).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "超时必须覆盖 body 读取，实际耗时 {:?}",
+        start.elapsed()
+    );
+    assert_eq!(body["logged_in"], true);
+    assert!(body.get("permissions").is_none());
+}
+
+/// Review P1-2：resolve 返回超大响应体 → 按上限截断/降级，不得整体缓冲。
+#[tokio::test]
+async fn me_degrades_when_resolve_body_exceeds_cap() {
+    let resolve = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "roles": ["admin"],
+            // 约 128 KiB，超过 64 KiB 上限
+            "permissions": ["x".repeat(128 * 1024)]
+        })))
+        .expect(1)
+        .mount(&resolve)
+        .await;
+    let state = state_with_permissions(&format!("{}/resolve", resolve.uri()));
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(&state, serde_json::json!({"sub": "user-1"})).await;
+
+    let body = me_body(&bff, &cookie).await;
+    assert_eq!(body["logged_in"], true);
+    assert!(
+        body.get("permissions").is_none(),
+        "超出上限必须降级，不得缓冲整包: {body}"
+    );
+    resolve.verify().await;
+}
