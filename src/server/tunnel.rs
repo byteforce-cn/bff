@@ -45,24 +45,90 @@ impl Default for TunnelConfig {
     }
 }
 
+/// 首帧认证注入帧（已渲染：变量替换完成、长度受限）。
+#[derive(Debug, Clone)]
+pub struct AuthFrame {
+    pub payload: Vec<u8>,
+    pub binary: bool,
+}
+
+/// 隧道认证参数（握手 Bearer + 可选首帧帧注入）。
+#[derive(Debug, Clone, Default)]
+pub struct TunnelAuth {
+    /// 站点名（指标/日志维度）
+    pub site: String,
+    /// 握手注入的 access token（`Authorization: Bearer`）
+    pub token: Option<String>,
+    /// 协议级首帧（应用层登录帧）
+    pub frame: Option<AuthFrame>,
+}
+
+/// 渲染 WS 首帧模板（issue #130）。
+///
+/// 文本帧按 JSON 字符串转义注入变量（登录帧通常是 JSON）；二进制帧按原始字节注入。
+/// 未知变量或未闭合模板返回 `None`（启动期已校验，这里兜底）。
+pub fn build_auth_frame(
+    cfg: &crate::config::WsAuthFrameConfig,
+    site: &str,
+    sub: &str,
+    provider: &str,
+    access_token: &str,
+) -> Option<AuthFrame> {
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()?;
+    let value = |name: &str| -> Option<&str> {
+        match name {
+            "access_token" => Some(access_token),
+            "sub" => Some(sub),
+            "provider" => Some(provider),
+            "site" => Some(site),
+            "now" => Some(now.as_str()),
+            _ => None,
+        }
+    };
+    let mut out = String::with_capacity(cfg.payload.len());
+    let mut rest = cfg.payload.as_str();
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find("}}")?;
+        let name = after[..end].trim();
+        let raw = value(name)?;
+        if cfg.binary {
+            out.push_str(raw);
+        } else {
+            let quoted = serde_json::to_string(raw).ok()?;
+            out.push_str(quoted.trim_matches('"'));
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Some(AuthFrame {
+        payload: out.into_bytes(),
+        binary: cfg.binary,
+    })
+}
+
 /// WebSocket 双向隧道：客户端 ↔ 上游。
 ///
 /// # Arguments
 /// * `client_ws` - Axum 升级后的客户端 WebSocket
 /// * `upstream_url` - 上游 WS URL（ws:// 或 wss:// 协议）
-/// * `auth_token` - 可选认证令牌：以 `Authorization: Bearer` 注入上游握手
+/// * `auth` - 握手 Bearer 与可选首帧注入（`TunnelAuth`）
 /// * `cfg` - 超时/心跳/大小上限参数
 pub async fn ws_tunnel(
     mut client_ws: WebSocket,
     upstream_url: String,
-    auth_token: Option<String>,
+    auth: TunnelAuth,
     cfg: TunnelConfig,
 ) {
+    let auth_token = auth.token.as_deref();
     tracing::info!(%upstream_url, "WebSocket 隧道建立中");
 
     // 1. 连接上游 WebSocket（带 connect 超时与 Bearer 注入）
-    let connect = connect_upstream(&upstream_url, auth_token.as_deref());
-    let upstream_ws = match tokio::time::timeout(cfg.connect_timeout, connect).await {
+    let connect = connect_upstream(&upstream_url, auth_token);
+    let mut upstream_ws = match tokio::time::timeout(cfg.connect_timeout, connect).await {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => {
             let reason = format!("上游 WebSocket 连接失败: {} (url={})", e, upstream_url);
@@ -91,6 +157,55 @@ pub async fn ws_tunnel(
             return;
         }
     };
+
+    // 1.5 首帧认证注入（协议级登录帧）：握手成功后立即发送，失败即关闭隧道。
+    if let Some(frame) = auth.frame.clone() {
+        let msg = if frame.binary {
+            tungstenite::Message::Binary(frame.payload.into())
+        } else {
+            match String::from_utf8(frame.payload) {
+                Ok(text) => tungstenite::Message::Text(text.into()),
+                Err(_) => {
+                    tracing::error!(%upstream_url, "WebSocket 首帧不是合法 UTF-8，关闭隧道");
+                    metrics::counter!(
+                        "bff_ws_auth_frame_total",
+                        "site" => auth.site.clone(),
+                        "result" => "invalid"
+                    )
+                    .increment(1);
+                    let _ = client_ws
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 1011,
+                            reason: "首帧认证注入失败".into(),
+                        })))
+                        .await;
+                    return;
+                }
+            }
+        };
+        if let Err(e) = upstream_ws.send(msg).await {
+            tracing::error!(%upstream_url, error = %e, "WebSocket 首帧认证注入失败，关闭隧道");
+            metrics::counter!(
+                "bff_ws_auth_frame_total",
+                "site" => auth.site.clone(),
+                "result" => "failed"
+            )
+            .increment(1);
+            let _ = client_ws
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: "首帧认证注入失败".into(),
+                })))
+                .await;
+            return;
+        }
+        metrics::counter!(
+            "bff_ws_auth_frame_total",
+            "site" => auth.site.clone(),
+            "result" => "ok"
+        )
+        .increment(1);
+    }
 
     tracing::info!(%upstream_url, "WebSocket 隧道已建立，开始双向 relay");
 
@@ -306,5 +421,46 @@ async fn timeout_opt<F: std::future::Future>(timeout: Duration, fut: F) -> Resul
         Ok(fut.await)
     } else {
         tokio::time::timeout(timeout, fut).await.map_err(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WsAuthFrameConfig;
+
+    #[test]
+    fn build_auth_frame_json_escapes_and_substitutes() {
+        let cfg = WsAuthFrameConfig {
+            payload: r#"{"type":"LOGIN_REQ","token":"{{access_token}}","u":"{{sub}}"}"#.into(),
+            binary: false,
+        };
+        let frame = build_auth_frame(&cfg, "app1", "u\"x", "iam", "tok-1").expect("渲染成功");
+        assert!(!frame.binary);
+        let v: serde_json::Value =
+            serde_json::from_slice(&frame.payload).expect("文本帧应是合法 JSON");
+        assert_eq!(v["type"], "LOGIN_REQ");
+        assert_eq!(v["token"], "tok-1");
+        assert_eq!(v["u"], "u\"x", "claim 内容按 JSON 转义，不能破坏帧结构");
+    }
+
+    #[test]
+    fn build_auth_frame_binary_inserts_raw_bytes() {
+        let cfg = WsAuthFrameConfig {
+            payload: "LOGIN {{access_token}} @{{site}}".into(),
+            binary: true,
+        };
+        let frame = build_auth_frame(&cfg, "app1", "u1", "iam", "tok-1").expect("渲染成功");
+        assert!(frame.binary);
+        assert_eq!(frame.payload, b"LOGIN tok-1 @app1");
+    }
+
+    #[test]
+    fn build_auth_frame_rejects_unknown_variable() {
+        let cfg = WsAuthFrameConfig {
+            payload: r#"{"tenant":"{{tenant}}"}"#.into(),
+            binary: false,
+        };
+        assert!(build_auth_frame(&cfg, "app1", "u1", "iam", "tok-1").is_none());
     }
 }

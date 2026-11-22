@@ -1986,6 +1986,11 @@ pub struct RouteTypeConfig {
     #[serde(default)]
     pub token_exchange: Option<TokenExchangeConfig>,
 
+    /// WebSocket 首帧认证注入（issue #130）：握手后 BFF 向上游发送一帧，
+    /// 把会话 access token 放进协议级登录帧（如 IM 的 `LOGIN_REQ`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_auth_frame: Option<WsAuthFrameConfig>,
+
     // ---- Pipeline 专属 ----
     /// 引用 pipeline 名称（指向 pipelines 注册表）
     pub pipeline: Option<String>,
@@ -2002,6 +2007,45 @@ pub struct RouteTypeConfig {
     pub status: Option<u16>,
     pub body: Option<serde_json::Value>,
     pub headers: Option<HashMap<String, String>>,
+}
+
+/// WebSocket 首帧认证注入（issue #130）。
+///
+/// 浏览器不接触令牌，协议级登录帧（应用层首帧）无法由浏览器填写；BFF 在握手后
+/// 向上游补发一帧模板渲染结果，认证信息因此停留在服务端。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WsAuthFrameConfig {
+    /// 首帧模板。文本帧（默认）变量按 JSON 字符串转义注入；二进制帧按原始字节注入。
+    /// 可用变量：`{{access_token}}` / `{{sub}}` / `{{provider}}` / `{{site}}` / `{{now}}`。
+    pub payload: String,
+    /// 以二进制帧发送（默认 false = 文本帧）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub binary: bool,
+}
+
+/// WS 首帧模板可用变量。
+pub const WS_AUTH_FRAME_VARS: &[&str] = &["access_token", "sub", "provider", "site", "now"];
+
+/// WS 首帧上限：认证帧只承载登录信息，超过即视为配置错误。
+pub const WS_AUTH_FRAME_MAX_BYTES: usize = 8 * 1024;
+
+/// 解析 WS 首帧模板中的 `{{var}}`（启动期校验；未闭合/空变量名报错）。
+pub fn ws_auth_frame_vars(tpl: &str) -> Result<Vec<String>, String> {
+    let mut vars = Vec::new();
+    let mut rest = tpl;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            return Err("模板存在未闭合的 `{{`".into());
+        };
+        let name = after[..end].trim();
+        if name.is_empty() {
+            return Err("模板含空变量 `{{}}`".into());
+        }
+        vars.push(name.to_string());
+        rest = &after[end + 2..];
+    }
+    Ok(vars)
 }
 
 /// 输入映射规则
@@ -2382,6 +2426,59 @@ impl AppConfig {
                         "routes[{}] upstream URL 非法: {}",
                         i,
                         u
+                    );
+                }
+            }
+
+            // WS 首帧认证注入校验（issue #130）
+            if let Some(frame) = &route.config.ws_auth_frame {
+                anyhow::ensure!(
+                    route.route_type == crate::config::RouteType::Proxy,
+                    "routes[{}].ws_auth_frame 仅适用于 proxy 类型",
+                    i
+                );
+                anyhow::ensure!(
+                    matches!(route.config.proxy_mode.as_str(), "websocket" | "auto"),
+                    "routes[{}].ws_auth_frame 仅适用于 proxy_mode=websocket|auto: {}",
+                    i,
+                    route.config.proxy_mode
+                );
+                anyhow::ensure!(
+                    !frame.payload.is_empty(),
+                    "routes[{}].ws_auth_frame.payload 不能为空",
+                    i
+                );
+                anyhow::ensure!(
+                    frame.payload.len() <= WS_AUTH_FRAME_MAX_BYTES,
+                    "routes[{}].ws_auth_frame.payload 超过上限 {} 字节",
+                    i,
+                    WS_AUTH_FRAME_MAX_BYTES
+                );
+                for var in ws_auth_frame_vars(&frame.payload)
+                    .map_err(|e| anyhow::anyhow!("routes[{i}].ws_auth_frame.payload: {e}"))?
+                {
+                    anyhow::ensure!(
+                        WS_AUTH_FRAME_VARS.contains(&var.as_str()),
+                        "routes[{}].ws_auth_frame.payload 含未知模板变量 {{{{{var}}}}}",
+                        i
+                    );
+                }
+                if frame.payload.contains("{{access_token}}") {
+                    anyhow::ensure!(
+                        route.auth_required,
+                        "routes[{}].ws_auth_frame 使用 access_token 要求 auth_required: true",
+                        i
+                    );
+                }
+                if !frame.binary {
+                    let mut probe = frame.payload.clone();
+                    for var in WS_AUTH_FRAME_VARS {
+                        probe = probe.replace(&format!("{{{{{var}}}}}"), "x");
+                    }
+                    anyhow::ensure!(
+                        serde_json::from_str::<serde_json::Value>(&probe).is_ok(),
+                        "routes[{}].ws_auth_frame.payload 文本帧必须是合法 JSON 模板",
+                        i
                     );
                 }
             }
@@ -3869,6 +3966,101 @@ session:
 }
 
 // ── 站点字段与 Host 白名单校验测试（§5.4 第 1/2/6/7/11 条 + §5.3 重复路由告警）──
+
+/// WS 首帧认证注入（issue #130）配置校验。
+#[cfg(test)]
+mod ws_auth_frame_tests {
+    use super::*;
+
+    fn route_with(frame_yaml: &str) -> String {
+        format!(
+            r#"
+routes:
+  - path: "/ws"
+    type: proxy
+    auth_required: true
+    config:
+      upstream: "ws://im.internal/ws"
+      proxy_mode: "websocket"
+{frame_yaml}
+"#
+        )
+    }
+
+    #[test]
+    fn parses_text_and_binary_frame() {
+        let cfg: AppConfig = serde_yaml::from_str(&route_with(
+            "      ws_auth_frame:\n        payload: '{\"type\":\"LOGIN_REQ\",\"access_token\":\"{{access_token}}\"}'",
+        ))
+        .unwrap();
+        cfg.validate_with_env(false).unwrap();
+        let f = cfg.routes[0].config.ws_auth_frame.as_ref().unwrap();
+        assert!(!f.binary);
+        assert!(f.payload.contains("LOGIN_REQ"));
+
+        let cfg: AppConfig = serde_yaml::from_str(&route_with(
+            "      ws_auth_frame:\n        payload: \"LOGIN {{access_token}}\"\n        binary: true",
+        ))
+        .unwrap();
+        cfg.validate_with_env(false).unwrap();
+        assert!(cfg.routes[0].config.ws_auth_frame.as_ref().unwrap().binary);
+    }
+
+    #[test]
+    fn rejects_non_json_text_frame() {
+        let cfg: AppConfig = serde_yaml::from_str(&route_with(
+            "      ws_auth_frame:\n        payload: \"LOGIN {{access_token}}\"",
+        ))
+        .unwrap();
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("合法 JSON"), "实际: {err}");
+    }
+
+    #[test]
+    fn rejects_unknown_variable() {
+        let cfg: AppConfig = serde_yaml::from_str(&route_with(
+            "      ws_auth_frame:\n        payload: '{\"tenant\":\"{{tenant}}\"}'",
+        ))
+        .unwrap();
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("未知模板变量"), "实际: {err}");
+    }
+
+    #[test]
+    fn rejects_token_without_auth_required() {
+        let yaml = r#"
+routes:
+  - path: "/ws"
+    type: proxy
+    auth_required: false
+    config:
+      upstream: "ws://im.internal/ws"
+      proxy_mode: "websocket"
+      ws_auth_frame:
+        payload: '{"access_token":"{{access_token}}"}'
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("auth_required"), "实际: {err}");
+    }
+
+    #[test]
+    fn rejects_frame_on_http_proxy_mode() {
+        let yaml = r#"
+routes:
+  - path: "/api"
+    type: proxy
+    config:
+      upstream: "https://upstream.internal"
+      proxy_mode: "http"
+      ws_auth_frame:
+        payload: '{"type":"LOGIN"}'
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("websocket|auto"), "实际: {err}");
+    }
+}
 
 #[cfg(test)]
 mod site_validation_tests {
