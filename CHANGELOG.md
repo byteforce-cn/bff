@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- 依赖安全：修复 RustSec 审计失败（所有 PR 的 `Dependency audit` 均红的根因）——rustls 0.23.46、rustls-webpki 0.103.17、webpki-roots 1.0.12、quinn-proto 0.11.19、quinn-udp 0.5.16、url 2.5.9、ctutils 0.4.8；移除已失效的 rustls-pemfile 例外（tonic 0.14 不再引入），新增 crypto-bigint（RUSTSEC-2026-0387）例外并界定影响范围
+
 ### Added
 
 - `GET /api/me`：同源只读的「当前用户与会话」视图（身份取自 ID Token，**不含任何令牌**）；未登录返回 `200 {"logged_in": false}`；可选的权限视图（`me.permissions`，缺省关闭，站点可覆盖）由下游授权权威 `/resolve` 解析并按 `site+provider+sub` 缓存，失败/超时降级为不返回该字段

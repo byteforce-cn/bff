@@ -16,18 +16,9 @@ ignore = [
     # 或替换配置层为自研合并 + serde_norway/serde_yaml_ng。
     "RUSTSEC-2024-0320",
 
-    # rustls-pemfile 2.2.0 停维（RUSTSEC-2025-0134，2025-11-28）。
-    # 引入链：tonic 0.12（OTLP/gRPC 导出栈）→ rustls-pemfile。
-    # 影响界定：unmaintained 公告（无在野漏洞）。BFF 仅以**客户端**身份使用 tonic
-    # （OTLP 导出；TLS 走 rustls/tls-roots 读系统证书库），不解析外部 PEM 材料，
-    # 该 crate 的维护缺口（PEM 解析）不构成运行时暴露面。
-    # 整改计划：随 OTel 栈升级（opentelemetry-otlp 0.27 → 更高版本 / tonic 0.13+）
-    # 整体移除；升级需回归 tests/test_telemetry.rs 的进程内 collector 契约。
-    "RUSTSEC-2025-0134",
-
     # 说明：原 reqwest 0.11 旧栈例外（h2 0.3 / rustls-webpki 0.101）已随
-    # openidconnect 4.0 / oauth2 5 / reqwest 0.12 迁移清零，不再需要例外。
-    # 当前审计结果：仅余「停维」类与「私钥运算不可达」类告警，无在野漏洞类告警。
+    # openidconnect 4.0 / oauth2 5 / reqwest 0.12 迁移清零；rustls-pemfile 例外
+    # （RUSTSEC-2025-0134）已随 tonic 0.14 升级（不再引入该 crate）清零。
 
     # rsa 0.9.10 Marvin 计时侧信道（RUSTSEC-2023-0071；上游无修复版本）。
     # 引入链：openidconnect → rsa（RS256 验签）；dev-deps rsa（测试签发用）。
@@ -35,4 +26,15 @@ ignore = [
     # （openidconnect），不执行任何 RSA 私钥操作；测试中的签发使用内嵌测试
     # 密钥（非秘密、仅测试进程）。持续跟踪上游（RustCrypto/rsa）修复。
     "RUSTSEC-2023-0071",
+
+    # crypto-bigint 0.5.5 常量时间实现存在计时可变性（RUSTSEC-2026-0387）。
+    # 引入链：openidconnect 4.0 → p256/p384 → ecdsa → elliptic-curve 0.13
+    #        → crypto-bigint 0.5.5。
+    # 影响界定：公告的修复版本为 crypto-bigint >= 0.7.6；0.5.x 线无修复版本，
+    # 升级需 elliptic-curve 0.14（依赖 openidconnect 上游迁移）。BFF 只对 ID Token
+    # 做 **ECDSA 公钥验签**（输入为签名者的公开数据），进程内不执行任何私钥/标量
+    # 运算，因此该计时侧信道没有可利用的秘密输入。
+    # 整改计划：跟踪 openidconnect 上游（elliptic-curve 0.14 / crypto-bigint 0.7+），
+    # 可用后整体升级并删除本例外。
+    "RUSTSEC-2026-0387",
 ]
