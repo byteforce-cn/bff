@@ -434,7 +434,8 @@ async fn test_ws_tunnel_clock_with_fakesvc() {
         .expect("消息错误");
 
     if let tokio_tungstenite::tungstenite::Message::Text(text) = response {
-        let v: serde_json::Value = serde_json::from_str(&text).expect("clock 消息应为 JSON");
+        let v: serde_json::Value =
+            serde_json::from_str(text.as_str()).expect("clock 消息应为 JSON");
         assert!(v.get("time").is_some(), "clock 消息应包含 time 字段");
     } else {
         panic!("期望 Text 消息");
