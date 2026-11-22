@@ -1964,6 +1964,10 @@ pub struct RouteTypeConfig {
     /// 熔断阈值（滚动窗口内失败次数；0 = 该路由不熔断，使用全局默认）
     #[serde(default)]
     pub circuit_breaker_threshold: u32,
+    /// 多上游池（issue #97）：多副本 / 服务发现结果，轮询 + 连接失败自动切换。
+    /// 与 `upstream` 二选一；`upstreams` 优先。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstreams: Vec<String>,
     /// 代理模式: "http" | "sse" | "websocket" | "auto"
     /// - http: 一次性请求-响应（默认）
     /// - sse: 流式透传 SSE
@@ -2046,6 +2050,25 @@ pub fn ws_auth_frame_vars(tpl: &str) -> Result<Vec<String>, String> {
         rest = &after[end + 2..];
     }
     Ok(vars)
+}
+
+impl RouteTypeConfig {
+    /// 有效上游池：`upstreams`（多副本）优先，否则单 `upstream`。
+    pub fn upstream_pool(&self) -> Vec<String> {
+        if self.upstreams.is_empty() {
+            self.upstream.clone().into_iter().collect()
+        } else {
+            self.upstreams
+                .iter()
+                .map(|u| u.trim_end_matches('/').to_string())
+                .collect()
+        }
+    }
+
+    /// 首选上游（未配置 `upstreams` 时即 `upstream`；与 [`Self::upstream_pool`] 同样去掉尾部 `/`）。
+    pub fn primary_upstream(&self) -> Option<String> {
+        self.upstream_pool().into_iter().next()
+    }
 }
 
 /// 输入映射规则
@@ -2416,8 +2439,13 @@ impl AppConfig {
             );
             if route.route_type == crate::config::RouteType::Proxy {
                 anyhow::ensure!(
-                    route.config.upstream.is_some(),
-                    "routes[{}] proxy 类型必须配置 upstream",
+                    route.config.upstream.is_some() || !route.config.upstreams.is_empty(),
+                    "routes[{}] proxy 类型必须配置 upstream 或 upstreams",
+                    i
+                );
+                anyhow::ensure!(
+                    route.config.upstream.is_none() || route.config.upstreams.is_empty(),
+                    "routes[{}] upstream 与 upstreams 只能二选一",
                     i
                 );
                 if let Some(ref u) = route.config.upstream {
@@ -2425,6 +2453,15 @@ impl AppConfig {
                         url::Url::parse(u).is_ok(),
                         "routes[{}] upstream URL 非法: {}",
                         i,
+                        u
+                    );
+                }
+                for (j, u) in route.config.upstreams.iter().enumerate() {
+                    anyhow::ensure!(
+                        url::Url::parse(u).is_ok(),
+                        "routes[{}].upstreams[{}] URL 非法: {}",
+                        i,
+                        j,
                         u
                     );
                 }
@@ -4059,6 +4096,82 @@ routes:
         let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
         let err = cfg.validate_with_env(false).unwrap_err().to_string();
         assert!(err.contains("websocket|auto"), "实际: {err}");
+    }
+}
+
+#[cfg(test)]
+/// 多上游池（issue #97）配置校验。
+mod upstream_pool_tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> AppConfig {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn parses_pool_and_prefers_it_over_single_upstream() {
+        let cfg = parse(
+            r#"
+routes:
+  - path: "/api"
+    type: proxy
+    config:
+      upstreams: ["http://hr-1:8082/", "http://hr-2:8082"]
+"#,
+        );
+        cfg.validate_with_env(false).unwrap();
+        let pool = cfg.routes[0].config.upstream_pool();
+        assert_eq!(pool, vec!["http://hr-1:8082", "http://hr-2:8082"]);
+        assert_eq!(
+            cfg.routes[0].config.primary_upstream().as_deref(),
+            Some("http://hr-1:8082")
+        );
+    }
+
+    #[test]
+    fn rejects_upstream_and_upstreams_together() {
+        let cfg = parse(
+            r#"
+routes:
+  - path: "/api"
+    type: proxy
+    config:
+      upstream: "http://hr:8082"
+      upstreams: ["http://hr-1:8082"]
+"#,
+        );
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("二选一"), "实际: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_pool_url() {
+        let cfg = parse(
+            r#"
+routes:
+  - path: "/api"
+    type: proxy
+    config:
+      upstreams: ["http://hr-1:8082", "not-a-url"]
+"#,
+        );
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("upstreams[1]"), "实际: {err}");
+    }
+
+    #[test]
+    fn proxy_requires_some_upstream() {
+        let cfg = parse(
+            r#"
+routes:
+  - path: "/api"
+    type: proxy
+    config:
+      proxy_mode: "http"
+"#,
+        );
+        let err = cfg.validate_with_env(false).unwrap_err().to_string();
+        assert!(err.contains("upstream 或 upstreams"), "实际: {err}");
     }
 }
 

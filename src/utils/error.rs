@@ -6,6 +6,8 @@ use axum::response::{IntoResponse, Response};
 pub struct AppError {
     pub status: StatusCode,
     pub message: String,
+    /// 是否为「连接未建立」类失败（多上游池据此安全切换：请求未被上游接收）。
+    pub connect_failure: bool,
 }
 
 impl AppError {
@@ -13,6 +15,7 @@ impl AppError {
         Self {
             status,
             message: message.into(),
+            connect_failure: false,
         }
     }
 
@@ -38,6 +41,13 @@ impl AppError {
 
     pub fn bad_gateway(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, message)
+    }
+
+    /// 上游连接未建立（可安全切换到池内下一个实例）。
+    pub fn bad_gateway_connect(message: impl Into<String>) -> Self {
+        let mut err = Self::bad_gateway(message);
+        err.connect_failure = true;
+        err
     }
 
     pub fn gateway_timeout(message: impl Into<String>) -> Self {

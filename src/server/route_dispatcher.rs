@@ -236,11 +236,10 @@ async fn execute_proxy(
 ) -> Result<Response, AppError> {
     let upstream = route
         .config
-        .upstream
-        .as_deref()
+        .primary_upstream()
         .ok_or_else(|| AppError::bad_request("proxy 路由缺少 upstream"))?;
 
-    proxy::forward_request(state, site, session, route, upstream, req).await
+    proxy::forward_request(state, site, session, route, &upstream, req).await
 }
 
 /// Pipeline 执行：引用 pipeline 注册表或内联执行。

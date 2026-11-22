@@ -57,6 +57,11 @@ flowchart LR
 - **proxy**：上游超时（默认 30s，可路由级覆盖；SSE 走独立无总超时客户端）、请求 / 响应体上限、
   熔断（滚动窗口失败计数 + 半开单探针）、Bearer 注入、响应头过滤（默认剥离 `set-cookie`，可显式放开）、
   SSE / WebSocket 透传（心跳、空闲超时、消息大小上限）；
+- **多上游池**（`upstreams`，与 `upstream` 二选一）：多副本 / 服务发现结果的静态列表，
+  按请求轮询选择实例；**连接未建立**（`is_connect`，请求未被上游接收）时自动切换到池内下一个实例，
+  因此停掉一个副本仍返回 200。切换次数计入 `bff_proxy_upstream_failover_total{route}`；
+  上游 5xx 与超时不做跨实例切换（可能已执行，避免重复写），由幂等重试与熔断处理。
+  健康探针（`/ready`）的上游列表同样按池展开。`upstream` 保持单实例语义不变；
 - **pipeline**：YAML 定义的 DAG，分层并行执行、硬超时、`fail_fast`、HTTP 缓存
   （缓存键包含调用参数指纹，避免跨用户串数据）；
 - **script**：QuickJS 沙箱执行（时长上限默认 2s，内存 / 栈限制，`spawn_blocking` 隔离）。
