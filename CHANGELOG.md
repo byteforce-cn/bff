@@ -14,6 +14,10 @@
 
 ### Changed
 
+- 依赖升级（批量应用 dependabot 积压）：tokio 1.54.1 / uuid 1.29 / tonic 0.14.9 / redis 1.8.2 / serde_json 1.0.154 / arc-swap 1.9.5 / sha2 0.11.1 / opentelemetry 0.33.1；管理端 radix-ui 全家桶、react-hook-form、zod、@types/node、vite 6.4.5；演示 SPA vite 8.3.8
+- 框架迁移：tokio-tungstenite 0.21 → 0.29（`Message::Text/Binary` 改用 `Utf8Bytes`/`Bytes`，隧道与 WS 测试同步适配）
+- Java 组件升级：Spring Boot 3.4.5 → 4.1.2（iam + fakesvc）、Spring Authorization Server 1.4.5 → 7.1.2（配置器移入 spring-security-config，`applyDefaultSecurity` 改按等价语义装配）、springdoc 2.8 → 3.2
+- iam：显式声明 `commons-logging`——Spring Framework 7 不再提供 spring-jcl，而 SAS 7.x 的 POM 又排除了 commons-logging，不补会导致可执行 jar 启动即 `NoClassDefFoundError`
 - 文档重构：README 重写为面向外部受众的骨架（新增英文版 README.en.md）；新增 `docs/architecture.md`、`docs/configuration.md`、`docs/security-hardening.md`；原内部审计/进度文档由上述文档取代；`docs/production-deployment.md` 更名为 `docs/deployment.md`
 - 构建体验：干净克隆可直接编译——管理端未构建时 `build.rs` 生成占位提示页；新增 `rust-toolchain.toml` 固定 1.93.0
 - 元数据：补齐 Cargo / npm 元数据（npm 版本对齐 0.1.0）；新增 `make snapshot`（git archive 快照）与 `make gitleaks`（密钥扫描，例外与理由见 `.gitleaks.toml`）

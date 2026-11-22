@@ -107,7 +107,7 @@ pub async fn ws_tunnel(
         loop {
             tokio::select! {
                 _ = tick_opt(&mut hb) => {
-                    if upstream_sink.send(tungstenite::Message::Ping(Vec::new())).await.is_err() {
+                    if upstream_sink.send(tungstenite::Message::Ping(tungstenite::Bytes::new())).await.is_err() {
                         break;
                     }
                 }
@@ -124,10 +124,10 @@ pub async fn ws_tunnel(
                                 break;
                             }
                             let upstream_msg = match msg {
-                                Message::Text(t) => tungstenite::Message::Text(t.to_string()),
-                                Message::Binary(b) => tungstenite::Message::Binary(b.to_vec()),
-                                Message::Ping(d) => tungstenite::Message::Ping(d.to_vec()),
-                                Message::Pong(d) => tungstenite::Message::Pong(d.to_vec()),
+                                Message::Text(t) => tungstenite::Message::Text(t.as_str().into()),
+                                Message::Binary(b) => tungstenite::Message::Binary(b),
+                                Message::Ping(d) => tungstenite::Message::Ping(d),
+                                Message::Pong(d) => tungstenite::Message::Pong(d),
                                 Message::Close(c) => {
                                     let frame = c.map(|f| tungstenite::protocol::CloseFrame {
                                         code: tungstenite::protocol::frame::coding::CloseCode::from(f.code),
@@ -178,10 +178,10 @@ pub async fn ws_tunnel(
                                 break;
                             }
                             let client_msg = match msg {
-                                tungstenite::Message::Text(t) => Message::Text(t.into()),
-                                tungstenite::Message::Binary(b) => Message::Binary(b.into()),
-                                tungstenite::Message::Ping(d) => Message::Ping(d.into()),
-                                tungstenite::Message::Pong(d) => Message::Pong(d.into()),
+                                tungstenite::Message::Text(t) => Message::Text(t.as_str().into()),
+                                tungstenite::Message::Binary(b) => Message::Binary(b),
+                                tungstenite::Message::Ping(d) => Message::Ping(d),
+                                tungstenite::Message::Pong(d) => Message::Pong(d),
                                 tungstenite::Message::Close(c) => {
                                     let frame = c.map(|f| CloseFrame {
                                         code: f.code.into(),

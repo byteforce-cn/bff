@@ -20,8 +20,8 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.authorization.client.InMemoryRegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
-import org.springframework.security.oauth2.server.authorization.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
-import org.springframework.security.oauth2.server.authorization.config.annotation.web.configurers.OAuth2AuthorizationServerConfigurer;
+import org.springframework.security.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
+import org.springframework.security.config.annotation.web.configurers.oauth2.server.authorization.OAuth2AuthorizationServerConfigurer;
 import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
 import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
 import org.springframework.security.web.SecurityFilterChain;
@@ -43,10 +43,16 @@ public class AuthorizationServerConfig {
     @Bean
     @Order(1)
     public SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http) throws Exception {
-        OAuth2AuthorizationServerConfiguration.applyDefaultSecurity(http);
+        // Spring Security 7：授权服务器配置器移入 spring-security-config，
+        // 原 `applyDefaultSecurity(http)` 快捷方法已移除，这里按其等价语义装配：
+        // securityMatcher 限定到授权服务器端点 + 全量认证 + 应用配置器（含 OIDC）。
+        OAuth2AuthorizationServerConfigurer authorizationServerConfigurer =
+            new OAuth2AuthorizationServerConfigurer();
         http
-            .getConfigurer(OAuth2AuthorizationServerConfigurer.class)
-            .oidc(Customizer.withDefaults()); // 启用 OpenID Connect 1.0
+            .securityMatcher(authorizationServerConfigurer.getEndpointsMatcher())
+            .with(authorizationServerConfigurer, configurer ->
+                configurer.oidc(Customizer.withDefaults()))
+            .authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated());
         http
             .exceptionHandling(exceptions -> exceptions
                 .defaultAuthenticationEntryPointFor(

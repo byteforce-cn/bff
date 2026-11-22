@@ -279,14 +279,16 @@ async fn ws_echo_relay_and_clean_close() {
     );
 
     // 二进制 relay（逐字节一致）
-    ws.send(Message::Binary(vec![1, 2, 3, 250])).await.unwrap();
+    ws.send(Message::Binary(vec![1, 2, 3, 250].into()))
+        .await
+        .unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         let rem = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!rem.is_zero(), "等待二进制回显超时");
         match tokio::time::timeout(rem, ws.next()).await {
             Ok(Some(Ok(Message::Binary(b)))) => {
-                assert_eq!(b.as_slice(), &[1, 2, 3, 250]);
+                assert_eq!(b.as_ref(), &[1, 2, 3, 250]);
                 break;
             }
             Ok(Some(Ok(_))) => continue,
@@ -448,7 +450,9 @@ async fn ws_oversized_client_message_closed_with_1009() {
     let base = spawn_business(make_state(cfg)).await;
 
     let (mut ws, _) = ws_connect(&base, "/ws", None).await.unwrap();
-    ws.send(Message::Text("y".repeat(512))).await.unwrap();
+    ws.send(Message::Text("y".repeat(512).into()))
+        .await
+        .unwrap();
 
     // 上游应收到 1009（Message Too Big）关闭帧
     let got = wait_for(
