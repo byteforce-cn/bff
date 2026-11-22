@@ -67,6 +67,51 @@ async fn me_body(bff: &str, cookie: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn me_exposes_only_configured_identity_claims() {
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    cfg.me.identity_claims = vec!["tenant_id".into(), "roles".into()];
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(
+        &state,
+        serde_json::json!({
+            "sub": "user-1",
+            "preferred_username": "alice",
+            "tenant_id": "tenant-9",
+            "roles": ["admin", "auditor"],
+            "nonce": "n-1",
+            "groups": ["internal"]
+        }),
+    )
+    .await;
+    let body = me_body(&bff, &cookie).await;
+    assert_eq!(body["logged_in"], true);
+    assert_eq!(body["tenant_id"], "tenant-9");
+    assert_eq!(body["roles"], serde_json::json!(["admin", "auditor"]));
+    assert!(body.get("nonce").is_none(), "敏感 claim 不得透传: {body}");
+    assert!(body.get("groups").is_none(), "未配置的 claim 不得透传");
+}
+
+#[tokio::test]
+async fn me_identity_claims_default_to_builtin_fields_only() {
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(
+        &state,
+        serde_json::json!({"sub": "user-1", "tenant_id": "tenant-9"}),
+    )
+    .await;
+    let body = me_body(&bff, &cookie).await;
+    assert!(
+        body.get("tenant_id").is_none(),
+        "缺省白名单不得暴露额外 claim: {body}"
+    );
+}
+
+#[tokio::test]
 async fn me_reports_logged_out_without_session() {
     let state = legacy_state_with_provider();
     let bff = common::spawn_business(state).await;
@@ -357,6 +402,7 @@ async fn me_site_policy_can_disable_permissions() {
     cfg.me.permissions.resolve_url = format!("{}/resolve", resolve.uri());
     cfg.sites[1].me = Some(bff::config::SiteMeOverride {
         permissions_enabled: Some(false),
+        identity_claims: None,
     });
     let state = common::make_state(cfg);
     let a = common::spawn_site(&state, "app1").await;

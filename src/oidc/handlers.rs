@@ -972,6 +972,7 @@ mod site_aware_tests {
             logout_scope: LogoutScope::Global,
             security_headers: None,
             me_permissions: None,
+            me_identity_claims: Vec::new(),
             legacy,
         }
     }

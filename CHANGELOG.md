@@ -10,6 +10,7 @@
 
 ### Added
 
+- `/api/me` 身份白名单可配置（issue #129）：`me.identity_claims` 支持按站点覆盖，透传 `tenant_id` / `roles` 等标准 claim；敏感/保留 claim 始终拒绝，响应体上限 8 KiB，丢弃原因由 `bff_me_identity_claim_dropped_total{reason}` 观测
 - `GET /api/me`：同源只读的「当前用户与会话」视图（身份取自 ID Token，**不含任何令牌**）；未登录返回 `200 {"logged_in": false}`；可选的权限视图（`me.permissions`，缺省关闭，站点可覆盖）由下游授权权威 `/resolve` 解析并按 `site+provider+sub` 缓存，失败/超时降级为不返回该字段
 
 ### Changed

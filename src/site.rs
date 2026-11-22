@@ -43,6 +43,8 @@ pub struct SiteView {
     pub security_headers: Arc<PrebuiltSecurityHeaders>,
     /// 已解析的权限视图配置（`None` = `/api/me` 不返回 permissions）
     pub me_permissions: Option<crate::config::ResolvedMePermissions>,
+    /// 已解析的身份 claim 白名单（空 = 只返回内置 4 字段）
+    pub me_identity_claims: Vec<String>,
     pub legacy: bool,
 }
 
@@ -202,6 +204,7 @@ impl SiteView {
             logout_scope: site.logout_scope,
             security_headers,
             me_permissions: site.me_permissions.clone(),
+            me_identity_claims: site.me_identity_claims.clone(),
             legacy: site.legacy,
         }
     }
@@ -329,6 +332,7 @@ mod tests {
             logout_scope: LogoutScope::Global,
             security_headers: None,
             me_permissions: None,
+            me_identity_claims: Vec::new(),
             legacy,
         }
     }
