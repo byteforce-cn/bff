@@ -473,6 +473,55 @@ pub struct MeConfig {
     /// 权限视图（下游授权权威解析；缺省关闭）
     #[serde(default, skip_serializing_if = "MePermissionsConfig::is_default")]
     pub permissions: MePermissionsConfig,
+    /// 额外透传的 ID Token claim 白名单（缺省空 = 仅内置 `sub/preferred_username/name/email`）。
+    ///
+    /// 只在这些 claim 存在且类型合法（字符串/数字/布尔/字符串数组）时透传；
+    /// 敏感 claim（`nonce`/`at_hash`/`sid` 等）即使列在这里也始终拒绝。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_claims: Vec<String>,
+}
+
+/// 始终拒绝透传的敏感 claim（安全边界：配置无法开启）。
+pub const SENSITIVE_IDENTITY_CLAIMS: &[&str] = &[
+    "sub",
+    "nonce",
+    "at_hash",
+    "c_hash",
+    "s_hash",
+    "sid",
+    "jti",
+    "iss",
+    "aud",
+    "azp",
+    "exp",
+    "iat",
+    "nbf",
+    "auth_time",
+];
+
+/// `/api/me` 身份视图响应体上限：超出即停止追加额外 claim（身份仍返回 200）。
+pub const ME_IDENTITY_MAX_BYTES: usize = 8 * 1024;
+
+/// claim 名合法性：非空、≤ 128 字节、可打印 ASCII（允许 `https://.../roles` 这类 URI claim），
+/// 且不是敏感 claim。
+pub fn validate_identity_claim_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("me.identity_claims 含空字符串".into());
+    }
+    if name.len() > 128 {
+        return Err(format!("me.identity_claims 名称过长（>128 字节）: {name}"));
+    }
+    if !name.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(format!(
+            "me.identity_claims 名称只能包含可打印 ASCII（不含空白/控制字符）: {name}"
+        ));
+    }
+    if SENSITIVE_IDENTITY_CLAIMS.contains(&name) {
+        return Err(format!(
+            "me.identity_claims 不可包含敏感/保留 claim: {name}（始终拒绝透传）"
+        ));
+    }
+    Ok(())
 }
 
 /// 权限视图配置：启用时以 Bearer access token 调用 `resolve_url`。
@@ -523,6 +572,9 @@ pub struct SiteMeOverride {
     /// 是否返回权限视图；`None` 继承全局 `me.permissions.enabled`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions_enabled: Option<bool>,
+    /// 身份 claim 白名单；`None` 继承全局，`Some([])` = 只保留内置字段
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_claims: Option<Vec<String>>,
 }
 
 /// 站点已解析的权限视图配置（`None` = `/api/me` 不返回 permissions）。
@@ -674,6 +726,8 @@ pub struct ResolvedSite {
     pub security_headers: Option<SiteSecurityHeadersOverride>,
     /// 已解析的权限视图配置（`None` = 不返回 permissions）
     pub me_permissions: Option<ResolvedMePermissions>,
+    /// 已解析的身份 claim 白名单（不含内置 4 字段与敏感项）
+    pub me_identity_claims: Vec<String>,
     pub legacy: bool,
 }
 
@@ -690,6 +744,19 @@ fn resolve_me_permissions(
         timeout: global.permissions.timeout,
         cache_ttl: global.permissions.cache_ttl,
     })
+}
+
+/// 合并全局 `me.identity_claims` 与站点覆盖：站点 `Some` 优先，否则继承全局。
+///
+/// 启动期已做合法性校验；这里再过滤一次敏感 claim，保证热重载/测试直构配置
+/// 也无法把敏感 claim 送进响应。
+fn resolve_me_identity_claims(global: &MeConfig, site: Option<&SiteMeOverride>) -> Vec<String> {
+    let mut out: Vec<String> = site
+        .and_then(|s| s.identity_claims.as_ref())
+        .cloned()
+        .unwrap_or_else(|| global.identity_claims.clone());
+    out.retain(|c| !SENSITIVE_IDENTITY_CLAIMS.contains(&c.as_str()));
+    out
 }
 
 /// 归一化主机名：trim、小写、去尾点、`[::1]` 去方括号。
@@ -895,6 +962,7 @@ impl AppConfig {
                 logout_scope: LogoutScope::Global,
                 security_headers: None,
                 me_permissions: resolve_me_permissions(&self.me, None),
+                me_identity_claims: resolve_me_identity_claims(&self.me, None),
                 legacy: true,
             }]
         } else {
@@ -939,6 +1007,7 @@ impl AppConfig {
                         logout_scope: site.logout_scope,
                         security_headers: site.security_headers.clone(),
                         me_permissions: resolve_me_permissions(&self.me, site.me.as_ref()),
+                        me_identity_claims: resolve_me_identity_claims(&self.me, site.me.as_ref()),
                         legacy: false,
                     }
                 })
@@ -2395,6 +2464,24 @@ impl AppConfig {
     /// `me.permissions` 校验：任一站点（含 legacy 全局）启用权限视图时，`resolve_url`
     /// 必须是 http(s) 绝对 URL、非空且不得内嵌用户信息（凭据会进入日志）。
     fn validate_me(&self) -> anyhow::Result<()> {
+        fn check_claims(scope: &str, claims: &[String]) -> anyhow::Result<()> {
+            let mut seen = std::collections::HashSet::new();
+            for name in claims {
+                validate_identity_claim_name(name).map_err(|e| anyhow::anyhow!("{scope}: {e}"))?;
+                anyhow::ensure!(
+                    seen.insert(name.as_str()),
+                    "{scope}: 存在重复 claim: {name}"
+                );
+            }
+            Ok(())
+        }
+        check_claims("me.identity_claims", &self.me.identity_claims)?;
+        for site in &self.sites {
+            if let Some(claims) = site.me.as_ref().and_then(|m| m.identity_claims.as_ref()) {
+                check_claims(&format!("sites[{}].me.identity_claims", site.name), claims)?;
+            }
+        }
+
         let p = &self.me.permissions;
         let any_enabled = p.enabled
             || self.sites.iter().any(|s| {
@@ -4503,6 +4590,102 @@ sites:
             .unwrap()
             .me_permissions
             .is_none());
+    }
+
+    #[test]
+    fn me_identity_claims_parse_and_inherit() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+me:
+  identity_claims: [tenant_id, roles, "https://example.test/org"]
+sites:
+  - name: app1
+    port: 8081
+  - name: app2
+    port: 8082
+    me:
+      identity_claims: [org_id]
+"#,
+        )
+        .unwrap();
+        cfg.validate_with_env(false).unwrap();
+        let sites = cfg.effective_sites();
+        assert_eq!(
+            sites[0].me_identity_claims,
+            vec!["tenant_id", "roles", "https://example.test/org"]
+        );
+        assert_eq!(sites[1].me_identity_claims, vec!["org_id"], "站点覆盖全局");
+
+        // 缺省：空白名单（只返回内置 4 字段）
+        let cfg: AppConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(cfg.effective_sites()[0].me_identity_claims.is_empty());
+    }
+
+    #[test]
+    fn me_identity_claims_reject_sensitive_names() {
+        expect_err(
+            r#"
+me:
+  identity_claims: [tenant_id, nonce]
+"#,
+            "敏感",
+        );
+        expect_err(
+            r#"
+me:
+  identity_claims: [at_hash]
+"#,
+            "敏感",
+        );
+        // 站点级同样校验
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    me:
+      identity_claims: [sid]
+"#,
+            "敏感",
+        );
+    }
+
+    #[test]
+    fn me_identity_claims_reject_malformed_or_duplicate_names() {
+        expect_err(
+            r#"
+me:
+  identity_claims: [""]
+"#,
+            "空字符串",
+        );
+        expect_err(
+            r#"
+me:
+  identity_claims: ["tenant id"]
+"#,
+            "可打印 ASCII",
+        );
+        expect_err(
+            r#"
+me:
+  identity_claims: [tenant_id, tenant_id]
+"#,
+            "重复",
+        );
+    }
+
+    #[test]
+    fn resolve_me_identity_claims_filters_sensitive_on_hot_path() {
+        let me = MeConfig {
+            identity_claims: vec!["tenant_id".into(), "nonce".into()],
+            ..MeConfig::default()
+        };
+        assert_eq!(
+            resolve_me_identity_claims(&me, None),
+            vec!["tenant_id".to_string()],
+            "解析阶段兜底过滤敏感 claim"
+        );
     }
 
     #[test]

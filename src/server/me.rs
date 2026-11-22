@@ -22,17 +22,85 @@ pub(crate) fn decode_id_token_claims(id_token: &str) -> Option<serde_json::Value
     serde_json::from_slice(&bytes).ok()
 }
 
-/// 白名单身份字段：`sub`（以会话为准）+ ID Token 中的三个标准字符串 claim。
+/// 内置身份字段：始终返回，且只接受字符串（`sub` 以会话为准）。
+const BUILTIN_IDENTITY_FIELDS: [&str; 3] = ["preferred_username", "name", "email"];
+
+/// 白名单身份字段：`sub`（以会话为准）+ 三个标准字符串 claim。
 /// 其它 claims（groups / nonce / iat …）一律不透传。
+#[cfg(test)]
 pub(crate) fn identity_fields(sub: &str, claims: Option<&serde_json::Value>) -> serde_json::Value {
+    identity_fields_with("test", sub, claims, &[])
+}
+
+/// 身份视图：内置字段 + 配置的 `me.identity_claims` 白名单（issue #129）。
+///
+/// 规则：
+/// - `sub` 永远取自会话（ID Token 里的 `sub` 不可篡改身份）；
+/// - 白名单 claim 只接受字符串/数字/布尔/字符串数组，其它类型整体丢弃；
+/// - 敏感 claim（`nonce`/`at_hash`/`sid` …）即使配置了也始终拒绝；
+/// - 响应体累计超过 [`crate::config::ME_IDENTITY_MAX_BYTES`] 后停止追加额外 claim
+///   （内置字段优先保留，身份视图始终可用）。
+///
+/// 丢弃原因通过 `bff_me_identity_claim_dropped_total{reason}` 观测。
+pub(crate) fn identity_fields_with(
+    site: &str,
+    sub: &str,
+    claims: Option<&serde_json::Value>,
+    allow: &[String],
+) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     out.insert("sub".into(), serde_json::Value::String(sub.to_string()));
-    for key in ["preferred_username", "name", "email"] {
+    for key in BUILTIN_IDENTITY_FIELDS {
         if let Some(v) = claims.and_then(|c| c.get(key)).and_then(|v| v.as_str()) {
             out.insert(key.into(), serde_json::Value::String(v.to_string()));
         }
     }
+
+    let mut size = serde_json::to_vec(&out).map_or(0, |b| b.len());
+    for key in allow {
+        // 启动期校验 + 解析阶段过滤已排除敏感项；这里兜底防热重载绕过。
+        if crate::config::SENSITIVE_IDENTITY_CLAIMS.contains(&key.as_str()) {
+            count_dropped("sensitive");
+            continue;
+        }
+        let Some(value) = claims.and_then(|c| c.get(key)) else {
+            continue; // 不存在：正常情况，不算降级
+        };
+        let Some(value) = normalize_claim_value(value) else {
+            count_dropped("type");
+            tracing::debug!(site, claim = %key, "身份视图：claim 类型不在白名单，未透传");
+            continue;
+        };
+        let encoded_len = serde_json::to_vec(&value).map_or(usize::MAX, |b| b.len());
+        // `,"key":` 的开销（引号 + 冒号 + 逗号）近似为 key 长度 + 6。
+        if size + encoded_len + key.len() + 6 > crate::config::ME_IDENTITY_MAX_BYTES {
+            count_dropped("size");
+            tracing::debug!(site, claim = %key, "身份视图：响应体超过上限，claim 未透传");
+            continue;
+        }
+        size += encoded_len + key.len() + 6;
+        out.insert(key.clone(), value);
+    }
     serde_json::Value::Object(out)
+}
+
+/// claim 允许的结构：字符串 / 数字 / 布尔 / 字符串数组。
+fn normalize_claim_value(v: &serde_json::Value) -> Option<serde_json::Value> {
+    match v {
+        serde_json::Value::String(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Bool(_) => Some(v.clone()),
+        serde_json::Value::Array(items)
+            if items.iter().all(|x| x.as_str().is_some()) && !items.is_empty() =>
+        {
+            Some(v.clone())
+        }
+        _ => None,
+    }
+}
+
+fn count_dropped(reason: &'static str) {
+    metrics::counter!("bff_me_identity_claim_dropped_total", "reason" => reason).increment(1);
 }
 
 /// GET /api/me — 站点感知：登录态与身份按站点当前 provider 解析（与 `/api/session` 同源）。
@@ -47,7 +115,12 @@ pub async fn me_handler(
     };
     let id_token = tokens.id_token().ok().flatten();
     let claims = id_token.as_deref().and_then(decode_id_token_claims);
-    let mut body = identity_fields(&tokens.sub, claims.as_ref());
+    let mut body = identity_fields_with(
+        &view.name,
+        &tokens.sub,
+        claims.as_ref(),
+        &view.me_identity_claims,
+    );
     if let Some(obj) = body.as_object_mut() {
         obj.insert("logged_in".into(), serde_json::Value::Bool(true));
         obj.insert(
@@ -253,6 +326,66 @@ mod tests {
             permissions_cache_key("app1", "p", "x"),
             permissions_cache_key("app2", "p", "x")
         );
+    }
+
+    #[test]
+    fn identity_fields_with_exposes_allowlisted_claims_only() {
+        let claims = serde_json::json!({
+            "tenant_id": "tenant-9",
+            "roles": ["admin", "auditor"],
+            "org_id": 42,
+            "mfa": true,
+            "nested": {"a": 1},
+            "mixed": ["ok", 1],
+            "empty": [],
+            "nonce": "n-1",
+            "email": "a@example.test"
+        });
+        let allow: Vec<String> = [
+            "tenant_id",
+            "roles",
+            "org_id",
+            "mfa",
+            "nested",
+            "mixed",
+            "empty",
+            "nonce",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let v = identity_fields_with("app1", "user-1", Some(&claims), &allow);
+        assert_eq!(v["sub"], "user-1");
+        assert_eq!(v["email"], "a@example.test");
+        assert_eq!(v["tenant_id"], "tenant-9");
+        assert_eq!(v["roles"], serde_json::json!(["admin", "auditor"]));
+        assert_eq!(v["org_id"], 42);
+        assert_eq!(v["mfa"], true);
+        assert!(v.get("nested").is_none(), "对象类型不透传");
+        assert!(v.get("mixed").is_none(), "混合数组不透传");
+        assert!(v.get("empty").is_none(), "空数组不透传");
+        assert!(v.get("nonce").is_none(), "敏感 claim 即使配置也拒绝");
+    }
+
+    #[test]
+    fn identity_fields_with_ignores_claims_absent_from_token() {
+        let claims = serde_json::json!({"sub": "user-1"});
+        let allow = vec!["tenant_id".to_string()];
+        let v = identity_fields_with("app1", "user-1", Some(&claims), &allow);
+        assert!(v.get("tenant_id").is_none());
+        assert_eq!(v["sub"], "user-1");
+    }
+
+    #[test]
+    fn identity_fields_with_enforces_size_cap_without_dropping_identity() {
+        let huge = "x".repeat(crate::config::ME_IDENTITY_MAX_BYTES);
+        let claims = serde_json::json!({"huge": huge, "tenant_id": "t-1"});
+        let allow = vec!["huge".to_string(), "tenant_id".to_string()];
+        let v = identity_fields_with("app1", "user-1", Some(&claims), &allow);
+        assert!(v.get("huge").is_none(), "超限 claim 不得透传");
+        assert_eq!(v["tenant_id"], "t-1");
+        assert_eq!(v["sub"], "user-1");
+        assert!(serde_json::to_vec(&v).unwrap().len() <= crate::config::ME_IDENTITY_MAX_BYTES);
     }
 
     #[test]
