@@ -106,11 +106,19 @@ ID Token）、会话（`logged_in` / `provider` / `expires_at`，**不含任何�
 | `permissions.resolve_url` | 必填（启用时） | 下游授权权威 resolve 端点（http/https 绝对 URL） |
 | `permissions.timeout` | `3s` | 单次 resolve 调用超时（覆盖连接与响应体读取全阶段）；失败/超时降级为不返回 `permissions`（身份照常 200） |
 | `permissions.cache_ttl` | `30s` | resolve 结果缓存 TTL（`0` = 不缓存；键含 `site+provider+sub`） |
+| `permissions.required` | `false` | `true` 时 resolve 失败不再静默降级：授权权威 401/403 → `/api/me` **401**，其余失败（超时/连接/非 2xx/结构非法）→ **503**；默认 `false` 保持「身份照常 200、不返回 permissions」 |
+| `permissions.request.method` | `POST` | resolve 请求方法（`GET`/`POST`/`PUT`/`PATCH`；`GET` 不允许配 body） |
+| `permissions.request.headers` | `{}` | 额外请求头；值支持模板变量 `{{sub}}`/`{{provider}}`/`{{site}}`/`{{now}}`/`{{access_token}}`（token 只允许出现在 header，禁止进入 body/URL/日志） |
+| `permissions.request.body` | 见说明 | 请求体 JSON 模板，变量按 JSON 字符串转义注入；可用变量 `{{sub}}`/`{{provider}}`/`{{site}}`/`{{now}}`。缺省 = `{"sub":"<sub>","provider":"<provider>"}`（与 #94 契约完全一致） |
+| `permissions.response.roles_path` | `roles` | roles 数组的 JSON 点分路径（支持数字下标，如 `data.roles`、`items.0.roles`） |
+| `permissions.response.permissions_path` | `permissions` | permissions 数组的 JSON 点分路径 |
+| `permissions.response.passthrough` | `[]` | 额外透传的**顶层**响应字段（如 `sod_warnings`），原样附加到 `permissions` 视图 |
 | `identity_claims` | `[]` | 额外透传的 ID Token claim 白名单（字符串 / 数字 / 布尔 / 非空字符串数组）。内置 `sub`、`preferred_username`、`name`、`email` 始终返回；敏感或保留 claim（`nonce`、`at_hash`、`c_hash`、`s_hash`、`sid`、`jti`、`iss`、`aud`、`azp`、`exp`、`iat`、`nbf`、`auth_time`、`sub`）即使配置也始终拒绝；响应体超过 8 KiB 后停止追加额外 claim（身份视图仍 200）。claim 名限可打印 ASCII、≤128 字节，启动期拒绝非法/重复项 |
 
-站点级覆盖：`sites[].me.permissions_enabled`（`true`/`false`）与 `sites[].me.identity_claims`
-（`[]` = 只返回内置字段），未指定继承全局；任一站点（含 legacy 全局）启用权限视图而
-`resolve_url` 为空/非 http(s) 时启动期校验失败。
+站点级覆盖：`sites[].me.permissions_enabled`（`true`/`false`）、`sites[].me.resolve_url`
+（不同站点接不同授权权威）与 `sites[].me.identity_claims`（`[]` = 只返回内置字段），未指定继承全局；
+任一站点（含 legacy 全局）启用权限视图而 `resolve_url` 为空/非 http(s)、或 request/response
+映射非法时启动期校验失败。
 
 示例（多租户后台直接拿身份上下文，无需再调下游）：
 
@@ -122,10 +130,35 @@ me:
 claim 被丢弃时递增 `bff_me_identity_claim_dropped_total{reason}`（`reason` =
 `sensitive` / `type` / `size`），便于定位 IdP 侧 claim 类型或响应体超限。
 
-resolve 调用契约为 `POST` + `Authorization: Bearer <access token>` +
+默认 resolve 契约（不配置 `request`/`response`）：`POST` + `Authorization: Bearer <access token>` +
 body `{"sub": "...", "provider": "..."}`，响应 `2xx {"roles": [...], "permissions": [...]}`
-（两个键至少出现一个且为字符串数组）。响应结构非法、超过 64 KiB 或超时均按失败降级
-（`permissions` 不出现，身份不受影响）。
+（两个键至少出现一个且为字符串数组）。响应结构非法、超过 64 KiB 或超时均按失败处理。
+
+直连标准授权权威（`/resolve` 使用 `principal` + `as_of`）无需 adapter：
+
+```yaml
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/api/resolve"
+    required: true
+    request:
+      body: '{"principal":"{{sub}}","as_of":"{{now}}","scope":{}}'
+      headers:
+        X-BFF-Site: "{{site}}"
+    response:
+      roles_path: "roles"
+      permissions_path: "permissions"
+      passthrough: [sod_warnings]
+```
+
+启动期会校验：方法、header 名/值合法性、模板变量白名单（`access_token` 出现在 body 即失败）、
+body 模板仍是合法 JSON、响应路径非空、透传字段为顶层名。
+
+可观测：每次 resolve 结果计入 `bff_me_permissions_resolve_total{site,result}`
+（`result` = `ok` / `cache_hit` / `unauthorized` / `timeout` / `upstream_status` /
+`invalid_response` / `unavailable`），调用耗时为
+`bff_me_permissions_resolve_duration_seconds{site}`；失败日志带 `site/provider/sub`，**不记录令牌**。
 
 ### session_profiles — 会话 profile 覆盖
 

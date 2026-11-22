@@ -7,7 +7,8 @@ use crate::oidc::tokens::StoredTokens;
 use crate::site::{SiteHandle, SiteView};
 use crate::state::AppState;
 use axum::extract::{Extension, State};
-use axum::response::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
 use std::sync::Arc;
 use tower_sessions::Session;
 
@@ -108,10 +109,10 @@ pub async fn me_handler(
     State(state): State<AppState>,
     Extension(handle): Extension<Arc<SiteHandle>>,
     session: Session,
-) -> Json<serde_json::Value> {
+) -> Response {
     let view = state.site_view(&handle.name).expect("site view");
     let Some(tokens) = view.current_tokens(&session).await else {
-        return Json(logged_out());
+        return Json(logged_out()).into_response();
     };
     let id_token = tokens.id_token().ok().flatten();
     let claims = id_token.as_deref().and_then(decode_id_token_claims);
@@ -133,18 +134,50 @@ pub async fn me_handler(
         );
     }
     if let Some(cfg) = view.me_permissions.as_ref() {
-        if let Some(permissions) = resolve_permissions(&state, &view, &tokens, cfg).await {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("permissions".into(), permissions);
+        match resolve_permissions(&state, &view, &tokens, cfg).await {
+            Ok(permissions) => {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("permissions".into(), permissions);
+                }
+            }
+            Err(failure) => {
+                // 默认降级：身份照常 200，只是不返回 permissions。
+                // `required: true` 时把失败变成明确错误，便于后端区分「无权限」与「授权服务不可用」。
+                if cfg.required {
+                    let (status, code) = match failure {
+                        ResolveFailure::Unauthorized => {
+                            (StatusCode::UNAUTHORIZED, "permissions_unauthorized")
+                        }
+                        _ => (StatusCode::SERVICE_UNAVAILABLE, "permissions_unavailable"),
+                    };
+                    return (status, Json(serde_json::json!({"error": code}))).into_response();
+                }
             }
         }
     }
-    Json(body)
+    Json(body).into_response()
 }
 
-/// 权限视图解析结果校验：`roles` / `permissions` 至少出现一个且必须是字符串数组；
-/// 结构非法返回 `None`（整体拒绝，不输出半截字段）。
+/// 权限视图解析结果校验（默认路径 `roles` / `permissions`）。
+///
+/// 两个路径至少命中一个且必须是字符串数组；结构非法返回 `None`（整体拒绝，不输出半截字段）。
+#[cfg(test)]
 pub(crate) fn permissions_fields(resolve_body: &serde_json::Value) -> Option<serde_json::Value> {
+    map_resolve_response(
+        resolve_body,
+        &crate::config::MeResolveResponseConfig::default(),
+    )
+}
+
+/// 按配置的响应映射把授权权威响应转成 `/api/me` 的 `permissions` 视图。
+///
+/// - `roles_path` / `permissions_path`：点分 JSON 路径（支持数字下标）；
+/// - 至少一个路径命中，否则整体判为结构非法；
+/// - `passthrough` 里的顶层字段原样附加（如 `sod_warnings`）。
+pub(crate) fn map_resolve_response(
+    resolve_body: &serde_json::Value,
+    cfg: &crate::config::MeResolveResponseConfig,
+) -> Option<serde_json::Value> {
     fn strings(v: &serde_json::Value) -> Option<Vec<String>> {
         let arr = v.as_array()?;
         Some(
@@ -153,23 +186,140 @@ pub(crate) fn permissions_fields(resolve_body: &serde_json::Value) -> Option<ser
                 .collect(),
         )
     }
-    let has_any = resolve_body.get("roles").is_some() || resolve_body.get("permissions").is_some();
-    if !has_any {
+    let roles_raw = json_path(resolve_body, &cfg.roles_path);
+    let permissions_raw = json_path(resolve_body, &cfg.permissions_path);
+    if roles_raw.is_none() && permissions_raw.is_none() {
         return None;
     }
-    let roles = match resolve_body.get("roles") {
+    let roles = match roles_raw {
         Some(v) => strings(v)?,
         None => Vec::new(),
     };
-    let permissions = match resolve_body.get("permissions") {
+    let permissions = match permissions_raw {
         Some(v) => strings(v)?,
         None => Vec::new(),
     };
-    Some(serde_json::json!({"roles": roles, "permissions": permissions}))
+    let mut out = serde_json::Map::new();
+    out.insert("roles".into(), serde_json::json!(roles));
+    out.insert("permissions".into(), serde_json::json!(permissions));
+    for key in &cfg.passthrough {
+        if let Some(v) = resolve_body.get(key) {
+            out.insert(key.clone(), v.clone());
+        }
+    }
+    Some(serde_json::Value::Object(out))
 }
 
-/// 调用下游授权权威解析权限；任何失败/超时/结构非法都返回 `None`（降级为身份视图）。
-/// resolve 响应体上限：权限清单应远小于此；超出即按失败降级（防下游异常/被攻陷时内存膨胀）。
+/// 点分 JSON 路径：`data.roles` / `items.0.name`；空段或非容器直接判为不存在。
+fn json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut cur = value;
+    for seg in path.split('.') {
+        if seg.is_empty() {
+            return None;
+        }
+        cur = match cur {
+            serde_json::Value::Object(map) => map.get(seg)?,
+            serde_json::Value::Array(items) => items.get(seg.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+/// resolve 失败分类（决定降级/必需模式下的状态码与指标标签）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolveFailure {
+    /// 授权权威返回 401/403：调用方身份不被接受。
+    Unauthorized,
+    /// 超时。
+    Timeout,
+    /// 其它非 2xx。
+    UpstreamStatus,
+    /// 响应体超限 / 非 JSON / 结构非法。
+    InvalidResponse,
+    /// 会话令牌不可用、模板渲染失败、连接失败等。
+    Unavailable,
+}
+
+/// 模板渲染上下文（`now` 每次调用现取，保证 `as_of` 是请求时刻）。
+struct ResolveCtx {
+    site: String,
+    sub: String,
+    provider: String,
+    access_token: String,
+    now: String,
+}
+
+impl ResolveCtx {
+    fn value(&self, name: &str) -> Option<&str> {
+        match name {
+            "sub" => Some(&self.sub),
+            "provider" => Some(&self.provider),
+            "site" => Some(&self.site),
+            "access_token" => Some(&self.access_token),
+            "now" => Some(&self.now),
+            _ => None,
+        }
+    }
+}
+
+/// 渲染 `{{var}}` 模板（header 值：原样替换）。
+fn render_template(tpl: &str, ctx: &ResolveCtx) -> Option<String> {
+    let mut out = String::with_capacity(tpl.len());
+    let mut rest = tpl;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find("}}")?;
+        let name = after[..end].trim();
+        out.push_str(ctx.value(name)?);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// 渲染 body 模板：变量按 JSON 字符串转义注入，避免 claim 内容破坏 JSON 结构。
+fn render_body_template(tpl: &str, ctx: &ResolveCtx) -> Option<String> {
+    let mut out = String::with_capacity(tpl.len());
+    let mut rest = tpl;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find("}}")?;
+        let name = after[..end].trim();
+        // 令牌只能进 Authorization 头：模板校验已在启动期拒绝，运行时再兜底。
+        if !crate::config::ME_RESOLVE_BODY_VARS.contains(&name) {
+            return None;
+        }
+        let raw = ctx.value(name)?;
+        let quoted = serde_json::to_string(raw).ok()?;
+        out.push_str(quoted.trim_matches('"'));
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+fn now_iso() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| String::new())
+}
+
+fn resolve_metric(site: &str, result: &'static str) {
+    metrics::counter!(
+        "bff_me_permissions_resolve_total",
+        "site" => site.to_string(),
+        "result" => result
+    )
+    .increment(1);
+}
+
+/// 调用下游授权权威解析权限（请求/响应映射见 `me.permissions.request/response`）。
+///
+/// 失败分类见 [`ResolveFailure`]；调用方决定降级还是 `required` 报错。
+/// resolve 响应体上限：权限清单应远小于此；超出按失败处理（防下游异常时内存膨胀）。
 const RESOLVE_MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// 成功结果按 `site + provider + sub` 缓存，TTL 见 `me.permissions.cache_ttl`。
@@ -178,67 +328,183 @@ async fn resolve_permissions(
     site: &SiteView,
     tokens: &StoredTokens,
     cfg: &ResolvedMePermissions,
-) -> Option<serde_json::Value> {
+) -> Result<serde_json::Value, ResolveFailure> {
     // 长度前缀消除分隔符歧义（provider 只校验非空、sub 由 IdP 控制，两者都可能含 `:`）。
     let key = permissions_cache_key(&site.name, &tokens.provider, &tokens.sub);
     if let Some(bytes) = state.cache.get(&key).await {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            return Some(v);
+            resolve_metric(&site.name, "cache_hit");
+            return Ok(v);
         }
     }
     let access_token = match tokens.access_token() {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(error = %e, "权限视图：access token 解密失败，降级");
-            return None;
+            tracing::warn!(
+                site = %site.name,
+                provider = %tokens.provider,
+                sub = %tokens.sub,
+                error = %e,
+                "权限视图：access token 解密失败"
+            );
+            resolve_metric(&site.name, "unavailable");
+            return Err(ResolveFailure::Unavailable);
         }
     };
+
+    let ctx = ResolveCtx {
+        site: site.name.clone(),
+        sub: tokens.sub.clone(),
+        provider: tokens.provider.clone(),
+        access_token,
+        now: now_iso(),
+    };
+    let method = reqwest::Method::from_bytes(cfg.request.method.to_uppercase().as_bytes())
+        .map_err(|_| ResolveFailure::Unavailable)?;
+    let mut rb = state
+        .http
+        .request(method.clone(), &cfg.resolve_url)
+        .timeout(cfg.timeout);
+    let mut has_content_type = false;
+    let mut has_authorization = false;
+    for (name, value) in &cfg.request.headers {
+        let Some(rendered) = render_template(value, &ctx) else {
+            resolve_metric(&site.name, "unavailable");
+            return Err(ResolveFailure::Unavailable);
+        };
+        if name.eq_ignore_ascii_case("content-type") {
+            has_content_type = true;
+        }
+        if name.eq_ignore_ascii_case("authorization") {
+            has_authorization = true;
+        }
+        rb = rb.header(name.as_str(), rendered);
+    }
+    if !has_authorization {
+        rb = rb.header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", ctx.access_token),
+        );
+    }
+    match &cfg.request.body {
+        Some(tpl) => {
+            let Some(rendered) = render_body_template(tpl, &ctx) else {
+                resolve_metric(&site.name, "unavailable");
+                return Err(ResolveFailure::Unavailable);
+            };
+            if !has_content_type {
+                rb = rb.header(reqwest::header::CONTENT_TYPE, "application/json");
+            }
+            rb = rb.body(rendered);
+        }
+        None if method != reqwest::Method::GET => {
+            // 缺省请求体与 #94 完全一致（不配置 = 旧契约）。
+            if !has_content_type {
+                rb = rb.header(reqwest::header::CONTENT_TYPE, "application/json");
+            }
+            rb = rb.json(&serde_json::json!({
+                "sub": ctx.sub,
+                "provider": ctx.provider,
+            }));
+        }
+        None => {}
+    }
+
     // `RequestBuilder::timeout` 覆盖「连接 → 响应体读取完成」全阶段：
     // 仅用 `tokio::time::timeout` 包 `send()` 时，body 慢读会拖到客户端总超时（默认 30s）。
-    let request = state
-        .http
-        .post(&cfg.resolve_url)
-        .timeout(cfg.timeout)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {access_token}"),
-        )
-        .json(&serde_json::json!({"sub": tokens.sub, "provider": tokens.provider}));
-    let resp = match tokio::time::timeout(cfg.timeout, request.send()).await {
+    let started = std::time::Instant::now();
+    let resp = match tokio::time::timeout(cfg.timeout, rb.send()).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            tracing::warn!(error = %e, "权限视图：resolve 调用失败，降级");
-            return None;
+            tracing::warn!(
+                site = %site.name,
+                provider = %tokens.provider,
+                sub = %tokens.sub,
+                error = %e,
+                "权限视图：resolve 调用失败"
+            );
+            resolve_metric(&site.name, "unavailable");
+            return Err(ResolveFailure::Unavailable);
         }
         Err(_) => {
             tracing::warn!(
+                site = %site.name,
+                provider = %tokens.provider,
+                sub = %tokens.sub,
                 timeout_ms = cfg.timeout.as_millis(),
-                "权限视图：resolve 超时，降级"
+                "权限视图：resolve 超时"
             );
-            return None;
+            resolve_metric(&site.name, "timeout");
+            return Err(ResolveFailure::Timeout);
         }
     };
+    metrics::histogram!(
+        "bff_me_permissions_resolve_duration_seconds",
+        "site" => site.name.clone()
+    )
+    .record(started.elapsed().as_secs_f64());
+
     let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        tracing::warn!(
+            site = %site.name,
+            provider = %tokens.provider,
+            sub = %tokens.sub,
+            %status,
+            "权限视图：resolve 拒绝调用方身份"
+        );
+        resolve_metric(&site.name, "unauthorized");
+        return Err(ResolveFailure::Unauthorized);
+    }
     if !status.is_success() {
-        tracing::warn!(%status, "权限视图：resolve 返回非 2xx，降级");
-        return None;
+        tracing::warn!(
+            site = %site.name,
+            provider = %tokens.provider,
+            sub = %tokens.sub,
+            %status,
+            "权限视图：resolve 返回非 2xx"
+        );
+        resolve_metric(&site.name, "upstream_status");
+        return Err(ResolveFailure::UpstreamStatus);
     }
     let body = match crate::server::proxy::read_capped_body(resp, RESOLVE_MAX_BODY_BYTES).await {
         Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "权限视图：resolve 响应非法 JSON，降级");
-                return None;
+                tracing::warn!(
+                    site = %site.name,
+                    provider = %tokens.provider,
+                    sub = %tokens.sub,
+                    error = %e,
+                    "权限视图：resolve 响应非法 JSON"
+                );
+                resolve_metric(&site.name, "invalid_response");
+                return Err(ResolveFailure::InvalidResponse);
             }
         },
         Err(e) => {
-            tracing::warn!(error = %e, "权限视图：resolve 响应超限，降级");
-            return None;
+            tracing::warn!(
+                site = %site.name,
+                provider = %tokens.provider,
+                sub = %tokens.sub,
+                error = %e,
+                "权限视图：resolve 响应超限"
+            );
+            resolve_metric(&site.name, "invalid_response");
+            return Err(ResolveFailure::InvalidResponse);
         }
     };
-    let Some(permissions) = permissions_fields(&body) else {
-        tracing::warn!("权限视图：resolve 响应缺少 roles/permissions 数组，降级");
-        return None;
+    let Some(permissions) = map_resolve_response(&body, &cfg.response) else {
+        tracing::warn!(
+            site = %site.name,
+            provider = %tokens.provider,
+            sub = %tokens.sub,
+            roles_path = %cfg.response.roles_path,
+            permissions_path = %cfg.response.permissions_path,
+            "权限视图：resolve 响应缺少配置的 roles/permissions 数组"
+        );
+        resolve_metric(&site.name, "invalid_response");
+        return Err(ResolveFailure::InvalidResponse);
     };
     // TTL=0 = 不缓存（Redis 后端会把 0 钳到 1ms，必须在调用侧显式跳过）
     if cfg.cache_ttl > std::time::Duration::ZERO {
@@ -246,7 +512,8 @@ async fn resolve_permissions(
             state.cache.set(&key, bytes, cfg.cache_ttl).await;
         }
     }
-    Some(permissions)
+    resolve_metric(&site.name, "ok");
+    Ok(permissions)
 }
 
 fn logged_out() -> serde_json::Value {
@@ -271,6 +538,80 @@ mod tests {
     fn decode_id_token_claims_rejects_malformed() {
         assert!(decode_id_token_claims("not-a-jwt").is_none());
         assert!(decode_id_token_claims("a.!!!.c").is_none());
+    }
+
+    #[test]
+    fn render_template_supports_documented_vars() {
+        let ctx = ResolveCtx {
+            site: "app1".into(),
+            sub: "user-1".into(),
+            provider: "iam".into(),
+            access_token: "tok".into(),
+            now: "2026-01-02T03:04:05Z".into(),
+        };
+        assert_eq!(
+            render_template("{{site}}/{{provider}}/{{sub}}/{{now}}", &ctx).unwrap(),
+            "app1/iam/user-1/2026-01-02T03:04:05Z"
+        );
+        assert_eq!(
+            render_template("Bearer {{access_token}}", &ctx).unwrap(),
+            "Bearer tok"
+        );
+        assert!(render_template("{{unknown}}", &ctx).is_none());
+        assert!(render_template("{{unclosed", &ctx).is_none());
+    }
+
+    #[test]
+    fn render_body_template_json_escapes_values() {
+        let ctx = ResolveCtx {
+            site: "app1".into(),
+            sub: "u\"x".into(),
+            provider: "iam".into(),
+            access_token: "tok".into(),
+            now: "2026-01-02T03:04:05Z".into(),
+        };
+        let body = render_body_template(r#"{"principal":"{{sub}}","as_of":"{{now}}"}"#, &ctx)
+            .expect("渲染成功");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("仍是合法 JSON");
+        assert_eq!(v["principal"], "u\"x");
+        assert_eq!(v["as_of"], "2026-01-02T03:04:05Z");
+        // access_token 不在 body 变量集合里
+        assert!(render_body_template(r#"{"t":"{{access_token}}"}"#, &ctx).is_none());
+    }
+
+    #[test]
+    fn json_path_walks_objects_and_arrays() {
+        let v = serde_json::json!({"data": {"items": [{"roles": ["r"]}]}});
+        assert_eq!(
+            json_path(&v, "data.items.0.roles").unwrap(),
+            &serde_json::json!(["r"])
+        );
+        assert!(json_path(&v, "data.items.1.roles").is_none());
+        assert!(json_path(&v, "data..roles").is_none());
+        assert!(json_path(&v, "missing").is_none());
+    }
+
+    #[test]
+    fn map_resolve_response_uses_configured_paths_and_passthrough() {
+        let body = serde_json::json!({
+            "data": {
+                "roles": ["admin"],
+                "permissions": ["user:read", 7]
+            },
+            "sod_warnings": [{"code": "SOD-1"}]
+        });
+        let cfg = crate::config::MeResolveResponseConfig {
+            roles_path: "data.roles".into(),
+            permissions_path: "data.permissions".into(),
+            passthrough: vec!["sod_warnings".into()],
+        };
+        let v = map_resolve_response(&body, &cfg).expect("映射成功");
+        assert_eq!(v["roles"], serde_json::json!(["admin"]));
+        assert_eq!(v["permissions"], serde_json::json!(["user:read"]));
+        assert_eq!(v["sod_warnings"], serde_json::json!([{"code": "SOD-1"}]));
+
+        // 两个路径都没命中 → 结构非法
+        assert!(map_resolve_response(&serde_json::json!({"roles": []}), &cfg).is_none());
     }
 
     #[test]

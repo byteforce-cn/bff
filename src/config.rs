@@ -11,7 +11,7 @@
 use figment::providers::{Env, Format, Serialized, Yaml};
 use figment::Figment;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -539,6 +539,115 @@ pub struct MePermissionsConfig {
     /// resolve 结果缓存 TTL（默认 30s；0 = 不缓存）
     #[serde(default = "default_me_permissions_cache_ttl", with = "humantime_serde")]
     pub cache_ttl: Duration,
+    /// 权限视图是否必需：`true` 时 resolve 失败返回 503/401，而非静默降级
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
+    /// resolve 请求映射（method / headers 模板 / body 模板）
+    #[serde(default, skip_serializing_if = "MeResolveRequestConfig::is_default")]
+    pub request: MeResolveRequestConfig,
+    /// resolve 响应映射（roles/permissions 路径 + 透传字段）
+    #[serde(default, skip_serializing_if = "MeResolveResponseConfig::is_default")]
+    pub response: MeResolveResponseConfig,
+}
+
+/// resolve 请求映射（issue #128）。
+///
+/// `headers`/`body` 支持模板变量：`{{sub}}`、`{{provider}}`、`{{site}}`、`{{now}}`；
+/// `{{access_token}}` 仅允许出现在 header 值里（不得进入 body/URL/日志）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeResolveRequestConfig {
+    /// HTTP 方法（GET/POST/PUT/PATCH，默认 POST）
+    #[serde(default = "default_me_resolve_method")]
+    pub method: String,
+    /// 额外请求头（值支持模板变量）
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// 请求体模板（JSON 字符串；变量按 JSON 字符串转义注入）。缺省 =
+    /// `{"sub":"{{sub}}","provider":"{{provider}}"}`（与 #94 完全一致）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+impl Default for MeResolveRequestConfig {
+    fn default() -> Self {
+        Self {
+            method: default_me_resolve_method(),
+            headers: BTreeMap::new(),
+            body: None,
+        }
+    }
+}
+
+impl MeResolveRequestConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn default_me_resolve_method() -> String {
+    "POST".into()
+}
+
+/// 模板变量（header 可用全集）。
+pub const ME_RESOLVE_TEMPLATE_VARS: &[&str] = &["sub", "provider", "site", "now", "access_token"];
+/// body 可用变量：token 只能进 Authorization 头，禁止进入请求体。
+pub const ME_RESOLVE_BODY_VARS: &[&str] = &["sub", "provider", "site", "now"];
+
+/// 解析模板中的 `{{var}}` 变量（启动期校验用）；未闭合/空变量名返回错误。
+pub fn parse_template_vars(tpl: &str) -> Result<Vec<String>, String> {
+    let mut vars = Vec::new();
+    let mut rest = tpl;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            return Err("模板存在未闭合的 `{{`".into());
+        };
+        let name = after[..end].trim();
+        if name.is_empty() {
+            return Err("模板含空变量 `{{}}`".into());
+        }
+        vars.push(name.to_string());
+        rest = &after[end + 2..];
+    }
+    Ok(vars)
+}
+
+/// resolve 响应映射。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeResolveResponseConfig {
+    /// roles 数组的 JSON 路径（点分，支持数字下标；默认 `roles`）
+    #[serde(default = "default_me_roles_path")]
+    pub roles_path: String,
+    /// permissions 数组的 JSON 路径（默认 `permissions`）
+    #[serde(default = "default_me_permissions_path")]
+    pub permissions_path: String,
+    /// 额外透传的顶层响应字段（如 `sod_warnings`）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passthrough: Vec<String>,
+}
+
+impl Default for MeResolveResponseConfig {
+    fn default() -> Self {
+        Self {
+            roles_path: default_me_roles_path(),
+            permissions_path: default_me_permissions_path(),
+            passthrough: Vec::new(),
+        }
+    }
+}
+
+impl MeResolveResponseConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn default_me_roles_path() -> String {
+    "roles".into()
+}
+
+fn default_me_permissions_path() -> String {
+    "permissions".into()
 }
 
 impl Default for MePermissionsConfig {
@@ -548,6 +657,9 @@ impl Default for MePermissionsConfig {
             resolve_url: String::new(),
             timeout: default_me_resolve_timeout(),
             cache_ttl: default_me_permissions_cache_ttl(),
+            required: false,
+            request: MeResolveRequestConfig::default(),
+            response: MeResolveResponseConfig::default(),
         }
     }
 }
@@ -556,6 +668,68 @@ impl MePermissionsConfig {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// resolve 请求/响应映射校验（issue #128）：方法、header 名/值、模板变量、
+/// body JSON 形态、响应路径与透传字段名。
+fn validate_resolve_mapping(p: &MePermissionsConfig) -> anyhow::Result<()> {
+    let method = p.request.method.to_uppercase();
+    anyhow::ensure!(
+        matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH"),
+        "me.permissions.request.method 只支持 GET/POST/PUT/PATCH: {}",
+        p.request.method
+    );
+    anyhow::ensure!(
+        !(method == "GET" && p.request.body.is_some()),
+        "me.permissions.request.method=GET 时不能配置 body"
+    );
+    for (name, value) in &p.request.headers {
+        reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+            anyhow::anyhow!("me.permissions.request.headers 非法 header 名 {name}: {e}")
+        })?;
+        reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+            anyhow::anyhow!("me.permissions.request.headers.{name} 非法 header 值: {e}")
+        })?;
+        for var in parse_template_vars(value).map_err(|e| anyhow::anyhow!("{e}"))? {
+            anyhow::ensure!(
+                ME_RESOLVE_TEMPLATE_VARS.contains(&var.as_str()),
+                "me.permissions.request.headers.{name} 含未知模板变量 {{{{{var}}}}}"
+            );
+        }
+    }
+    if let Some(body) = &p.request.body {
+        for var in parse_template_vars(body).map_err(|e| anyhow::anyhow!("{e}"))? {
+            anyhow::ensure!(
+                ME_RESOLVE_BODY_VARS.contains(&var.as_str()),
+                "me.permissions.request.body 含未知/禁止的模板变量 {{{{{var}}}}}（access_token 只能进 header）"
+            );
+        }
+        // 变量注入按 JSON 字符串转义；这里用占位串验证整体仍是合法 JSON。
+        let mut probe = body.clone();
+        for var in ME_RESOLVE_BODY_VARS {
+            probe = probe.replace(&format!("{{{{{var}}}}}"), "x");
+        }
+        anyhow::ensure!(
+            serde_json::from_str::<serde_json::Value>(&probe).is_ok(),
+            "me.permissions.request.body 不是合法 JSON 模板"
+        );
+    }
+    for (field, path) in [
+        ("roles_path", &p.response.roles_path),
+        ("permissions_path", &p.response.permissions_path),
+    ] {
+        anyhow::ensure!(
+            !path.is_empty() && path.split('.').all(|seg| !seg.is_empty()),
+            "me.permissions.response.{field} 必须是非空点分路径: {path}"
+        );
+    }
+    for key in &p.response.passthrough {
+        anyhow::ensure!(
+            !key.is_empty() && !key.contains('.'),
+            "me.permissions.response.passthrough 只接受顶层字段名: {key}"
+        );
+    }
+    Ok(())
 }
 
 fn default_me_resolve_timeout() -> Duration {
@@ -575,6 +749,9 @@ pub struct SiteMeOverride {
     /// 身份 claim 白名单；`None` 继承全局，`Some([])` = 只保留内置字段
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_claims: Option<Vec<String>>,
+    /// 站点级 resolve 端点覆盖（不同站点接不同授权权威）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_url: Option<String>,
 }
 
 /// 站点已解析的权限视图配置（`None` = `/api/me` 不返回 permissions）。
@@ -583,6 +760,9 @@ pub struct ResolvedMePermissions {
     pub resolve_url: String,
     pub timeout: Duration,
     pub cache_ttl: Duration,
+    pub required: bool,
+    pub request: MeResolveRequestConfig,
+    pub response: MeResolveResponseConfig,
 }
 
 /// 显式站点定义（§5.1）。`sites` 为空时按 §5.5 合成 legacy `default` 站点。
@@ -740,9 +920,14 @@ fn resolve_me_permissions(
         .and_then(|s| s.permissions_enabled)
         .unwrap_or(global.permissions.enabled);
     enabled.then(|| ResolvedMePermissions {
-        resolve_url: global.permissions.resolve_url.clone(),
+        resolve_url: site
+            .and_then(|s| s.resolve_url.clone())
+            .unwrap_or_else(|| global.permissions.resolve_url.clone()),
         timeout: global.permissions.timeout,
         cache_ttl: global.permissions.cache_ttl,
+        required: global.permissions.required,
+        request: global.permissions.request.clone(),
+        response: global.permissions.response.clone(),
     })
 }
 
@@ -2512,6 +2697,22 @@ impl AppConfig {
             "me.permissions.resolve_url 不得内嵌用户信息（凭据会进入日志）: {}",
             p.resolve_url
         );
+        validate_resolve_mapping(p)?;
+        for site in &self.sites {
+            if let Some(url) = site.me.as_ref().and_then(|m| m.resolve_url.as_ref()) {
+                let scope = format!("sites[{}].me.resolve_url", site.name);
+                anyhow::ensure!(
+                    url.starts_with("http://") || url.starts_with("https://"),
+                    "{scope} 必须是 http(s) 绝对 URL: {url}"
+                );
+                let parsed =
+                    url::Url::parse(url).map_err(|e| anyhow::anyhow!("{scope} 非法: {e}"))?;
+                anyhow::ensure!(
+                    parsed.username().is_empty() && parsed.password().is_none(),
+                    "{scope} 不得内嵌用户信息（凭据会进入日志）: {url}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -4526,6 +4727,101 @@ mod me_config_tests {
     }
 
     #[test]
+    fn me_identity_claims_parse_and_inherit() {
+        let cfg: AppConfig = serde_yaml::from_str(
+            r#"
+me:
+  identity_claims: [tenant_id, roles, "https://example.test/org"]
+sites:
+  - name: app1
+    port: 8081
+  - name: app2
+    port: 8082
+    me:
+      identity_claims: [org_id]
+"#,
+        )
+        .unwrap();
+        cfg.validate_with_env(false).unwrap();
+        let sites = cfg.effective_sites();
+        assert_eq!(
+            sites[0].me_identity_claims,
+            vec!["tenant_id", "roles", "https://example.test/org"]
+        );
+        assert_eq!(sites[1].me_identity_claims, vec!["org_id"], "站点覆盖全局");
+
+        // 缺省：空白名单（只返回内置 4 字段）
+        let cfg: AppConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(cfg.effective_sites()[0].me_identity_claims.is_empty());
+    }
+
+    #[test]
+    fn me_identity_claims_reject_sensitive_names() {
+        expect_err(
+            r#"
+me:
+  identity_claims: [tenant_id, nonce]
+"#,
+            "敏感",
+        );
+        expect_err(
+            r#"
+me:
+  identity_claims: [at_hash]
+"#,
+            "敏感",
+        );
+        expect_err(
+            r#"
+sites:
+  - name: app1
+    port: 8081
+    me:
+      identity_claims: [sid]
+"#,
+            "敏感",
+        );
+    }
+
+    #[test]
+    fn me_identity_claims_reject_malformed_or_duplicate_names() {
+        expect_err(
+            r#"
+me:
+  identity_claims: [""]
+"#,
+            "空字符串",
+        );
+        expect_err(
+            r#"
+me:
+  identity_claims: ["tenant id"]
+"#,
+            "可打印 ASCII",
+        );
+        expect_err(
+            r#"
+me:
+  identity_claims: [tenant_id, tenant_id]
+"#,
+            "重复",
+        );
+    }
+
+    #[test]
+    fn resolve_me_identity_claims_filters_sensitive_on_hot_path() {
+        let me = MeConfig {
+            identity_claims: vec!["tenant_id".into(), "nonce".into()],
+            ..MeConfig::default()
+        };
+        assert_eq!(
+            resolve_me_identity_claims(&me, None),
+            vec!["tenant_id".to_string()],
+            "解析阶段兜底过滤敏感 claim"
+        );
+    }
+
+    #[test]
     fn me_permissions_disabled_by_default() {
         let cfg: AppConfig = serde_yaml::from_str("{}").unwrap();
         assert!(!cfg.me.permissions.enabled);
@@ -4593,98 +4889,156 @@ sites:
     }
 
     #[test]
-    fn me_identity_claims_parse_and_inherit() {
+    fn me_resolve_mapping_parses_and_site_url_override_wins() {
         let cfg: AppConfig = serde_yaml::from_str(
             r#"
 me:
-  identity_claims: [tenant_id, roles, "https://example.test/org"]
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    required: true
+    request:
+      method: post
+      headers:
+        X-BFF-Site: "{{site}}"
+        Authorization: "Bearer {{access_token}}"
+      body: '{"principal":"{{sub}}","as_of":"{{now}}"}'
+    response:
+      roles_path: "data.roles"
+      permissions_path: "data.permissions"
+      passthrough: [sod_warnings]
 sites:
   - name: app1
     port: 8081
+    me:
+      resolve_url: "https://iam2.internal/resolve"
   - name: app2
     port: 8082
-    me:
-      identity_claims: [org_id]
 "#,
         )
         .unwrap();
         cfg.validate_with_env(false).unwrap();
         let sites = cfg.effective_sites();
-        assert_eq!(
-            sites[0].me_identity_claims,
-            vec!["tenant_id", "roles", "https://example.test/org"]
-        );
-        assert_eq!(sites[1].me_identity_claims, vec!["org_id"], "站点覆盖全局");
-
-        // 缺省：空白名单（只返回内置 4 字段）
-        let cfg: AppConfig = serde_yaml::from_str("{}").unwrap();
-        assert!(cfg.effective_sites()[0].me_identity_claims.is_empty());
+        let p1 = sites[0].me_permissions.as_ref().expect("app1 启用");
+        assert_eq!(p1.resolve_url, "https://iam2.internal/resolve", "站点覆盖");
+        assert!(p1.required);
+        assert_eq!(p1.request.method.to_uppercase(), "POST");
+        assert_eq!(p1.response.roles_path, "data.roles");
+        assert_eq!(p1.response.passthrough, vec!["sod_warnings"]);
+        let p2 = sites[1].me_permissions.as_ref().expect("app2 继承全局");
+        assert_eq!(p2.resolve_url, "https://iam.internal/resolve");
     }
 
     #[test]
-    fn me_identity_claims_reject_sensitive_names() {
+    fn me_resolve_mapping_rejects_bad_method_and_get_body() {
         expect_err(
             r#"
 me:
-  identity_claims: [tenant_id, nonce]
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    request:
+      method: DELETE
 "#,
-            "敏感",
+            "method",
         );
         expect_err(
             r#"
 me:
-  identity_claims: [at_hash]
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    request:
+      method: GET
+      body: '{"sub":"{{sub}}"}'
 "#,
-            "敏感",
+            "GET",
         );
-        // 站点级同样校验
+    }
+
+    #[test]
+    fn me_resolve_mapping_forbids_token_in_body() {
         expect_err(
             r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    request:
+      body: '{"token":"{{access_token}}"}'
+"#,
+            "access_token",
+        );
+    }
+
+    #[test]
+    fn me_resolve_mapping_rejects_unknown_template_var_and_bad_json() {
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    request:
+      headers:
+        X-Tenant: "{{tenant}}"
+"#,
+            "未知模板变量",
+        );
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    request:
+      body: '{"sub": "{{sub}}"'
+"#,
+            "合法 JSON",
+        );
+    }
+
+    #[test]
+    fn me_resolve_mapping_rejects_bad_response_paths() {
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    response:
+      roles_path: "data..roles"
+"#,
+            "点分路径",
+        );
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
+    response:
+      passthrough: ["a.b"]
+"#,
+            "顶层字段名",
+        );
+    }
+
+    #[test]
+    fn me_resolve_site_url_must_be_absolute_http() {
+        expect_err(
+            r#"
+me:
+  permissions:
+    enabled: true
+    resolve_url: "https://iam.internal/resolve"
 sites:
   - name: app1
     port: 8081
     me:
-      identity_claims: [sid]
+      resolve_url: "iam2.internal/resolve"
 "#,
-            "敏感",
-        );
-    }
-
-    #[test]
-    fn me_identity_claims_reject_malformed_or_duplicate_names() {
-        expect_err(
-            r#"
-me:
-  identity_claims: [""]
-"#,
-            "空字符串",
-        );
-        expect_err(
-            r#"
-me:
-  identity_claims: ["tenant id"]
-"#,
-            "可打印 ASCII",
-        );
-        expect_err(
-            r#"
-me:
-  identity_claims: [tenant_id, tenant_id]
-"#,
-            "重复",
-        );
-    }
-
-    #[test]
-    fn resolve_me_identity_claims_filters_sensitive_on_hot_path() {
-        let me = MeConfig {
-            identity_claims: vec!["tenant_id".into(), "nonce".into()],
-            ..MeConfig::default()
-        };
-        assert_eq!(
-            resolve_me_identity_claims(&me, None),
-            vec!["tenant_id".to_string()],
-            "解析阶段兜底过滤敏感 claim"
+            "sites[app1].me.resolve_url",
         );
     }
 

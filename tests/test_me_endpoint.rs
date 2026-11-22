@@ -3,7 +3,7 @@ mod common;
 
 use bff::state::AppState;
 use std::time::Duration;
-use wiremock::matchers::{body_json, header, method, path};
+use wiremock::matchers::{body_json, body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// 由测试直接构造的未签名 ID Token（`alg: none`；`/api/me` 只解码本地 claim，不验签）。
@@ -225,6 +225,159 @@ async fn me_returns_permissions_from_authority() {
 }
 
 #[tokio::test]
+async fn me_resolve_uses_configured_request_and_response_mapping() {
+    let resolve = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/resolve"))
+        .and(header("authorization", "Bearer test-access-token"))
+        .and(header("x-bff-site", "default"))
+        .and(body_partial_json(serde_json::json!({
+            "principal": "user-1",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "roles": ["admin"],
+                "permissions": ["user:read"]
+            },
+            "sod_warnings": [{"code": "SOD-1"}]
+        })))
+        .expect(1)
+        .mount(&resolve)
+        .await;
+
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    cfg.me.permissions.enabled = true;
+    cfg.me.permissions.resolve_url = format!("{}/resolve", resolve.uri());
+    cfg.me
+        .permissions
+        .request
+        .headers
+        .insert("X-BFF-Site".into(), "{{site}}".into());
+    cfg.me.permissions.request.body = Some(r#"{"principal":"{{sub}}","as_of":"{{now}}"}"#.into());
+    cfg.me.permissions.response.roles_path = "data.roles".into();
+    cfg.me.permissions.response.permissions_path = "data.permissions".into();
+    cfg.me.permissions.response.passthrough = vec!["sod_warnings".into()];
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(&state, serde_json::json!({"sub": "user-1"})).await;
+
+    let body = me_body(&bff, &cookie).await;
+    assert_eq!(body["permissions"]["roles"], serde_json::json!(["admin"]));
+    assert_eq!(
+        body["permissions"]["permissions"],
+        serde_json::json!(["user:read"])
+    );
+    assert_eq!(
+        body["permissions"]["sod_warnings"],
+        serde_json::json!([{"code": "SOD-1"}]),
+        "passthrough 字段应原样透传"
+    );
+    resolve.verify().await;
+}
+
+#[tokio::test]
+async fn me_required_returns_503_when_resolve_is_unavailable() {
+    let resolve = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/resolve"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&resolve)
+        .await;
+
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    cfg.me.permissions.enabled = true;
+    cfg.me.permissions.required = true;
+    cfg.me.permissions.resolve_url = format!("{}/resolve", resolve.uri());
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(&state, serde_json::json!({"sub": "user-1"})).await;
+
+    let resp = common::test_client()
+        .get(format!("{bff}/api/me"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503, "required 模式下失败必须显式报错");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "permissions_unavailable");
+    resolve.verify().await;
+}
+
+#[tokio::test]
+async fn me_required_maps_authority_401_to_401() {
+    let resolve = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/resolve"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&resolve)
+        .await;
+
+    let mut cfg = common::base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    cfg.me.permissions.enabled = true;
+    cfg.me.permissions.required = true;
+    cfg.me.permissions.resolve_url = format!("{}/resolve", resolve.uri());
+    let state = common::make_state(cfg);
+    let bff = common::spawn_business(state.clone()).await;
+    let cookie = login_with_claims(&state, serde_json::json!({"sub": "user-1"})).await;
+
+    let resp = common::test_client()
+        .get(format!("{bff}/api/me"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "permissions_unauthorized");
+    resolve.verify().await;
+}
+
+#[tokio::test]
+async fn me_site_resolve_url_override_routes_to_site_authority() {
+    let global = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "roles": ["global"]
+        })))
+        .expect(0)
+        .mount(&global)
+        .await;
+    let site_authority = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "roles": ["site"]
+        })))
+        .expect(1)
+        .mount(&site_authority)
+        .await;
+
+    let idp = common::spawn_mock_oidc_provider().await;
+    let mut cfg = common::multisite_config(&idp, &idp);
+    cfg.me.permissions.enabled = true;
+    cfg.me.permissions.resolve_url = format!("{}/resolve", global.uri());
+    cfg.sites[0].me = Some(bff::config::SiteMeOverride {
+        permissions_enabled: None,
+        identity_claims: None,
+        resolve_url: Some(format!("{}/resolve", site_authority.uri())),
+    });
+    let state = common::make_state(cfg);
+    let app1 = common::spawn_site(&state, "app1").await;
+    let client = common::test_client();
+    let cookie = common::login_on(&client, &idp, &app1, "pA", None).await;
+
+    let body = me_body(&app1, &cookie).await;
+    assert_eq!(body["permissions"]["roles"], serde_json::json!(["site"]));
+    site_authority.verify().await;
+    global.verify().await;
+}
+
+#[tokio::test]
 async fn me_omits_permissions_by_default_and_never_calls_resolve() {
     let resolve = MockServer::start().await;
     Mock::given(method("POST"))
@@ -403,6 +556,7 @@ async fn me_site_policy_can_disable_permissions() {
     cfg.sites[1].me = Some(bff::config::SiteMeOverride {
         permissions_enabled: Some(false),
         identity_claims: None,
+        resolve_url: None,
     });
     let state = common::make_state(cfg);
     let a = common::spawn_site(&state, "app1").await;
