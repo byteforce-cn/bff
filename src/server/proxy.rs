@@ -69,9 +69,10 @@ pub async fn forward_request(
         ));
     }
 
-    let path = req.uri().path();
+    // 拥有所有权：多上游切换需要在请求体被 move 之后继续拼 URL。
+    let path = req.uri().path().to_string();
     let suffix = if route.config.strip_prefix {
-        path.strip_prefix(&route.path).unwrap_or("")
+        path.strip_prefix(&route.path).unwrap_or("").to_string()
     } else {
         path
     };
@@ -81,6 +82,7 @@ pub async fn forward_request(
         .map(|q| format!("?{}", q))
         .unwrap_or_default();
     let url = format!("{}{}{}", upstream, suffix, query);
+    let suffix = suffix.as_str();
 
     let method = req.method().clone();
     // 提取请求 ID 用于传播到上游
@@ -136,72 +138,101 @@ pub async fn forward_request(
         _ => {
             // 上游并发舱壁（0 = 不限制；仅 http 模式，占用至响应读取完成）
             use crate::state::BulkheadDecision;
-            let _permit = match state.upstream_limits.try_acquire(upstream) {
-                BulkheadDecision::Disabled => None,
-                BulkheadDecision::Acquired(p) => Some(p),
-                BulkheadDecision::Saturated => {
-                    metrics::counter!("bff_upstream_saturated_total", "upstream" => upstream.to_string())
-                        .increment(1);
-                    return Err(AppError::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "服务繁忙，请稍后重试",
-                    ));
-                }
+            // 多上游池（issue #97）：轮询起点 + 连接失败自动切换。
+            // 只在「连接未建立」（请求未被上游接收）时切换，避免重复写请求。
+            let pool = route.config.upstream_pool();
+            let pool: Vec<String> = if pool.is_empty() {
+                vec![upstream.to_string()]
+            } else {
+                pool
             };
-            let method_c = method.clone();
-            let body_c = body_bytes.to_vec();
-            let auth_c = auth_token.clone();
-            let timeout = route.config.timeout;
+            let start = pool_start(pool.len());
+            let mut last_err: Option<AppError> = None;
+            for offset in 0..pool.len() {
+                let candidate = &pool[(start + offset) % pool.len()];
+                let candidate_url = format!("{}{}{}", candidate, suffix, query);
+                let _permit = match state.upstream_limits.try_acquire(candidate) {
+                    BulkheadDecision::Disabled => None,
+                    BulkheadDecision::Acquired(p) => Some(p),
+                    BulkheadDecision::Saturated => {
+                        metrics::counter!("bff_upstream_saturated_total", "upstream" => candidate.to_string())
+                            .increment(1);
+                        return Err(AppError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "服务繁忙，请稍后重试",
+                        ));
+                    }
+                };
+                let resp = match proxy_http(
+                    state,
+                    candidate,
+                    &breaker_key,
+                    &candidate_url,
+                    method.clone(),
+                    body_bytes.to_vec(),
+                    auth_token.clone(),
+                    request_id.as_deref(),
+                    &passthrough_headers,
+                    route.config.timeout,
+                    forward_set_cookie,
+                )
+                .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) if e.connect_failure && offset + 1 < pool.len() => {
+                        metrics::counter!(
+                            "bff_proxy_upstream_failover_total",
+                            "route" => route.path.clone()
+                        )
+                        .increment(1);
+                        tracing::warn!(
+                            route = %route.path,
+                            upstream = %candidate,
+                            error = %e,
+                            "上游连接失败，切换到池内下一个实例"
+                        );
+                        last_err = Some(e);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
 
-            let resp = proxy_http(
-                state,
-                upstream,
-                &breaker_key,
-                &url,
-                method_c,
-                body_c,
-                auth_c,
-                request_id.as_deref(),
-                &passthrough_headers,
-                timeout,
-                forward_set_cookie,
-            )
-            .await?;
-
-            // 上游返回 401 且请求携带了 token → 刷新会话 token 后重试一次。
-            // 必须复用 resolve_auth_token：exchange 路由会因 subject token 指纹变化
-            // 自动重交换（§5.3/§6.3），普通路由则重新注入新的会话 access token。
-            if resp.status() == StatusCode::UNAUTHORIZED && auth_token.is_some() {
-                if let Some(tokens) = current_tokens(&site.view, session).await {
-                    if force_refresh(state, &site.view, session, &tokens)
-                        .await
-                        .is_ok()
-                    {
-                        if let Ok(Some(new_token)) =
-                            resolve_auth_token(state, site, session, route).await
+                // 上游返回 401 且请求携带了 token → 刷新会话 token 后重试一次（同一实例）。
+                // 必须复用 resolve_auth_token：exchange 路由会因 subject token 指纹变化
+                // 自动重交换（§5.3/§6.3），普通路由则重新注入新的会话 access token。
+                if resp.status() == StatusCode::UNAUTHORIZED && auth_token.is_some() {
+                    if let Some(tokens) = current_tokens(&site.view, session).await {
+                        if force_refresh(state, &site.view, session, &tokens)
+                            .await
+                            .is_ok()
                         {
-                            let retry_resp = proxy_http(
-                                state,
-                                upstream,
-                                &breaker_key,
-                                &url,
-                                method,
-                                body_bytes.to_vec(),
-                                Some(new_token),
-                                request_id.as_deref(),
-                                &passthrough_headers,
-                                timeout,
-                                forward_set_cookie,
-                            )
-                            .await?;
-                            if retry_resp.status() != StatusCode::UNAUTHORIZED {
-                                return Ok(retry_resp);
+                            if let Ok(Some(new_token)) =
+                                resolve_auth_token(state, site, session, route).await
+                            {
+                                let retry_resp = proxy_http(
+                                    state,
+                                    candidate,
+                                    &breaker_key,
+                                    &candidate_url,
+                                    method,
+                                    body_bytes.to_vec(),
+                                    Some(new_token),
+                                    request_id.as_deref(),
+                                    &passthrough_headers,
+                                    route.config.timeout,
+                                    forward_set_cookie,
+                                )
+                                .await?;
+                                if retry_resp.status() != StatusCode::UNAUTHORIZED {
+                                    return Ok(retry_resp);
+                                }
                             }
                         }
                     }
                 }
+                return Ok(resp);
             }
-            Ok(resp)
+            Err(last_err.unwrap_or_else(|| AppError::bad_gateway("上游服务暂不可用")))
         }
     }
 }
@@ -239,6 +270,16 @@ fn passthrough_headers(headers: &HeaderMap) -> HeaderMap {
         out.insert(name.clone(), value.clone());
     }
     out
+}
+
+/// 多上游轮询游标（进程级；只影响起点，不保证严格公平）。
+static UPSTREAM_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn pool_start(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    UPSTREAM_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % len
 }
 
 /// 标准 HTTP 代理：一次性 reqwest 请求-响应。
@@ -357,25 +398,38 @@ async fn proxy_http(
             }
             Err(e) => {
                 state.breakers.record_failure(breaker_key).await;
+                let connect = e.is_connect();
+                let msg = format!("上游调用失败: {}", e);
                 if is_idempotent && attempt < max_retries {
-                    last_err = Some(AppError::bad_gateway(format!(
-                        "上游调用失败: {}（将重试）",
-                        e
-                    )));
+                    last_err = Some(if connect {
+                        AppError::bad_gateway_connect(format!("{msg}（将重试）"))
+                    } else {
+                        AppError::bad_gateway(format!("{msg}（将重试）"))
+                    });
                     continue;
                 }
-                last_err = Some(AppError::bad_gateway(format!("上游调用失败: {}", e)));
+                last_err = Some(if connect {
+                    AppError::bad_gateway_connect(msg)
+                } else {
+                    AppError::bad_gateway(msg)
+                });
             }
         }
     }
 
     // 所有重试均已耗尽
+    let connect_failure = last_err.as_ref().is_some_and(|e| e.connect_failure);
     if let Some(e) = &last_err {
         tracing::warn!(upstream, error = %e, "代理请求最终失败");
     }
     metrics::counter!("bff_proxy_error_total", "upstream" => upstream.to_string()).increment(1);
-    // 对外统一文案（详情已进日志，可用 x-request-id 关联）
-    Err(AppError::bad_gateway("上游服务暂不可用"))
+    // 对外统一文案（详情已进日志，可用 x-request-id 关联）；保留「连接未建立」标记
+    // 供多上游池判断是否可安全切换。
+    Err(if connect_failure {
+        AppError::bad_gateway_connect("上游服务暂不可用")
+    } else {
+        AppError::bad_gateway("上游服务暂不可用")
+    })
 }
 
 /// 按上限读取响应体（reqwest 无默认上限；大响应会造成内存膨胀/OOM）。

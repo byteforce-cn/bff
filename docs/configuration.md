@@ -299,7 +299,7 @@ routes:
 | --- | --- |
 | `oidc.providers` | Provider 列表：`id` / `issuer_url` / `client_id` / `client_secret` / `scopes` / `callback_path` / `shared_across_sites` 等；支持管理端动态维护（热生效，`callback_path` 集合变化除外） |
 | `token_refresh.skip_prefixes` | 跳过令牌刷新检查的路径前缀（登录 / 回调 / 静态资源等） |
-| `routes`（`routes/routes.yaml`） | 统一路由表；字段与行为见 [architecture.md](architecture.md)「统一路由分发」 |
+| `routes`（`routes/routes.yaml`） | 统一路由表；字段与行为见 [architecture.md](architecture.md)「统一路由分发」；多副本上游用 `config.upstreams`（与 `upstream` 二选一，轮询 + 连接失败切换） |
 | `pipelines`（`pipelines/*.yaml`） | 服务编排 DAG 定义 |
 
 ## 环境变量

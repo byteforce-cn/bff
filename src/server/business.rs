@@ -244,7 +244,7 @@ async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
         let mut set = std::collections::HashSet::new();
         for route in &cfg.routes {
             if let crate::config::RouteType::Proxy = route.route_type {
-                if let Some(ref u) = route.config.upstream {
+                for u in route.config.upstream_pool() {
                     set.insert(u.trim_end_matches('/').to_string());
                 }
             }
@@ -438,7 +438,7 @@ async fn ws_upgrade_handler(
         return AppError::bad_request("该路由未启用 WebSocket 代理模式").into_response();
     }
 
-    let upstream = match route.config.upstream.as_deref() {
+    let upstream = match route.config.primary_upstream() {
         Some(u) => u.trim_end_matches('/').to_string(),
         None => return AppError::bad_request("WebSocket 路由缺少 upstream").into_response(),
     };
