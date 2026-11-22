@@ -20,6 +20,12 @@ jobs:
   audit:
     name: Dependency audit (RustSec)
     runs-on: ubuntu-latest
+    # 仓库默认 GITHUB_TOKEN 为只读；rustsec/audit-check 需要创建 check run
+    # （push 到 main 时缺 checks: write 会以
+    #  "Resource not accessible by integration" 失败，即使 0 漏洞）。
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       # 依赖漏洞与维护状态审计。
