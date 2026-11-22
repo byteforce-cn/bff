@@ -1,7 +1,7 @@
 {
   "name": "bff-demo-spa",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "BFF 演示 SPA（本地联调与契约验证）",
   "license": "MIT",
   "repository": {
