@@ -1,6 +1,6 @@
 [package]
 name = "bff"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "通用型 Backend-For-Frontend 中间件（Rust/Axum）：OIDC 登录、YAML 服务编排、反向代理与内嵌管理台"
 license = "MIT"
