@@ -11,6 +11,11 @@
 ### Added
 
 - `/api/me` 身份白名单可配置（issue #129）：`me.identity_claims` 支持按站点覆盖，透传 `tenant_id` / `roles` 等标准 claim；敏感/保留 claim 始终拒绝，响应体上限 8 KiB，丢弃原因由 `bff_me_identity_claim_dropped_total{reason}` 观测
+- `/api/me` 权限视图可声明式对接标准授权权威（issue #128）：`me.permissions.request`
+  （method / headers 模板 / body 模板）与 `me.permissions.response`
+  （roles/permissions JSON 路径 + `passthrough`）可配置，`required: true` 时失败返回 401/503
+  而非静默降级，站点级 `resolve_url` 可覆盖；新增
+  `bff_me_permissions_resolve_total{site,result}` 与耗时指标，失败日志带 site/provider/sub（不含令牌）
 - `GET /api/me`：同源只读的「当前用户与会话」视图（身份取自 ID Token，**不含任何令牌**）；未登录返回 `200 {"logged_in": false}`；可选的权限视图（`me.permissions`，缺省关闭，站点可覆盖）由下游授权权威 `/resolve` 解析并按 `site+provider+sub` 缓存，失败/超时降级为不返回该字段
 
 ### Changed
