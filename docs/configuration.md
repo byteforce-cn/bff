@@ -246,6 +246,38 @@ profile 名匹配 `[a-z0-9-]+`。
 | `scripting` | `max_duration: 2s` | QuickJS 执行时长上限 |
 | `health` | `upstreams`（空则从 routes 推导）、`probe_timeout: 2s`、`allow_degraded`、`probe_path` | `/ready` 探针行为 |
 
+### WebSocket 首帧认证注入（route 级 `ws_auth_frame`）
+
+浏览器按 BFF 设计不接触令牌，长连接协议若把认证放在应用层首帧（如 IM 的
+`LOGIN_REQ {access_token}`），浏览器无法自行填写。`proxy` 路由配置
+`ws_auth_frame` 后，BFF 在**上游握手成功后、开始双向 relay 前**补发一帧：
+
+```yaml
+routes:
+  - path: "/im/ws"
+    type: proxy
+    auth_required: true
+    config:
+      upstream: "ws://im.internal:8080/ws"
+      proxy_mode: "websocket"
+      ws_auth_frame:
+        payload: '{"type":"LOGIN_REQ","access_token":"{{access_token}}","site":"{{site}}"}'
+        binary: false        # true = 以二进制帧发送
+```
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `payload` | 必填 | 首帧模板（≤ 8 KiB）。变量：`{{access_token}}` / `{{sub}}` / `{{provider}}` / `{{site}}` / `{{now}}` |
+| `binary` | `false` | `false` = 文本帧（模板必须是合法 JSON，变量按 JSON 字符串转义注入）；`true` = 二进制帧（变量原样注入字节） |
+
+约束与可观测：
+
+- 仅适用于 `type: proxy` 且 `proxy_mode: websocket|auto`；使用 `{{access_token}}` 时要求
+  `auth_required: true`，无会话/令牌不可用直接 401（不会向浏览器泄露令牌）；
+- 令牌只出现在上游帧里：不进入 URL、日志（日志只记错误与长度）或浏览器；
+- 发送失败 / 首帧非 UTF-8（文本帧）→ 以 1011 关闭隧道，客户端可重连（重连会重新读取会话令牌）；
+- 结果计入 `bff_ws_auth_frame_total{site,result}`（`ok` / `failed` / `invalid`）。
+
 ### persistence — 配置持久化（可选）
 
 | 字段 | 默认 | 说明 |

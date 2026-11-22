@@ -20,6 +20,7 @@ use axum::routing::get;
 use axum::Router;
 use bff::config::{
     InputMapping, OutputMapping, RouteDef, RouteType, RouteTypeConfig, WebSocketTunnelConfig,
+    WsAuthFrameConfig,
 };
 use common::{base_config, login_cookie, make_state, spawn_business};
 use futures::{SinkExt, StreamExt};
@@ -38,6 +39,9 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 // 进程内 WS 回显上游
 // ============================================================
 
+/// 上游收到的第一帧：`(是否二进制, 载荷)`。
+type FirstFrame = Option<(bool, Vec<u8>)>;
+
 #[derive(Clone)]
 struct UpstreamState {
     /// 升级握手时收到的 Authorization 头（None = 未收到）
@@ -46,6 +50,8 @@ struct UpstreamState {
     close_code: Arc<Mutex<Option<Option<u16>>>>,
     /// 非空时：升级后立即向 BFF 发送该大小的文本消息
     oversize_on_connect: Arc<Mutex<Option<usize>>>,
+    /// 上游收到的第一帧（`(是否二进制, 载荷)`）
+    first_frame: Arc<Mutex<FirstFrame>>,
 }
 
 impl Default for UpstreamState {
@@ -54,6 +60,7 @@ impl Default for UpstreamState {
             auth_header: Arc::new(Mutex::new(None)),
             close_code: Arc::new(Mutex::new(None)),
             oversize_on_connect: Arc::new(Mutex::new(None)),
+            first_frame: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -101,6 +108,16 @@ async fn upstream_session(
         let _ = sink.send(AxMessage::Text("x".repeat(n).into())).await;
     }
     while let Some(Ok(msg)) = stream.next().await {
+        {
+            let mut first = st.first_frame.lock().unwrap();
+            if first.is_none() {
+                match &msg {
+                    AxMessage::Text(t) => *first = Some((false, t.as_bytes().to_vec())),
+                    AxMessage::Binary(b) => *first = Some((true, b.to_vec())),
+                    _ => {}
+                }
+            }
+        }
         match msg {
             AxMessage::Text(t) => {
                 if sink
@@ -352,6 +369,85 @@ async fn ws_auth_required_rejects_anonymous_and_injects_bearer() {
 // ============================================================
 // 3. 路由约束
 // ============================================================
+
+#[tokio::test]
+async fn ws_auth_frame_injected_before_relay() {
+    let (upstream, st) = spawn_ws_upstream().await;
+    let mut cfg = base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    let mut route = ws_route(&upstream, true, "websocket");
+    route.config.ws_auth_frame = Some(WsAuthFrameConfig {
+        payload: r#"{"type":"LOGIN_REQ","access_token":"{{access_token}}","site":"{{site}}"}"#
+            .into(),
+        binary: false,
+    });
+    cfg.routes.push(route);
+    let state = make_state(cfg);
+    let base = spawn_business(state.clone()).await;
+    let cookie = login_cookie(&state).await;
+
+    let (mut ws, _) = ws_connect(&base, "/ws", Some(&cookie))
+        .await
+        .expect("WS 升级应成功");
+
+    assert!(
+        wait_for(
+            || st.first_frame.lock().unwrap().is_some(),
+            Duration::from_secs(3)
+        )
+        .await,
+        "上游应收到首帧"
+    );
+    let (binary, payload) = st.first_frame.lock().unwrap().clone().unwrap();
+    assert!(!binary, "默认以文本帧注入");
+    let v: serde_json::Value = serde_json::from_slice(&payload).expect("首帧应为 JSON");
+    assert_eq!(v["type"], "LOGIN_REQ");
+    assert_eq!(v["access_token"], "test-access-token");
+    assert_eq!(v["site"], "default");
+
+    // 回显上游会把登录帧原样回显给客户端（隧道是透传的），先消费它
+    let echoed = next_text(&mut ws, Duration::from_secs(3)).await;
+    assert!(echoed.contains("LOGIN_REQ"), "登录帧回显: {echoed}");
+
+    // 首帧之后双向 relay 正常
+    ws.send(Message::Text("hello".into())).await.unwrap();
+    assert_eq!(
+        next_text(&mut ws, Duration::from_secs(3)).await,
+        "echo:hello"
+    );
+}
+
+#[tokio::test]
+async fn ws_auth_frame_supports_binary() {
+    let (upstream, st) = spawn_ws_upstream().await;
+    let mut cfg = base_config();
+    cfg.oidc.providers.push(common::synthetic_provider_cfg());
+    let mut route = ws_route(&upstream, true, "websocket");
+    route.config.ws_auth_frame = Some(WsAuthFrameConfig {
+        payload: "LOGIN {{access_token}}".into(),
+        binary: true,
+    });
+    cfg.routes.push(route);
+    let state = make_state(cfg);
+    let base = spawn_business(state.clone()).await;
+    let cookie = login_cookie(&state).await;
+
+    let (_ws, _) = ws_connect(&base, "/ws", Some(&cookie))
+        .await
+        .expect("WS 升级应成功");
+
+    assert!(
+        wait_for(
+            || st.first_frame.lock().unwrap().is_some(),
+            Duration::from_secs(3)
+        )
+        .await,
+        "上游应收到首帧"
+    );
+    let (binary, payload) = st.first_frame.lock().unwrap().clone().unwrap();
+    assert!(binary, "binary: true 应以二进制帧发送");
+    assert_eq!(payload, b"LOGIN test-access-token");
+}
 
 #[tokio::test]
 async fn ws_route_constraints() {

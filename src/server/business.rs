@@ -455,6 +455,32 @@ async fn ws_upgrade_handler(
         None
     };
 
+    // 首帧认证注入（issue #130）：浏览器不接触令牌，协议级登录帧由 BFF 在握手后补发。
+    let auth_frame = match route.config.ws_auth_frame.as_ref() {
+        None => None,
+        Some(frame_cfg) => {
+            let Some(tokens) = ctx.view.current_tokens(&session).await else {
+                return AppError::unauthorized("未登录或会话已过期").into_response();
+            };
+            let Ok(token) = tokens.access_token() else {
+                return AppError::unauthorized("会话令牌不可用").into_response();
+            };
+            match tunnel::build_auth_frame(
+                frame_cfg,
+                &ctx.view.name,
+                &tokens.sub,
+                &tokens.provider,
+                &token,
+            ) {
+                Some(frame) => Some(frame),
+                None => {
+                    tracing::error!("WebSocket 首帧模板渲染失败（启动期应已校验）");
+                    return AppError::internal("WebSocket 首帧配置非法").into_response();
+                }
+            }
+        }
+    };
+
     // 尊重 strip_prefix 配置（与 forward_request 保持一致）
     let suffix = if route.config.strip_prefix {
         path.strip_prefix(&route.path).unwrap_or("")
@@ -478,7 +504,12 @@ async fn ws_upgrade_handler(
         }
     };
 
-    ws.on_upgrade(move |client_ws| tunnel::ws_tunnel(client_ws, url, auth_token, tunnel_cfg))
+    let tunnel_auth = tunnel::TunnelAuth {
+        site: ctx.view.name.clone(),
+        token: auth_token,
+        frame: auth_frame,
+    };
+    ws.on_upgrade(move |client_ws| tunnel::ws_tunnel(client_ws, url, tunnel_auth, tunnel_cfg))
 }
 
 /// SPA 静态资源 + 前端路由 fallback 到 index.html（使用站点 spa.dir，§9）。
